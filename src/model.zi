@@ -17,8 +17,6 @@ Photo :: struct {
     thumbnail: [4097]u8
     original: [4097]u8
     date: [32]u8
-    caption: [8193]u8
-    tags: [8193]u8
     kind: [16]u8
     favorite: bool
     hidden: bool
@@ -26,7 +24,7 @@ Photo :: struct {
     width: s32
     height: s32
 }
-photos: [60]Photo;
+photos: Vec(Photo);
 count: s32;
 total: s32;
 matches: s32;
@@ -43,7 +41,17 @@ summary: [257]u8;
 selected: s32 = -1;
 scroll: s32;
 offset: s32;
+feed_base: s32;
+revision: s64;
 loading: bool;
+busy: bool;
+appending: bool;
+more_due: s64;
+queued_view: s32 = -1;
+queued_request: bool;
+queued_action: [32]u8;
+queued_id: [65]u8;
+queued_value: [4097]u8;
 initialized: bool;
 next_refresh: s64;
 ticks: s64;
@@ -73,7 +81,11 @@ Quoted :: (out: *Vec(u8), value: string) {
 }
 Property :: (out: *Vec(u8), key: string, value: string) { BuilderPrint(out, ",\"%\":", key); Quoted(out, value) }
 Request :: (action: string = "query", id: string = "", value: string = "") {
-    if loading { return }
+    if loading { Set(queued_action[:], action); Set(queued_id[:], id); Set(queued_value[:], value); queued_request = true; return }
+    SendRequest(action, id, value)
+}
+SendRequest :: (action: string, id: string, value: string) {
+    if action != "query" { offset = ifx selected >= 0 then (selected + feed_base) / 60 * 60 else feed_base; appending = false }
     out: Vec(u8)
     BuilderPrint(*out, "{\"action\":"); Quoted(*out, action)
     Property(*out, "view", view); Property(*out, "search", TextUntilNul(search[:]))
@@ -82,8 +94,8 @@ Request :: (action: string = "query", id: string = "", value: string = "") {
     request := BuilderFinish(out)
     loading = Transport.Start(request)
     Release(request)
-    if !loading { Set(message[:], Transport.error) }
-    next_refresh = ticks + 180
+    if !loading { Set(message[:], Transport.error); if appending { more_due = ticks + 300; appending = false } }
+    busy = loading && action != "query"; next_refresh = ticks + 300
 }
 Decode :: (json: string, at: s32, key: string, out: []u8) {
     size := ReadStringText(json, FieldAt(json, at, key), out)
@@ -98,28 +110,29 @@ Tick :: () {
     ticks += 1;
     if !initialized { initialized = true; Request() }
     if Transport.Poll() {
-        loading = false
-        if Transport.error != "" { Set(message[:], Transport.error); return }
+        loading = false; busy = false
+        if Transport.error != "" { Set(message[:], Transport.error); if appending { more_due = ticks + 300; appending = false }; return }
         json := Transport.Value()
-        Decode(json, 0, "error", message[:]); if message[0] != 0 { return }
+        Decode(json, 0, "error", message[:]); if message[0] != 0 { if appending { more_due = ticks + 300; appending = false }; return }
         total = Number(json, 0, "total"); matches = Number(json, 0, "count"); pending = Number(json, 0, "pending")
         Decode(json, 0, "status", message[:])
         previous: [65]u8
         if selected >= 0 && selected < count { Set(previous[:], TextUntilNul(photos[selected].id[:])) }
-        selected = -1
-        array := FieldAt(json, 0, "photos"); at := Space(json, array + 1); count = 0
-        while at >= 0 && at < cast(s32)json.count && json[at] != 93 && count < 60 {
-            photo := *photos[count]; photo.* = .{}
+        if !appending { selected = -1; VecClear(photos); count = 0; feed_base = offset }; revision += 1
+        array := FieldAt(json, 0, "photos"); at := Space(json, array + 1); page_count: s32
+        while at >= 0 && at < cast(s32)json.count && json[at] != 93 && page_count < 60 {
+            empty: Photo; if !VecPush(photos, empty) { Set(message[:], "Unable to load more photos"); break }
+            photo := *photos[count]
             Decode(json, at, "id", photo.id[:]); Decode(json, at, "name", photo.name[:])
             Decode(json, at, "thumbnail", photo.thumbnail[:]); Decode(json, at, "original", photo.original[:])
-            Decode(json, at, "date", photo.date[:]); Decode(json, at, "caption", photo.caption[:])
-            Decode(json, at, "tags", photo.tags[:]); Decode(json, at, "kind", photo.kind[:])
+            Decode(json, at, "date", photo.date[:]); Decode(json, at, "kind", photo.kind[:])
             photo.favorite = Number(json, at, "favorite") > 0
             photo.hidden = Number(json, at, "hidden") > 0; photo.trashed = Number(json, at, "trashed") > 0
             photo.width = Number(json, at, "width"); photo.height = Number(json, at, "height")
             if TextUntilNul(photo.id[:]) == TextUntilNul(previous[:]) && previous[0] != 0 { selected = count }
-            count += 1; at = Space(json, ValueEnd(json, at, 0)); if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json, at + 1) }
+            count += 1; page_count += 1; at = Space(json, ValueEnd(json, at, 0)); if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json, at + 1) }
         }
+        appending = false
         array = FieldAt(json, 0, "albums"); at = Space(json, array + 1); album_count = 0
         while at >= 0 && at < cast(s32)json.count && json[at] != 93 && album_count < 256 {
             Decode(json, at, "name", albums[album_count][:]); album_counts[album_count] = Number(json, at, "count")
@@ -128,14 +141,19 @@ Tick :: () {
         text: Vec(u8); BuilderPrint(*text, "% photos & videos · % albums · % queued", total, album_count, pending)
         value := BuilderFinish(text); Set(summary[:], value); Release(value)
     }
-    if !loading && ticks > next_refresh { Request() }
+    if !loading && queued_view >= 0 { target := queued_view; queued_view = -1; Navigate(View(target)); return }
+    if !loading && queued_request {
+        queued_request = false; SendRequest(TextUntilNul(queued_action[:]), TextUntilNul(queued_id[:]), TextUntilNul(queued_value[:])); return
+    }
+    if !loading && ticks > next_refresh && scroll == 0 && selected < 0 { offset = 0; Request() }
 }
 Navigate :: (target: string) {
-    if loading { return }
-    view = target; album[0] = 0; selected = -1; offset = 0; scroll = 0; Request()
+    queued_request = false
+    if loading { for i: 0..cast(s32)6 { if View(i) == target { queued_view = i } }; return }
+    view = target; appending = false; feed_base = 0; album[0] = 0; selected = -1; offset = 0; scroll = 0; Request()
 }
 Choose :: (index: s32) {
-    if loading || index < 0 || index >= count { return }
+    if busy || index < 0 || index >= count { return }
     selected = index
     if photos[index].original[0] == 0 { Request("open", TextUntilNul(photos[index].id[:])) }
 }
@@ -148,3 +166,11 @@ Edit :: (out: []u8, start: s32, end: s32, replacement: string) {
     else { for i: end..length { out[i + shift] = out[i] } }
     for i: 0..inserted - 1 { out[start + i] = copied[i] }
 }
+
+// Append another page near the end of the date feed without changing its scroll.
+More :: () {
+    if loading || ticks < more_due || count + feed_base >= matches || view == "albums" || view == "sync" { return }
+    offset = count + feed_base; appending = true; Request()
+}
+
+View :: (index: s32) -> string { names: [7]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync"}; return names[index] }

@@ -65,7 +65,7 @@ with tempfile.TemporaryDirectory() as folder:
         subprocess.run(['import','-window',window,str(output/'albums.png')],check=True)
         action('Local sync');state('sync')
         subprocess.run(['import','-window',window,str(output/'sync.png')],check=True)
-        xdo('windowsize',window,720,880);action('Library');state('photos')
+        xdo('windowsize',window,720,880);action('Photos');state('photos')
         subprocess.run(['import','-window',window,str(output/'narrow.png')],check=True)
         print('Private Xvfb gallery, album navigation, persisted favorite, local sync screen and narrow layout verified')
     finally:

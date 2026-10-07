@@ -11,16 +11,16 @@
       "url": "https://github.com/raysan5/raylib.git"
     },
     {
-      "commit": "47835ea34fc3225606a093542a337c2dc33db091",
+      "commit": "adb895c7638a0fff285451062c28f19d63f356d0",
       "dependencies": {"raylib": "p5a77c9c35110e925"},
-      "id": "p90aef349078560b1",
+      "id": "p9f672cea7f3781b5",
       "name": "kryon",
       "ref": "master",
       "url": "https://github.com/kryonlabs/kryon.git"
     },
     {
       "commit": "86c366c9e183cd152683d24cac6a2603cad64ab9",
-      "dependencies": {"kryon": "p90aef349078560b1"},
+      "dependencies": {"kryon": "p9f672cea7f3781b5"},
       "id": "padff2d5df1fdb5ee",
       "name": "Kss",
       "ref": "master",
@@ -28,11 +28,11 @@
     }
   ],
   "root": {
-    "dependencies": {"kryon": "p90aef349078560b1", "kss": "padff2d5df1fdb5ee"},
+    "dependencies": {"kryon": "p9f672cea7f3781b5", "kss": "padff2d5df1fdb5ee"},
     "name": "photos"
   },
   "toolchain": {
-    "commit": "8c029918da078503ad3deb91286b727d8c3d2d09",
+    "commit": "dfb56e2e8265abe3694dc0e21223559e4b953dfb",
     "ref": "master",
     "url": "https://github.com/ziranlang/ziran.git"
   }

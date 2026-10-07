@@ -26,11 +26,21 @@ def process(request, config):
         library.db.close()
 
 
+def ui_query(library, request):
+    result = library.query(request.get('view', 'photos'), request.get('search', ''),
+                           request.get('album', ''), request.get('offset', 0))
+    # The gallery needs only these fields. Full metadata and encrypted sync
+    # manifests stay in the store rather than being decoded on every UI poll.
+    fields = ('id', 'name', 'thumbnail', 'original', 'date', 'kind', 'favorite',
+              'hidden', 'trashed', 'width', 'height')
+    result['photos'] = [{key: photo[key] for key in fields} for photo in result['photos']]
+    return result
+
+
 def library_request(library, request, config):
     action = request.get('action', 'query')
     if action == 'query':
-        result = library.query(request.get('view', 'photos'), request.get('search', ''),
-                               request.get('album', ''), request.get('offset', 0))
+        result = ui_query(library, request)
         if config.get('node'):
             client = None
             for photo in result['photos']:
@@ -56,8 +66,7 @@ def library_request(library, request, config):
         photo = library.photo(request['id'])
         if not library.original(photo).exists():
             Client(library, config).materialize(photo['id'])
-        result = library.query(request.get('view', 'photos'), request.get('search', ''),
-                               request.get('album', ''), request.get('offset', 0))
+        result = ui_query(library, request)
         result['opened'] = request['id']
         return result
     elif action == 'export':
@@ -68,8 +77,7 @@ def library_request(library, request, config):
         library.set_setting('status', 'Original and metadata exported to ' + str(Path(exported).parent))
     else:
         library.edit(request['id'], action, request.get('value'))
-    return library.query(request.get('view', 'photos'), request.get('search', ''),
-                         request.get('album', ''), request.get('offset', 0))
+    return ui_query(library, request)
 
 
 def daemon(config, once=False):

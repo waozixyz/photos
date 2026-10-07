@@ -43,6 +43,20 @@ class LibraryTest(unittest.TestCase):
         self.assertEqual(before, first.read_bytes())
         self.assertEqual(self.library.import_folders([first.parents[1]])['unchanged'], 1)
 
+    def test_gallery_response_is_small_and_keeps_newest_dates_first(self):
+        from photos.worker import library_request
+        first = self.export('desktop', 'Old', 'red')
+        second = self.export('desktop', 'New', 'blue')
+        self.library.import_folders([first.parents[1]])
+        self.library.db.execute('UPDATE photos SET taken=? WHERE id=?', (1700000000, digest_file(second)))
+        self.library.db.commit()
+        response = library_request(self.library, {}, {})
+        self.assertEqual(response['photos'][0]['id'], digest_file(second))
+        self.assertGreater(response['photos'][0]['date'], response['photos'][1]['date'])
+        self.assertNotIn('metadata', response['photos'][0])
+        self.assertNotIn('manifest', response['photos'][0])
+        self.assertEqual(self.library.photo(digest_file(second))['caption'], 'A preserved caption')
+
     def test_identical_names_with_different_bytes_stay_separate(self):
         first = self.export('desktop', 'Holiday', 'red')
         second = self.export('cli', 'Holiday', 'blue')

@@ -19,7 +19,10 @@ device signatures; downloaded originals must match their SHA-256 and size.
 The ThinkPad node stores a complete encrypted copy. Photos retrieves previews
 and materializes originals when needed; its installed index is private local data.
 
-Browse the library, albums, favorites, videos, hidden items and recoverable
+Photos opens to a newest-first feed grouped by day. Older photos load as you
+scroll, with only visible thumbnails drawn. The app follows Harmony’s colors
+when hosted, including changes while it is open. Background library updates
+keep browsing controls available. Browse albums, favorites, videos, hidden items and recoverable
 Trash. Search names, dates, captions, tags and albums. Select a photo to view its
 original, favorite it, move it to Trash, or restore it. Enter an album name,
 caption, tags or export folder in the input above, then use the corresponding

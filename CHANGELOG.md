@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1
+
+- Open to a newest-first photo feed grouped by day, loading older photos as you scroll.
+- Follow Harmony's colors, including theme changes while Photos is open.
+- Keep browsing responsive during background library updates.
+
 ## 0.1.0
 
 - Photos runs on its own and opens inside Harmony.

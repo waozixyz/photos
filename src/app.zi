@@ -2,35 +2,73 @@ using UI :: #import "kryon/Widgets";
 using Model :: #import "model";
 #if #defined(POSIX_THREADS) {
     Window :: #import "desktop";
-    SystemStyle :: #import "kss/SystemStyle";
-    SystemThemeLinux :: #import "kryon/SystemThemeLinux";
+    HostTheme :: #import "kryon/SystemThemeHostLinux";
     Record :: (id: s32, label: string, bounds: Rectangle, enabled: bool) {
         Window.Record(id, label, bounds.x, bounds.y, bounds.width, bounds.height, enabled)
     }
     Prepare :: () {
         Window.control_count = 0;
-        if !theme_ready { SystemStyle.StyleInstallSystem(SystemThemeLinux.SystemPaletteRead()); theme_ready = true }
+        PrepareTheme()
     }
     Publish :: () { Window.Publish() }
-    BackgroundColor :: () -> Color { return StyleTokenColor("surface") }
 } else {
     Record :: (id: s32, label: string, bounds: Rectangle, enabled: bool) {}
-    Prepare :: () {}
+    HostTheme :: #import "kryon/SystemThemeHost";
+    Prepare :: () { PrepareTheme() }
     Publish :: () {}
-    BackgroundColor :: () -> Color { return Color.{248, 250, 252, 255} }
 }
 Input :: #import "kryon/tree_input";
 ScrollDevice :: #import "kryon/ScrollDevice";
 #import "std/text_buffer"
+PaletteStyle :: #import "kryon/SystemThemeHost";
+SystemTheme :: #import "kryon/SystemTheme";
 theme_ready: bool;
+current_theme: SystemTheme.SystemPalette;
+PrepareTheme :: () {
+    if theme_ready && Model.ticks % 30 != 0 { return }
+    fresh := HostTheme.SystemPaletteRead()
+    if !theme_ready || fresh.background != current_theme.background || fresh.text != current_theme.text || fresh.selected != current_theme.selected || fresh.base != current_theme.base {
+        unused PaletteStyle.SystemPaletteInstall(fresh); current_theme = fresh; theme_ready = true
+    }
+}
+BackgroundColor :: () -> Color { return StyleTokenColor("canvas") }
+// Date groups occupy full rows; only visible thumbnails become widgets.
+item_y: Vec(float32);
+item_column: Vec(s32);
+group_start: Vec(bool);
+layout_count: s32 = -1;
+layout_cols: s32;
+layout_height: float32;
+layout_revision: s64;
+LayoutFeed :: (cols: s32, height: float32) -> float32 {
+    if layout_count == Model.count && layout_cols == cols && layout_height == height && layout_revision == Model.revision { return feed_height }
+    VecClear(item_y); VecClear(item_column); VecClear(group_start)
+    y: float32; column: s32
+    for i: 0..Model.count - 1 {
+        group := i == 0
+        if i > 0 { group = TextUntilNul(Model.photos[i].date[:]) != TextUntilNul(Model.photos[i-1].date[:]) }
+        if group { if column > 0 { y += height }; column = 0; y += 42.0 }
+        unused VecPush(item_y, y); unused VecPush(item_column, column); unused VecPush(group_start, group)
+        column += 1; if column >= cols { column = 0; y += height }
+    }
+    if column > 0 { y += height }
+    feed_height = y; layout_count = Model.count; layout_cols = cols; layout_height = height; layout_revision = Model.revision
+    return y
+}
+feed_height: float32;
 
 Label :: (session: Session, key: u64, value: string, bounds: Rectangle, font: s32 = 15) {
     props: TextProps; props.key = key; props.text = value; props.bounds = bounds; props.font = font
     props.wrap = TextWrap.TextWrapNone; Text(session, props)
 }
 Action :: (session: Session, id: s32, label: string, bounds: Rectangle, enabled: bool = true) -> bool {
-    Record(id, label, bounds, enabled && !Model.loading)
-    props: ButtonProps; props.key = cast(u64)id; props.id = id; props.bounds = bounds; props.label = label; props.disabled = !enabled || Model.loading
+    Record(id, label, bounds, enabled && !Model.busy)
+    props: ButtonProps; props.key = cast(u64)id; props.id = id; props.bounds = bounds; props.label = label; props.disabled = !enabled || Model.busy
+    return Button(session, props) == 1
+}
+PhotoAction :: (session: Session, id: s32, name: string, bounds: Rectangle) -> bool {
+    Record(id, name, bounds, !Model.busy)
+    props: ButtonProps; props.key = cast(u64)id; props.id = id; props.bounds = bounds; props.disabled = Model.busy
     return Button(session, props) == 1
 }
 ImageAt :: (session: Session, key: u64, path: string, alt: string, bounds: Rectangle, cover: bool = false) {
@@ -73,7 +111,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
     sidebar: float32 = ifx viewport.width < 800.0 then 126.0 else 166.0
     x := left + sidebar + 14.0; width := viewport.width - sidebar - 38.0
     Label(session, 2, "Photos", .{left, top + 2.0, sidebar, 36.0}, 28)
-    labels: [7]string = .{"Library", "Albums", "Favorites", "Videos", "Hidden", "Trash", "Local sync"}
+    labels: [7]string = .{"Photos", "Albums", "Favorites", "Videos", "Hidden", "Trash", "Local sync"}
     views: [7]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync"}
     for i: 0..6 {
         if Action(session, cast(s32)(10 + i), labels[i], .{left, top + 58.0 + cast(float32)i * 47.0, sidebar, 39.0}) { Model.Navigate(views[i]) }
@@ -117,13 +155,26 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         cols := cast(s32)(width / 196.0); if cols < 2 { cols = 2 }; if cols > 8 { cols = 8 }
         cell := (width - cast(float32)(cols - 1) * 12.0) / cast(float32)cols
         item_count := ifx Model.view == "albums" then Model.album_count else Model.count
-        height: float32 = ifx Model.view == "albums" then 68.0 else cell + 49.0
+        height: float32 = ifx Model.view == "albums" then 68.0 else cell + 12.0
         rows := ifx Model.view == "albums" then item_count else (item_count + cols - 1) / cols
-        props: ScrollProps; props.key = 80; props.bounds = body; props.content_height = cast(s32)(cast(float32)rows * height); props.scroll_offset = Model.scroll
+        props: ScrollProps; props.key = 80; props.bounds = body; props.content_height = cast(s32)(ifx Model.view == "albums" then cast(float32)rows * height else LayoutFeed(cols,height)); props.scroll_offset = Model.scroll
         scrolling := Scroll(session, props); Model.scroll = scrolling.scroll_offset
-        for i: 0..item_count - 1 {
-            bx := x + (ifx Model.view == "albums" then 0.0 else cast(float32)(i % cols) * (cell + 12.0))
-            by := body.y + cast(float32)(ifx Model.view == "albums" then i else i / cols) * height - cast(float32)Model.scroll
+        first: s32
+        if Model.view != "albums" {
+            end := item_count
+            while first < end {
+                middle := (first + end) / 2
+                if item_y[middle] + height < cast(float32)Model.scroll { first = middle + 1 } else { end = middle }
+            }
+        }
+        for i: first..item_count - 1 {
+            bx := x + (ifx Model.view == "albums" then 0.0 else cast(float32)item_column[i] * (cell + 12.0))
+            by := body.y + (ifx Model.view == "albums" then cast(float32)i * height else item_y[i]) - cast(float32)Model.scroll
+            if by - 42.0 > body.y + body.height { break }
+            if Model.view != "albums" && group_start[i] && by - 42.0 < body.y + body.height && by > body.y {
+                Record(3000000 + i, TextUntilNul(Model.photos[i].date[:]), .{x + 4.0, by - 34.0, width - 12.0, 28.0}, false)
+                Label(session, cast(u64)(3000000 + i), TextUntilNul(Model.photos[i].date[:]), .{x + 4.0, by - 34.0, width - 12.0, 28.0}, 19)
+            }
             if by + height < body.y || by > body.y + body.height { continue }
             if Model.view == "albums" {
                 if Action(session, cast(s32)(100 + i), TextUntilNul(Model.albums[i][:]), .{bx, by, width, 56.0}) {
@@ -131,19 +182,17 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                 }
             } else {
                 photo: *Photo = *Model.photos[i]
-                clicked := Action(session, cast(s32)(100 + i), "", .{bx, by, cell, height - 10.0})
-                ImageAt(session, cast(u64)(1000 + i), TextUntilNul(photo.thumbnail[:]), TextUntilNul(photo.name[:]), .{bx + 3.0, by + 3.0, cell - 6.0, cell - 12.0}, true)
-                Label(session, cast(u64)(2000 + i), TextUntilNul(photo.name[:]), .{bx + 8.0, by + cell - 4.0, cell - 16.0, 22.0}, 12)
-                Label(session, cast(u64)(2100 + i), ifx TextUntilNul(photo.kind[:]) == "video" then "Video" else TextUntilNul(photo.date[:]), .{bx + 8.0, by + cell + 18.0, cell - 16.0, 20.0}, 11)
+                clicked := PhotoAction(session, cast(s32)(100 + i), TextUntilNul(photo.name[:]), .{bx, by, cell, cell})
+                ImageAt(session, cast(u64)(1000000 + i), TextUntilNul(photo.thumbnail[:]), TextUntilNul(photo.name[:]), .{bx + 3.0, by + 3.0, cell - 6.0, cell - 6.0}, true)
+                if TextUntilNul(photo.kind[:]) == "video" { Label(session, cast(u64)(2100000 + i), "Video", .{bx + 8.0, by + cell - 30.0, cell - 16.0, 22.0}, 12) }
                 if clicked { Model.Choose(i); break }
             }
         }
         if scrolling.opened { unused End(session) }
+        if Model.view != "albums" && cast(float32)Model.scroll + body.height + height * 2.0 >= feed_height { Model.More() }
         if item_count == 0 { Label(session, 90, "Your photos will appear here. Import a local folder to begin.", .{x + 20.0, body.y + 48.0, width - 40.0, 40.0}, 18) }
     }
     footer := viewport.y + viewport.height - 42.0
     Label(session, 6, TextUntilNul(Model.message[:]), .{x, footer, width - 182.0, 28.0}, 12)
-    if Action(session, 60, "Previous", .{x + width - 174.0, footer - 4.0, 88.0, 32.0}, Model.offset > 0) { Model.offset -= 60; Model.scroll = 0; Model.selected = -1; Model.Request() }
-    if Action(session, 61, "Next", .{x + width - 78.0, footer - 4.0, 78.0, 32.0}, Model.offset + Model.count < Model.matches) { Model.offset += 60; Model.scroll = 0; Model.selected = -1; Model.Request() }
     return 0
 }
