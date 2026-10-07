@@ -1,5 +1,7 @@
 # Photos
 
+The canonical checkout is `waozixyz/photos` under the Projects directory.
+
 A standalone native photo library that also opens inside Harmony. Photos merges
 local folders and Ente exports without changing their files. Identical originals
 are stored once while every album membership is retained. Ente Desktop

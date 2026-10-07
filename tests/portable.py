@@ -25,7 +25,9 @@ with tempfile.TemporaryDirectory() as folder:
     env = {**os.environ, 'KRYON_SERVICE_ROOT': str(folder)}
     with Server(dict(root=str(library.root)), folder / 'kryon/services/photos.sock') as service:
         threading.Thread(target=service.serve_forever, daemon=True).start()
-        player = Path(os.environ.get('PHOTOS_PLAYER', ROOT.parent / 'kryon/build/bin/zib'))
+        locked = [] if (ROOT / 'ziran.local.toml').exists() else ['--locked']
+        kryon = Path(subprocess.check_output(['ziran', 'pkg', 'path', 'kryon', *locked], cwd=ROOT, text=True).strip())
+        player = Path(os.environ.get('PHOTOS_PLAYER', kryon / 'build/bin/zib'))
         process = subprocess.Popen([str(player), str(ROOT / 'build/photos-portable.zib')], env=env)
         def xdo(*args):
             return subprocess.check_output(['xdotool', *map(str, args)], text=True).strip()

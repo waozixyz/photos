@@ -1,7 +1,8 @@
 # Photos
 
-Photos is a standalone native app that also opens inside Harmony. Work in this
-canonical repository on master. UI belongs here and uses Kryon ImageProps.
+Photos is a standalone native app that also opens inside Harmony. Its canonical
+repository is `/mnt/storage/Projects/waozixyz/photos`, on master. UI belongs here
+and uses Kryon ImageProps.
 
 Owner requirement (2026-10-07): import and merge `/mnt/storage/adel` and
 `/mnt/storage/Album`, preserving originals, albums and Ente metadata. The full

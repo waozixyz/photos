@@ -70,7 +70,9 @@ with tempfile.TemporaryDirectory() as directory:
     env = {**os.environ, 'KRYON_SERVICE_ROOT': str(folder), 'HARMONY_APP_HOST_PID': str(os.getpid()), 'HARMONY_APP_CONTAINER': str(container)}
     with Server(dict(root=str(library.root)), folder / 'kryon/services/photos.sock') as service:
         threading.Thread(target=service.serve_forever, daemon=True).start()
-        player = ROOT.parent / 'kryon/build/bin/zib'
+        locked = [] if (ROOT / 'ziran.local.toml').exists() else ['--locked']
+        kryon = Path(subprocess.check_output(['ziran', 'pkg', 'path', 'kryon', *locked], cwd=ROOT, text=True).strip())
+        player = Path(os.environ.get('PHOTOS_PLAYER', kryon / 'build/bin/zib'))
         palette(0x141e28ff, 0xe8eef4ff)
         log_path = ROOT / 'build/screenshots/hosted.log'; log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open('w') as log:
