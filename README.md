@@ -28,8 +28,9 @@ and synced originals are never permanently deleted by Trash.
 
 JPEG, PNG, WebP, GIF and common video containers import directly. RAW/HEIC files
 are retained even when the local image decoder cannot preview them. Video
-thumbnails need ffmpeg. Facial recognition, semantic image search, photo editing,
-public links and phone camera backup are not implemented in this version.
+thumbnails need ffmpeg. Videos can be stored, synced, previewed and exported;
+in-app video playback is not implemented. Facial recognition, semantic image
+search, photo editing, public links and phone camera backup are not implemented.
 This version is a local photo library with sync, not complete Ente feature parity.
 
 Build and check from this canonical checkout:
