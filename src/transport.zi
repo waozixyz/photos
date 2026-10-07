@@ -1,0 +1,29 @@
+// Both builds use the same private installed service; bundles have no process
+// or network imports. The native host binds the reusable service directly.
+#if #defined(POSIX_THREADS) {
+    Service :: #import "kryon/ServiceLinux";
+    Send :: (request: string) -> bool { return Service.ServiceRequestHost("photos", request) }
+    State :: () -> s32 { return Service.ServiceStateHost() }
+    Result :: () -> string { return Service.ServiceResultHost() }
+} else {
+    Service :: #import "kryon/Service";
+    Send :: (request: string) -> bool { return Service.ServiceRequest("photos", request) }
+    State :: () -> s32 { return Service.ServiceState() }
+    Result :: () -> string { return Service.ServiceResult() }
+}
+pending: bool;
+error: string;
+Start :: (request: string) -> bool {
+    if pending { return false }
+    error = "";
+    pending = Send(request);
+    if !pending { error = "Photos service is unavailable. Install or restart Photos to retry." }
+    return pending
+}
+Poll :: () -> bool {
+    if !pending || State() == 1 { return false }
+    pending = false;
+    if State() != 2 { error = "Photos service is unavailable. Your originals remain saved locally." }
+    return true
+}
+Value :: () -> string { return Result() }

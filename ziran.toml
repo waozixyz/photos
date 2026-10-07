@@ -1,0 +1,38 @@
+[package]
+name = "photos"
+tool = "kryon"
+entry = "src/app.zi"
+module_roots = ["src", "tests"]
+bridge_modules = ["app"]
+
+[toolchain]
+git = "https://github.com/ziranlang/ziran.git"
+ref = "master"
+
+[tool.kryon]
+default_profile = "desktop"
+
+[tool.kryon.profiles.desktop]
+backend = "desktop"
+library = "X11"
+
+[tool.kryon.profiles.portable]
+backend = "desktop"
+codegen = "zib"
+
+[install]
+bin = "photos"
+
+[tool.kryon.install]
+profile = "desktop"
+name = "Photos"
+comment = "Private local photos synced with ThinkPad"
+categories = "Graphics;Photography;"
+
+[dependencies.kryon]
+git = "https://github.com/kryonlabs/kryon.git"
+ref = "master"
+
+[dependencies.kss]
+git = "https://github.com/kryonlabs/kss.git"
+ref = "master"

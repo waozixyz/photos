@@ -1,0 +1,149 @@
+using UI :: #import "kryon/Widgets";
+using Model :: #import "model";
+#if #defined(POSIX_THREADS) {
+    Window :: #import "desktop";
+    SystemStyle :: #import "kss/SystemStyle";
+    SystemThemeLinux :: #import "kryon/SystemThemeLinux";
+    Record :: (id: s32, label: string, bounds: Rectangle, enabled: bool) {
+        Window.Record(id, label, bounds.x, bounds.y, bounds.width, bounds.height, enabled)
+    }
+    Prepare :: () {
+        Window.control_count = 0;
+        if !theme_ready { SystemStyle.StyleInstallSystem(SystemThemeLinux.SystemPaletteRead()); theme_ready = true }
+    }
+    Publish :: () { Window.Publish() }
+    BackgroundColor :: () -> Color { return StyleTokenColor("surface") }
+} else {
+    Record :: (id: s32, label: string, bounds: Rectangle, enabled: bool) {}
+    Prepare :: () {}
+    Publish :: () {}
+    BackgroundColor :: () -> Color { return Color.{248, 250, 252, 255} }
+}
+Input :: #import "kryon/tree_input";
+ScrollDevice :: #import "kryon/ScrollDevice";
+#import "std/text_buffer"
+theme_ready: bool;
+
+Label :: (session: Session, key: u64, value: string, bounds: Rectangle, font: s32 = 15) {
+    props: TextProps; props.key = key; props.text = value; props.bounds = bounds; props.font = font
+    props.wrap = TextWrap.TextWrapNone; Text(session, props)
+}
+Action :: (session: Session, id: s32, label: string, bounds: Rectangle, enabled: bool = true) -> bool {
+    Record(id, label, bounds, enabled && !Model.loading)
+    props: ButtonProps; props.key = cast(u64)id; props.id = id; props.bounds = bounds; props.label = label; props.disabled = !enabled || Model.loading
+    return Button(session, props) == 1
+}
+ImageAt :: (session: Session, key: u64, path: string, alt: string, bounds: Rectangle, cover: bool = false) {
+    if path == "" { return }
+    props: ImageProps; props.key = key; props.asset_path = path; props.alt_text = alt; props.bounds = bounds
+    props.fit = ifx cover then ImageFit.ImageFitCover else ImageFit.ImageFitContain
+    Image(session, props)
+}
+Field :: (session: Session, bounds: Rectangle, is_search: bool, key: s32, modifiers: s32, typed: string) -> bool {
+    props: TextFieldProps; props.key = ifx is_search then 40 else 41; props.focus_id = ifx is_search then 40 else 41; props.bounds = bounds
+    props.label = ifx is_search then "Search" else "Folder or album"; props.placeholder = ifx is_search then "Search names, captions, tags, albums or dates" else "Import folder, album name, caption or export folder"
+    value: [4097]u8
+    Model.Set(value[:], ifx is_search then TextUntilNul(Model.search[:]) else TextUntilNul(Model.input[:]))
+    props.value = TextUntilNul(value[:])
+    props.cursor = ifx is_search then Model.search_cursor else Model.cursor; props.anchor = ifx is_search then Model.search_anchor else Model.anchor
+    props.focused = ifx is_search then Model.search_focused else Model.focused; props.max_bytes = ifx is_search then 512 else 4096
+    if props.focused { props.input = TextFieldInputFor(key, modifiers, typed) }
+    result := TextField(session, props)
+    Record(ifx is_search then 40 else 41, props.label, bounds, true)
+    if is_search {
+        Model.search_cursor = result.cursor; Model.search_anchor = result.anchor; Model.search_focused = result.focused
+        if result.edit.changed { Model.Edit(Model.search[:], result.edit.start, result.edit.end, result.edit.replacement) }
+    } else {
+        Model.cursor = result.cursor; Model.anchor = result.anchor; Model.focused = result.focused
+        if result.edit.changed { Model.Edit(Model.input[:], result.edit.start, result.edit.end, result.edit.replacement) }
+    }
+    return result.committed
+}
+SelectedAction :: (action: string) {
+    if Model.selected >= 0 { Model.Request(action, TextUntilNul(Model.photos[Model.selected].id[:]), TextUntilNul(Model.input[:])) }
+}
+
+#program_export
+Frame :: (session: Session, viewport: Rectangle) -> s32 {
+    Prepare(); defer { Publish() }
+    Model.Tick()
+    background: BoxProps; background.key = 1; background.bounds = viewport; background.fill = BackgroundColor(); Box(session, background)
+    key := KeyboardTake(session); modifiers := KeyboardModifiers(session); typed_bytes: [256]u8; typed := TypedTextTake(session, typed_bytes[:])
+    left := viewport.x + 12.0; top := viewport.y + 12.0
+    sidebar: float32 = ifx viewport.width < 800.0 then 126.0 else 166.0
+    x := left + sidebar + 14.0; width := viewport.width - sidebar - 38.0
+    Label(session, 2, "Photos", .{left, top + 2.0, sidebar, 36.0}, 28)
+    labels: [7]string = .{"Library", "Albums", "Favorites", "Videos", "Hidden", "Trash", "Local sync"}
+    views: [7]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync"}
+    for i: 0..6 {
+        if Action(session, cast(s32)(10 + i), labels[i], .{left, top + 58.0 + cast(float32)i * 47.0, sidebar, 39.0}) { Model.Navigate(views[i]) }
+    }
+    Label(session, 3, "ThinkPad only", .{left, viewport.y + viewport.height - 76.0, sidebar, 22.0}, 13)
+    Label(session, 4, "Private local library", .{left, viewport.y + viewport.height - 50.0, sidebar, 22.0}, 12)
+    search := Field(session, .{x, top, width - 78.0, 40.0}, true, key, modifiers, typed)
+    if Action(session, 42, "Find", .{x + width - 70.0, top, 70.0, 40.0}) || search { Model.offset = 0; Model.scroll = 0; Model.selected = -1; Model.Request() }
+    Label(session, 5, TextUntilNul(Model.summary[:]), .{x, top + 49.0, width, 24.0}, 14)
+    y := top + 84.0
+    unused Field(session, .{x, y, width - 176.0, 39.0}, false, key, modifiers, typed)
+    if Action(session, 43, "Import", .{x + width - 164.0, y, 78.0, 39.0}) { Model.Request("import", "", TextUntilNul(Model.input[:])) }
+    if Action(session, 44, "Sync", .{x + width - 78.0, y, 78.0, 39.0}) { Model.Request("sync") }
+    body := Rectangle.{x, y + 52.0, width, viewport.height - 216.0}
+    if Model.view == "sync" {
+        Label(session, 70, "Local by design", .{x + 18.0, body.y + 24.0, width - 36.0, 36.0}, 26)
+        Label(session, 71, "Your originals and albums stay on your desktop and ThinkPad.", .{x + 18.0, body.y + 80.0, width - 36.0, 30.0})
+        Label(session, 72, "Encrypted sync uses your ThinkPad's Daochi node only.", .{x + 18.0, body.y + 122.0, width - 36.0, 30.0})
+        Label(session, 73, "Folder imports keep the source files untouched and merge duplicates.", .{x + 18.0, body.y + 164.0, width - 36.0, 30.0})
+        Label(session, 74, "Offline changes are saved here and sync resumes automatically.", .{x + 18.0, body.y + 206.0, width - 36.0, 30.0})
+    } else if Model.selected >= 0 && Model.selected < Model.count {
+        photo: *Photo = *Model.photos[Model.selected]
+        if Action(session, 50, "Back", .{x, body.y, 68.0, 36.0}) { Model.selected = -1 }
+        if Action(session, 51, "Previous", .{x + 78.0, body.y, 92.0, 36.0}, Model.selected > 0) { Model.Choose(Model.selected - 1) }
+        if Action(session, 52, "Next", .{x + 180.0, body.y, 68.0, 36.0}, Model.selected + 1 < Model.count) { Model.Choose(Model.selected + 1) }
+        if Action(session, 53, ifx photo.favorite then "Unfavorite" else "Favorite", .{x + 258.0, body.y, 106.0, 36.0}) { SelectedAction("favorite") }
+        if Action(session, 54, ifx photo.trashed then "Restore" else "Trash", .{x + 374.0, body.y, 76.0, 36.0}) { SelectedAction(ifx photo.trashed then "restore" else "trash") }
+        image := ifx photo.original[0] != 0 && TextUntilNul(photo.kind[:]) == "photo" then TextUntilNul(photo.original[:]) else TextUntilNul(photo.thumbnail[:])
+        ImageAt(session, 3000, image, TextUntilNul(photo.name[:]), .{x, body.y + 48.0, width, body.height - 156.0})
+        Label(session, 75, TextUntilNul(photo.name[:]), .{x, body.y + body.height - 102.0, width, 24.0}, 17)
+        Label(session, 76, TextUntilNul(photo.date[:]), .{x, body.y + body.height - 72.0, width, 22.0}, 13)
+        step := (width - 32.0) / 5.0
+        if Action(session, 55, "Add to album", .{x, body.y + body.height - 42.0, step, 36.0}) { SelectedAction("album_add") }
+        if Action(session, 56, "Caption", .{x + step + 8.0, body.y + body.height - 42.0, step, 36.0}) { SelectedAction("caption") }
+        if Action(session, 57, "Tags", .{x + 2.0 * (step + 8.0), body.y + body.height - 42.0, step, 36.0}) { SelectedAction("tags") }
+        if Action(session, 58, ifx photo.hidden then "Unhide" else "Hide", .{x + 3.0 * (step + 8.0), body.y + body.height - 42.0, step, 36.0}) { SelectedAction("hidden") }
+        if Action(session, 59, "Export", .{x + 4.0 * (step + 8.0), body.y + body.height - 42.0, step, 36.0}) { SelectedAction("export") }
+    } else {
+        pointer := Input.PointerSample(session)
+        ScrollDevice.BeginScrollFrame(session, .{pointer.x, pointer.y}, pointer.pressed, pointer.down, pointer.released, PointerWheelTake(session, body), cast(float64)Model.ticks / 60.0)
+        cols := cast(s32)(width / 196.0); if cols < 2 { cols = 2 }; if cols > 8 { cols = 8 }
+        cell := (width - cast(float32)(cols - 1) * 12.0) / cast(float32)cols
+        item_count := ifx Model.view == "albums" then Model.album_count else Model.count
+        height: float32 = ifx Model.view == "albums" then 68.0 else cell + 49.0
+        rows := ifx Model.view == "albums" then item_count else (item_count + cols - 1) / cols
+        props: ScrollProps; props.key = 80; props.bounds = body; props.content_height = cast(s32)(cast(float32)rows * height); props.scroll_offset = Model.scroll
+        scrolling := Scroll(session, props); Model.scroll = scrolling.scroll_offset
+        for i: 0..item_count - 1 {
+            bx := x + (ifx Model.view == "albums" then 0.0 else cast(float32)(i % cols) * (cell + 12.0))
+            by := body.y + cast(float32)(ifx Model.view == "albums" then i else i / cols) * height - cast(float32)Model.scroll
+            if by + height < body.y || by > body.y + body.height { continue }
+            if Model.view == "albums" {
+                if Action(session, cast(s32)(100 + i), TextUntilNul(Model.albums[i][:]), .{bx, by, width, 56.0}) {
+                    Model.Set(Model.album[:], TextUntilNul(Model.albums[i][:])); Model.view = "photos"; Model.offset = 0; Model.scroll = 0; Model.Request(); break
+                }
+            } else {
+                photo: *Photo = *Model.photos[i]
+                clicked := Action(session, cast(s32)(100 + i), "", .{bx, by, cell, height - 10.0})
+                ImageAt(session, cast(u64)(1000 + i), TextUntilNul(photo.thumbnail[:]), TextUntilNul(photo.name[:]), .{bx + 3.0, by + 3.0, cell - 6.0, cell - 12.0}, true)
+                Label(session, cast(u64)(2000 + i), TextUntilNul(photo.name[:]), .{bx + 8.0, by + cell - 4.0, cell - 16.0, 22.0}, 12)
+                Label(session, cast(u64)(2100 + i), ifx TextUntilNul(photo.kind[:]) == "video" then "Video" else TextUntilNul(photo.date[:]), .{bx + 8.0, by + cell + 18.0, cell - 16.0, 20.0}, 11)
+                if clicked { Model.Choose(i); break }
+            }
+        }
+        if scrolling.opened { unused End(session) }
+        if item_count == 0 { Label(session, 90, "Your photos will appear here. Import a local folder to begin.", .{x + 20.0, body.y + 48.0, width - 40.0, 40.0}, 18) }
+    }
+    footer := viewport.y + viewport.height - 42.0
+    Label(session, 6, TextUntilNul(Model.message[:]), .{x, footer, width - 182.0, 28.0}, 12)
+    if Action(session, 60, "Previous", .{x + width - 174.0, footer - 4.0, 88.0, 32.0}, Model.offset > 0) { Model.offset -= 60; Model.scroll = 0; Model.selected = -1; Model.Request() }
+    if Action(session, 61, "Next", .{x + width - 78.0, footer - 4.0, 78.0, 32.0}, Model.offset + Model.count < Model.matches) { Model.offset += 60; Model.scroll = 0; Model.selected = -1; Model.Request() }
+    return 0
+}

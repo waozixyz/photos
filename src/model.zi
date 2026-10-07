@@ -1,0 +1,150 @@
+Transport :: #import "transport";
+#import "std/json_scan"
+#import "std/text"
+#import "std/text_buffer"
+#import "std/byte_text_linux"
+#if #defined(POSIX_THREADS) {
+libc :: #system_library "libc";
+Free :: (memory: *void) #foreign libc "free";
+Release :: (value: string) { descriptor := cast(*TextDescriptor)(*value); Free(cast(*void)descriptor.data) }
+} else {
+Release :: (value: string) {}
+}
+
+Photo :: struct {
+    id: [65]u8
+    name: [513]u8
+    thumbnail: [4097]u8
+    original: [4097]u8
+    date: [32]u8
+    caption: [8193]u8
+    tags: [8193]u8
+    kind: [16]u8
+    favorite: bool
+    hidden: bool
+    trashed: bool
+    width: s32
+    height: s32
+}
+photos: [60]Photo;
+count: s32;
+total: s32;
+matches: s32;
+pending: s32;
+albums: [256][513]u8;
+album_counts: [256]s32;
+album_count: s32;
+view: string = "photos";
+album: [513]u8;
+search: [513]u8;
+input: [4097]u8;
+message: [1025]u8;
+summary: [257]u8;
+selected: s32 = -1;
+scroll: s32;
+offset: s32;
+loading: bool;
+initialized: bool;
+next_refresh: s64;
+ticks: s64;
+cursor: s32;
+anchor: s32;
+focused: bool;
+search_cursor: s32;
+search_anchor: s32;
+search_focused: bool;
+
+Set :: (out: []u8, value: string) {
+    n := cast(s32)value.count
+    if n >= cast(s32)out.count { n = cast(s32)out.count - 1 }
+    for i: 0..n - 1 { out[i] = value[i] }
+    out[n] = 0
+}
+Quoted :: (out: *Vec(u8), value: string) {
+    BuilderPrint(out, "\"")
+    for i: 0..cast(s32)value.count - 1 {
+        byte := value[i]
+        if byte == 34 { BuilderPrint(out, "\\\"") }
+        else if byte == 92 { BuilderPrint(out, "\\\\") }
+        else if byte == 10 { BuilderPrint(out, "\\n") }
+        else if byte >= 32 { BuilderPrint(out, "%", value[i:i + 1]) }
+    }
+    BuilderPrint(out, "\"")
+}
+Property :: (out: *Vec(u8), key: string, value: string) { BuilderPrint(out, ",\"%\":", key); Quoted(out, value) }
+Request :: (action: string = "query", id: string = "", value: string = "") {
+    if loading { return }
+    out: Vec(u8)
+    BuilderPrint(*out, "{\"action\":"); Quoted(*out, action)
+    Property(*out, "view", view); Property(*out, "search", TextUntilNul(search[:]))
+    Property(*out, "album", TextUntilNul(album[:])); Property(*out, "id", id); Property(*out, "value", value)
+    BuilderPrint(*out, ",\"offset\":%}", offset)
+    request := BuilderFinish(out)
+    loading = Transport.Start(request)
+    Release(request)
+    if !loading { Set(message[:], Transport.error) }
+    next_refresh = ticks + 180
+}
+Decode :: (json: string, at: s32, key: string, out: []u8) {
+    size := ReadStringText(json, FieldAt(json, at, key), out)
+    if size < 0 || size >= cast(s32)out.count { out[0] = 0 }
+    else { out[size] = 0 }
+}
+Number :: (json: string, at: s32, key: string) -> s32 {
+    value := ReadNumber(json, FieldAt(json, at, key))
+    return ifx value.valid then cast(s32)value.value else 0
+}
+Tick :: () {
+    ticks += 1;
+    if !initialized { initialized = true; Request() }
+    if Transport.Poll() {
+        loading = false
+        if Transport.error != "" { Set(message[:], Transport.error); return }
+        json := Transport.Value()
+        Decode(json, 0, "error", message[:]); if message[0] != 0 { return }
+        total = Number(json, 0, "total"); matches = Number(json, 0, "count"); pending = Number(json, 0, "pending")
+        Decode(json, 0, "status", message[:])
+        previous: [65]u8
+        if selected >= 0 && selected < count { Set(previous[:], TextUntilNul(photos[selected].id[:])) }
+        selected = -1
+        array := FieldAt(json, 0, "photos"); at := Space(json, array + 1); count = 0
+        while at >= 0 && at < cast(s32)json.count && json[at] != 93 && count < 60 {
+            photo := *photos[count]; photo.* = .{}
+            Decode(json, at, "id", photo.id[:]); Decode(json, at, "name", photo.name[:])
+            Decode(json, at, "thumbnail", photo.thumbnail[:]); Decode(json, at, "original", photo.original[:])
+            Decode(json, at, "date", photo.date[:]); Decode(json, at, "caption", photo.caption[:])
+            Decode(json, at, "tags", photo.tags[:]); Decode(json, at, "kind", photo.kind[:])
+            photo.favorite = Number(json, at, "favorite") > 0
+            photo.hidden = Number(json, at, "hidden") > 0; photo.trashed = Number(json, at, "trashed") > 0
+            photo.width = Number(json, at, "width"); photo.height = Number(json, at, "height")
+            if TextUntilNul(photo.id[:]) == TextUntilNul(previous[:]) && previous[0] != 0 { selected = count }
+            count += 1; at = Space(json, ValueEnd(json, at, 0)); if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json, at + 1) }
+        }
+        array = FieldAt(json, 0, "albums"); at = Space(json, array + 1); album_count = 0
+        while at >= 0 && at < cast(s32)json.count && json[at] != 93 && album_count < 256 {
+            Decode(json, at, "name", albums[album_count][:]); album_counts[album_count] = Number(json, at, "count")
+            album_count += 1; at = Space(json, ValueEnd(json, at, 0)); if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json, at + 1) }
+        }
+        text: Vec(u8); BuilderPrint(*text, "% photos & videos · % albums · % queued", total, album_count, pending)
+        value := BuilderFinish(text); Set(summary[:], value); Release(value)
+    }
+    if !loading && ticks > next_refresh { Request() }
+}
+Navigate :: (target: string) {
+    if loading { return }
+    view = target; album[0] = 0; selected = -1; offset = 0; scroll = 0; Request()
+}
+Choose :: (index: s32) {
+    if loading || index < 0 || index >= count { return }
+    selected = index
+    if photos[index].original[0] == 0 { Request("open", TextUntilNul(photos[index].id[:])) }
+}
+Edit :: (out: []u8, start: s32, end: s32, replacement: string) {
+    copied: [4097]u8; Set(copied[:], replacement)
+    length := cast(s32)TextUntilNul(out).count; inserted := cast(s32)replacement.count
+    if start < 0 || end < start || end > length || length - (end - start) + inserted >= cast(s32)out.count { return }
+    shift := inserted - (end - start)
+    if shift > 0 { i := length; while i >= end { out[i + shift] = out[i]; i -= 1 } }
+    else { for i: end..length { out[i + shift] = out[i] } }
+    for i: 0..inserted - 1 { out[start + i] = copied[i] }
+}

@@ -1,0 +1,43 @@
+// Inspect and publish only the native window Kryon created for this app.
+Desktop :: #import "kryon/Desktop";
+Model :: #import "model";
+#import "std/text"
+#import "std/byte_text_linux"
+SDL :: #system_library "SDL2";
+X11 :: #system_library "X11";
+SetTitle :: (window: *void, value: *u8) #foreign SDL "SDL_SetWindowTitle";
+Version :: (version: *u8) #foreign SDL "SDL_GetVersion";
+WMInfo :: struct { version: [3]u8; padding: u8; subsystem: s32; display: *void; window: u64; rest: [48]u8 }
+WindowInfo :: (window: *void, info: *WMInfo) -> s32 #foreign SDL "SDL_GetWindowWMInfo";
+Atom :: (connection: *void, name: *u8, existing: s32) -> u64 #foreign X11 "XInternAtom";
+Property :: (connection: *void, window: u64, atom: u64, kind: u64, format: s32, mode: s32, bytes: *u8, count: s32) -> s32 #foreign X11 "XChangeProperty";
+Flush :: (connection: *void) -> s32 #foreign X11 "XFlush";
+control_ids: [64]s32;
+control_labels: [64][513]u8;
+control_bounds: [64][4]float32;
+control_enabled: [64]bool;
+control_count: s32;
+frames: s32;
+
+Record :: (id: s32, label: string, x: float32, y: float32, width: float32, height: float32, enabled: bool) {
+    if control_count>=64 { return }; i:=control_count; control_count+=1
+    control_ids[i]=id; Model.Set(control_labels[i][:],label); control_bounds[i]=.{x,y,width,height}; control_enabled[i]=enabled
+}
+Publish :: () {
+    frames+=1; if frames%10!=0 { return }
+    window:=Desktop.DesktopWindow(); if window==null { return }
+    title_bytes: [16]u8; Model.Set(title_bytes[:],"Photos"); SetTitle(window,*title_bytes[0])
+    info: WMInfo; Version(*info.version[0])
+    if WindowInfo(window,*info)==0 || info.subsystem!=2 || info.window==0 { return }
+    name: [32]u8; Model.Set(name[:],"_HARMONY_APP_STATE"); atom:=Atom(info.display,*name[0],0)
+    out: Vec(u8); BuilderPrint(*out,"{\"interface\":\"harmony.app-state.v1\",\"app\":\"photos\",\"loading\":%",Model.loading)
+    Model.Property(*out,"view",Model.view); Model.Property(*out,"status",TextFromCString(*Model.message[0]))
+    BuilderPrint(*out,",\"scroll\":%,\"nodes\":%,\"controls\":[",Model.scroll,Model.count)
+    for i: 0..control_count-1 {
+        BuilderPrint(*out,"%{\"control\":\"%\",\"role\":1,\"enabled\":%,\"x\":%,\"y\":%,\"width\":%,\"height\":%,\"label\":",ifx i==0 then "" else ",",control_ids[i],control_enabled[i],control_bounds[i][0],control_bounds[i][1],control_bounds[i][2],control_bounds[i][3])
+        Model.Quoted(*out,TextFromCString(*control_labels[i][0])); BuilderPrint(*out,"}")
+    }
+    BuilderPrint(*out,"]}"); value:=BuilderFinish(out); descriptor:=cast(*TextDescriptor)(*value)
+    if value.count<=65535 { unused Property(info.display,info.window,atom,31,8,0,descriptor.data,cast(s32)value.count); unused Flush(info.display) }
+    Model.Release(value)
+}
