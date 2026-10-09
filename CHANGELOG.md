@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.10
+
+- Trim videos to a start/end range, rotate them and apply centered square, portrait or landscape crops with a frame preview.
+- Save edited videos as separate MP4 copies with audio, dates, captions, locations and album memberships while keeping originals intact.
+- Process video copies in the background, with cancellation and Hidden-lock checks before saving; keep edited copies in encrypted backup and library export.
+
 ## 0.1.9
 
 - Combine capture dates, media type, albums, tags, captions, favorites, archive state and location availability in searches, with quoted phrases and exclusions.

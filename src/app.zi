@@ -158,6 +158,26 @@ ImageEditor :: (session: Session, body: Rectangle) {
     if Action(session, 283, "Cancel", .{x + 2.0 * (unit + 12.0), y + body.height - 56.0, unit, 38.0}, ready) { Model.Apply("image_close") }
 }
 
+VideoEditor :: (session: Session, body: Rectangle) {
+    x := body.x; y := body.y; width := body.width; unit := (width - 24.0) / 3.0
+    ready := !Model.loading && Model.video_duration > 0 && Model.video_job[0] == 0
+    Label(session, 331, "Edit video", .{x, y, width, 32.0}, 24)
+    if Action(session, 332, "Trim", .{x, y + 42.0, unit, 36.0}, ready) { Model.VideoTrim() }
+    if Action(session, 333, "Rotate right", .{x + unit + 12.0, y + 42.0, unit, 36.0}, ready) { Model.VideoChange(2) }
+    crops: [6]string = .{"Crop: original", "Crop: square", "Crop: 4:3", "Crop: 16:9", "Crop: 9:16", "Crop: 3:4"}
+    if Action(session, 334, crops[Model.video_adjustments[3]], .{x + 2.0 * (unit + 12.0), y + 42.0, unit, 36.0}, ready) { Model.VideoChange(3) }
+    ImageAt(session, 5100000, TextUntilNul(Model.edit_preview[:]), "Edited video frame at trim start", .{x, y + 90.0, width, body.height - 254.0})
+    text: Vec(u8); BuilderPrint(*text, "% to % seconds · % seconds · rotation % degrees", cast(float64)Model.video_adjustments[0]/1000.0, cast(float64)Model.video_adjustments[1]/1000.0, cast(float64)(Model.video_adjustments[1]-Model.video_adjustments[0])/1000.0, Model.video_adjustments[2])
+    value := BuilderFinish(text); Label(session, 335, value, .{x, y + body.height - 152.0, width, 26.0}, 14); Model.Release(value)
+    Label(session, 336, "Frame preview at trim start. Crops are centered.", .{x, y + body.height - 118.0, width, 26.0}, 14)
+    Label(session, 337, "Save a separate MP4 copy with audio; your original stays intact.", .{x, y + body.height - 86.0, width, 26.0}, 14)
+    if Action(session, 338, "Reset", .{x, y + body.height - 48.0, unit, 38.0}, ready) { Model.video_adjustments = .{0, Model.video_duration, 0, 0}; Model.VideoRequest() }
+    if Action(session, 339, "Save copy", .{x + unit + 12.0, y + body.height - 48.0, unit, 38.0}, ready && Model.VideoChanged()) { Model.VideoRequest("video_save") }
+    if Action(session, 340, "Cancel", .{x + 2.0 * (unit + 12.0), y + body.height - 48.0, unit, 38.0}, !Model.loading) {
+        if Model.video_job[0] != 0 { Model.Apply("video_cancel") } else { Model.Apply("image_close") }
+    }
+}
+
 #program_export
 Frame :: (session: Session, viewport: Rectangle) -> s32 {
     Prepare(); defer { Publish() }
@@ -192,7 +212,9 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, 44, "Sync", .{x + width - 78.0, y, 78.0, 39.0}) { Model.Request("sync") }
     }
     body := Rectangle.{x, y + 52.0, width, viewport.height - 216.0}
-    if Model.editor == "image" {
+    if Model.editor == "video" {
+        VideoEditor(session, body)
+    } else if Model.editor == "image" {
         ImageEditor(session, body)
     } else if Model.editor == "search_help" {
         Label(session, 310, "Find photos with filters", .{x + 12.0, body.y + 12.0, width - 24.0, 34.0}, 22)
@@ -213,7 +235,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, 93, "Save", .{x + 12.0, body.y + 172.0, 94.0, 38.0}, !Model.loading) || (committed && !Model.loading) {
             Model.SaveEditor()
         }
-        if Action(session, 94, "Cancel", .{x + 118.0, body.y + 172.0, 94.0, 38.0}, !Model.loading) { Model.CancelEditor() }
+        if Action(session, 94, "Cancel", .{x + 118.0, body.y + 172.0, 94.0, 38.0}, !Model.loading) { if Model.editor == "video_trim" { Model.editor = "video"; Model.focused = false } else { Model.CancelEditor() } }
     } else if Model.view == "hidden" && !Model.vault_unlocked {
         Label(session, 290, "Hidden is locked", .{x + 18.0, body.y + 24.0, width - 36.0, 40.0}, 26)
         Label(session, 291, "Authenticate to view, export or change hidden photos.", .{x + 18.0, body.y + 88.0, width - 36.0, 30.0}, 15)
@@ -246,6 +268,9 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         image := ifx photo.original[0] != 0 && TextUntilNul(photo.kind[:]) == "photo" then TextUntilNul(photo.original[:]) else TextUntilNul(photo.thumbnail[:])
         ready := !Model.loading && TextUntilNul(Model.detail_id[:]) == TextUntilNul(photo.id[:])
         if Action(session, 215, "Edit image", .{x, body.y + 44.0, 126.0, 36.0}, ready && TextUntilNul(photo.kind[:]) == "photo" && !photo.trashed) { Model.BeginImageEdit() }
+        if TextUntilNul(photo.kind[:]) == "video" {
+            if Action(session, 330, "Edit video", .{x, body.y + 44.0, 126.0, 36.0}, ready && !photo.trashed) { Model.BeginVideoEdit() }
+        }
         if Action(session, 216, "Edit location", .{x + 138.0, body.y + 44.0, 138.0, 36.0}, ready) { Model.BeginEdit("location", "Edit photo location", TextUntilNul(Model.detail_location[:]), "Latitude, longitude; leave empty to remove location") }
         ImageAt(session, 3000, image, TextUntilNul(photo.name[:]), .{x, body.y + 92.0, width, body.height - 364.0})
         Label(session, 75, TextUntilNul(photo.name[:]), .{x, body.y + body.height - 262.0, width, 24.0}, 17)

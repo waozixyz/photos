@@ -56,6 +56,19 @@ are refused to avoid losing frames. Freeform cropping, drawing, advanced filters
 and RAW/HEIC editing remain unfinished. Repeating an identical edit reuses the
 existing copy and preserves any later changes to its metadata or Trash state.
 
+Edit video offers start/end trim times in seconds (up to three decimals), rotation
+and centered original, square, 4:3, 16:9, 9:16 and 3:4 crops. The preview shows the
+edited frame at the trim start. Keep at least one second, then Save copy to create
+an H.264/AAC MP4 while leaving the source unchanged. Saving runs in the background
+and can be cancelled; one video copy processes at a time per library. Copies retain
+audio, capture dates, captions, tags, locations, albums and privacy settings and
+are included in encrypted ThinkPad backup and export. The Ziran helper composes
+codec commands without a shell; FFmpeg/FFprobe must be installed. Video copies are
+re-encoded and may trim a one-pixel edge to keep even dimensions. HDR editing,
+freeform cropping, animated previews and in-app video playback remain unfinished.
+Hidden must remain unlocked through completion to save a hidden video. Stopping
+the library service stops its codec process; originals stay intact.
+
 Edit location accepts latitude and longitude separated by a comma; an empty value
 removes location. Apply it to a photo or selection. Corrections survive source
 rescans and remain in encrypted sync and export sidecars. Memories shows photos
@@ -131,12 +144,13 @@ The Ente comparison uses its [feature overview](https://ente.com/features/),
 [album behavior](https://ente.com/help/photos/features/albums-and-organization/albums),
 [archive behavior](https://ente.com/help/photos/features/albums-and-organization/archive),
 [metadata and editing reference](https://github.com/ente/ente/blob/main/docs/docs/photos/faq/metadata-and-editing.md)
+[video editing](https://ente.com/help/photos/features/utilities/video-editor)
 and [export behavior](https://ente.com/help/photos/features/backup-and-sync/export).
 The remaining replacement work includes:
 
 - Mobile clients, permission-aware background camera backup and device space recovery.
 - On-device face grouping, semantic search, maps, curated memories and automatically curated trip/people albums.
-- Advanced photo editing, video playback/editing, Live Photo pairing and broader HEIC/RAW previews.
+- Advanced photo editing, video playback, animated editing previews, freeform video crops, Live Photo pairing and broader HEIC/RAW previews.
 - Private sharing, collaboration, public links, comments and account recovery.
   Any sharing design needs to honor the owner's ThinkPad-only sync restriction.
 - System authentication, Hidden password recovery and a deliberate deletion/retention policy.
@@ -146,6 +160,7 @@ The remaining replacement work includes:
 
 The native image processor needs GdkPixbuf and GObject on the Linux desktop host;
 Hidden authentication also needs libsodium.
+Video editing and video thumbnails need FFmpeg (including FFprobe and H.264/AAC codecs).
 Unit and synthetic round-trip checks validate tested flows; an independent
 cryptographic audit remains outside their scope. Full-original restore verification belongs
 in private receipts, rather than storing library inventories in the repository.
@@ -157,6 +172,7 @@ python3 -m venv build/venv
 build/venv/bin/pip install -r requirements.txt
 ziran lock
 make build test window-test
+make video-window-test video-portable-test
 PHOTOS_DAOCHI=/path/to/daochi make sync-test
 ```
 

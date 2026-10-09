@@ -86,6 +86,43 @@ def library_request(library, request, config):
         result = ui_query(library, request)
         result['view'] = 'memories'
         return result
+    if action in {'video_status', 'video_cancel'}:
+        from . import video, editing
+        status = video.state(library, request.get('video_job'), request.get('vault_token', ''), cancel=action == 'video_cancel')
+        result = ui_query(library, request)
+        result.update(status)
+        if status.get('saved_copy'):
+            editing.close(library, request.get('edit_session', ''))
+        return result
+    if action in {'video_preview', 'video_save', 'video_begin'}:
+        from . import video, editing
+        photo = library.photo(request['id'])
+        if not library.original(photo).exists():
+            if not config.get('node'):
+                raise LibraryError('Download the original before editing')
+            Client(library, config).materialize(photo['id'])
+        require_access(photo['id'])
+        if photo['kind'] != 'video' or photo['trashed']:
+            raise LibraryError('Choose a video outside Trash to edit')
+        if action == 'video_save':
+            token = video.start(library, photo['id'], request.get('value'), request.get('vault_token', ''))
+            result = ui_query(library, request)
+            result.update(status='Processing video copy; originals stay intact', video_job=token, video_working=1)
+            return result
+        adjustments = request.get('value')
+        if action == 'video_begin':
+            adjustments = [0, video.probe(library.original(photo))['duration_ms'], 0, 0]
+        preview = video.preview(library, photo['id'], adjustments, request.get('edit_session', ''))
+        try:
+            require_access(photo['id'])
+            if library.photo(photo['id'])['trashed']:
+                raise LibraryError('Restore the video from Trash before editing')
+        except LibraryError:
+            editing.close(library, preview['edit_session'])
+            raise
+        result = ui_query(library, request)
+        result.update(preview)
+        return result
     if action in {'image_preview', 'image_save', 'image_close'}:
         from . import editing
         if action == 'image_close':

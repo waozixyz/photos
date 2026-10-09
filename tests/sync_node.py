@@ -142,7 +142,24 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         assert first.query(album='Dynamic favorites')['count']==1
         first.edit_album('Dynamic favorites','delete_empty');client.sync();peer.sync()
         assert 'Dynamic favorites' not in [a['name'] for a in second.album_list()]
-        print('Isolated Daochi v6: signed photo/album/Trash/editor baseline plus smart search creation, update, dynamic matches and deletion round trip passed')
+        from photos import video
+        sys.path.insert(0,str(repo/'tests'))
+        from test_video import fixture
+        movie = folder/'videos/Trip/Video.mp4'; fixture(movie)
+        second.import_folders([movie.parents[1]])
+        movie_id=digest_file(movie)
+        second.edit(movie_id,'location','1, 2')
+        edited_id=video.save(second,movie_id,[1000,3000,90,1])
+        assert peer.sync()==0 and client.sync()==0
+        restored_video=Path(client.materialize(edited_id))
+        assert digest_file(restored_video)==edited_id
+        assert restored_video.read_bytes()==second.original(second.photo(edited_id)).read_bytes()
+        info=video.probe(restored_video)
+        assert (info['width'],info['height'])==(80,80) and info['audio']
+        assert first.details(edited_id)['location']=='1.0, 2.0'
+        assert first.photo(edited_id)['albums']==second.photo(edited_id)['albums']
+        assert json.loads(first.photo(edited_id)['metadata'])['photosVideoEdit']['parent']==movie_id
+        print('Isolated Daochi v6: signed photo/album/Trash/editor/smart-search baseline plus edited video/audio, metadata and full original restore round trip passed')
     finally:
         process.terminate()
         process.wait(timeout=10)

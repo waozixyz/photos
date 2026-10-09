@@ -1,0 +1,56 @@
+// Headless video edits. Ziran validates and composes a literal FFmpeg argv;
+// installed codecs process the media. No shell or display is involved.
+#import "std/byte_text_linux"
+#import "std/text"
+#import "std/text_buffer"
+#import "std/c_string"
+c :: #system_library "libc";
+Pointer :: struct { value: *u8 }
+Exec :: (path: *u8, args: *Pointer) -> s32 #foreign c "execvp";
+ParentDeath :: (option: s32, signal: u64, b: u64, c: u64, d: u64) -> s32 #foreign c "prctl";
+Parent :: () -> s32 #foreign c "getppid";
+Integer :: (value: string) -> s32 {
+    if value.count == 0 || value.count > 9 { return -1 }
+    result: s64
+    for byte: value { if byte < 48 || byte > 57 { return -1 }; result = result * 10 + cast(s64)byte - 48 }
+    return ifx result <= 604800000 then cast(s32)result else -1
+}
+Seconds :: (value: s32) -> string {
+    out: Vec(u8); BuilderPrint(*out, "%.", value / 1000)
+    remainder := value % 1000
+    if remainder < 100 { BuilderPrint(*out, "0") }; if remainder < 10 { BuilderPrint(*out, "0") }
+    BuilderPrint(*out, "%", remainder); return BuilderFinish(out)
+}
+main :: (argc: s32, argv: **u8) -> s32 {
+    parent := Parent()
+    if ParentDeath(1, 9, 0, 0, 0) != 0 || Parent() != parent { return 3 }
+    if argc != 8 { print("Expected source, output, start/end milliseconds, rotation, crop and preview mode\n"); return 2 }
+    source := TextFromCString(argv[1]); destination := TextFromCString(argv[2])
+    if source.count == 0 || source[0] != 47 || destination.count == 0 || destination[0] != 47 || source == destination { return 2 }
+    start := Integer(TextFromCString(argv[3])); end := Integer(TextFromCString(argv[4]))
+    rotation := Integer(TextFromCString(argv[5])); crop := Integer(TextFromCString(argv[6])); preview := Integer(TextFromCString(argv[7]))
+    if start < 0 || end < 0 || end - start < 1000 || (rotation != 0 && rotation != 90 && rotation != 180 && rotation != 270) || crop < 0 || crop > 5 || preview < 0 || preview > 1 { return 2 }
+    filter: Vec(u8)
+    if rotation == 90 { BuilderPrint(*filter, "transpose=clock,") }
+    if rotation == 180 { BuilderPrint(*filter, "hflip,vflip,") }
+    if rotation == 270 { BuilderPrint(*filter, "transpose=cclock,") }
+    ratios: [6]string = .{"1", "1", "4/3", "16/9", "9/16", "3/4"}
+    if crop > 0 { BuilderPrint(*filter, "crop=trunc(min(iw\\,ih*(%))/2)*2:trunc(min(ih\\,iw/(%))/2)*2,", ratios[crop], ratios[crop]) }
+    // H.264 4:2:0 needs even dimensions. A maximum one-pixel edge is trimmed.
+    BuilderPrint(*filter, "crop=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1")
+    if preview == 1 { BuilderPrint(*filter, ",scale=1280:1280:force_original_aspect_ratio=decrease") }
+    value := BuilderFinish(filter)
+    args: [48]string; count: s32
+    base: [15]string = .{"ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-protocol_whitelist", "file", "-ss", Seconds(start), "-i", source, "-map", "0:v:0", "-vf"}
+    for argument: base { args[count] = argument; count += 1 }; args[count] = value; count += 1
+    if preview == 1 {
+        tail: [5]string = .{"-frames:v", "1", "-threads", "1", destination}
+        for argument: tail { args[count] = argument; count += 1 }
+    } else {
+        tail: [23]string = .{"-map", "0:a?", "-t", Seconds(end - start), "-map_metadata", "-1", "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-threads", "2", destination}
+        for argument: tail { args[count] = argument; count += 1 }
+    }
+    bytes: [48][4096]u8; pointers: [49]Pointer
+    for i: 0..count - 1 { if !CopyCString(args[i], bytes[i][:]) { return 2 }; pointers[i].value = *bytes[i][0] }
+    unused Exec(*bytes[0][0], *pointers[0]); print("Install FFmpeg to edit videos\n"); return 3
+}
