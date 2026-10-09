@@ -3,7 +3,7 @@
   "packages": [
     {
       "commit": "f01be2f1d5acf2a570e351013221238b7c543760",
-      "dependencies": {"kryon": "p7d3cfbd5611fe92e"},
+      "dependencies": {"kryon": "pb510c3bffd5331e1"},
       "id": "p03de317562242e4f",
       "name": "Kss",
       "ref": "master",
@@ -43,9 +43,9 @@
       "url": "https://github.com/raysan5/raylib.git"
     },
     {
-      "commit": "8806e6d4958308d0f28ab4849fffb73dd5f58079",
+      "commit": "b21b89f6d786545346cc18314141257de3c20324",
       "dependencies": {"raylib": "p5a77c9c35110e925"},
-      "id": "p7d3cfbd5611fe92e",
+      "id": "pb510c3bffd5331e1",
       "name": "kryon",
       "ref": "master",
       "url": "https://github.com/kryonlabs/kryon.git"
@@ -79,7 +79,7 @@
     }
   ],
   "root": {
-    "dependencies": {"daochi_client": "p1da6024944016d82", "kryon": "p7d3cfbd5611fe92e", "kss": "p03de317562242e4f", "libsodium": "pddc9c82431af7bc6", "oqs": "p55635fc8976895a9", "sqlite": "p450e8db63484350c"},
+    "dependencies": {"daochi_client": "p1da6024944016d82", "kryon": "pb510c3bffd5331e1", "kss": "p03de317562242e4f", "libsodium": "pddc9c82431af7bc6", "oqs": "p55635fc8976895a9", "sqlite": "p450e8db63484350c"},
     "name": "photos"
   },
   "toolchain": {
