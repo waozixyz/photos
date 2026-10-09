@@ -42,10 +42,31 @@ visible rows; scrolling loads more. Apply favorites, hiding, Trash, restore, alb
 membership, corrected dates or export to the selection. Bulk property changes
 set the chosen state consistently, including selections with mixed states.
 Album removal keeps the photo in the library; an album can be renamed without
-changing its originals or other album memberships. Removed memberships and
+changing its originals or other album memberships. Create an empty album from
+Albums, and edit its description, pin it or archive it from the album view.
+Use a visible photo as its cover from that photo's details. The album list
+filters active, archived and empty albums and sorts by name or creation date;
+pinned albums remain first. Empty albums and album details are encrypted and
+synced too. Archiving an album removes all its members from the home timeline,
+including photos that also belong to other albums; search and album browsing
+still include them. Delete empty album refuses any album with members, including
+hidden or trashed members. Removed memberships and
 corrected dates survive later source rescans and are included in encrypted sync.
 Empty Export destinations use `~/Pictures/Photos Export`. Source files and
 synced originals are never permanently deleted by Trash.
+
+Local sync offers Export library and Continuous export. Choose a destination
+outside the library and every import source. Background export writes unchanged
+originals into album folders, including multiple memberships, with JSON sidecars
+and album details; photos without albums go into Uncategorized. Hidden and Trash
+are excluded. Empty albums are retained too. Names include short identifiers so
+identically named files and sanitized album names do not collide. Later passes
+update metadata and mirror album membership, renames and Trash changes. Only
+unchanged files created by this export are removed; unrelated files and files
+edited outside Photos are preserved. Such a conflict pauses export for review.
+Stop export leaves the folder copy intact. Never use the export destination as
+an import source. Export is opt-in and is not automatically enabled on the owner's
+library.
 
 JPEG, PNG, WebP, GIF and common video containers import directly. RAW/HEIC files
 are retained even when the local image decoder cannot preview them. Video
@@ -68,14 +89,13 @@ The remaining replacement work includes:
 - Photo editing, video playback, Live Photo pairing and broader HEIC/RAW previews.
 - Private sharing, collaboration, public links, comments and account recovery.
   Any sharing design needs to honor the owner's ThinkPad-only sync restriction.
-- Empty albums, album covers/descriptions/pinning, album list ordering,
-  album archiving, and full-library continuous export with album folders.
 - An authenticated hidden vault and a deliberate deletion/retention policy.
 - A Ziran library/sync service. The native UI and portable app are Ziran/Kryon;
   the SQLite importer, metadata service and encrypted sync worker remain Python.
 
-Existing unit and synthetic round-trip checks establish working flows, not a
-completed backup of the owner's library or an independent cryptographic audit.
+Unit and synthetic round-trip checks validate tested flows; an independent
+cryptographic audit remains outside their scope. Full-original restore verification belongs
+in private receipts, rather than storing library inventories in the repository.
 
 Build and check from this canonical checkout:
 

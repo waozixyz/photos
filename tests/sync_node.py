@@ -93,6 +93,22 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         assert first.query(search='fixture')['count'] == 2
         assert first.query(album='Renamed fixture')['count'] == 2
         second.edit(photo_id, 'archived_set', '0'); peer.sync(); client.sync()
+        second.edit_album('', 'create', 'Empty album')
+        second.edit_album('Renamed fixture', 'description', 'A synchronized description')
+        second.edit_album('Renamed fixture', 'pinned')
+        second.edit_album('Renamed fixture', 'cover', photo_id)
+        second.edit_album('Renamed fixture', 'archived')
+        assert peer.sync() == 0; assert client.sync() == 0
+        assert first.album_details('Empty album')['name'] == 'Empty album'
+        details = first.album_details('Renamed fixture')
+        assert details['description'] == 'A synchronized description' and details['pinned'] == 1 and details['cover'] == photo_id
+        assert first.query()['count'] == 0 and first.query('archive')['count'] == 2
+        second.edit_album('Renamed fixture', 'archived')
+        second.rename_album('Empty album', 'Empty renamed')
+        peer.sync(); client.sync()
+        assert first.album_details('Empty renamed')['name'] == 'Empty renamed'
+        second.edit_album('Empty renamed', 'delete_empty'); peer.sync(); client.sync()
+        assert 'Empty renamed' not in [a['name'] for a in first.album_list('all')]
         second.edit(photo_id,'trash'); peer.sync(); client.sync()
         assert first.query('trash')['count'] == 1
         second.edit(photo_id,'restore'); peer.sync(); client.sync()
@@ -102,7 +118,7 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         first.import_folders([source.parent]); client.sync(); peer.sync()
         empty_id = digest_file(empty)
         assert Path(peer.materialize(empty_id)).read_bytes() == b''
-        print('Isolated Daochi v6: login, signatures, encrypted originals, verified download including empty originals, batch dates, album rename and edit markers, archive/unarchive, favorites, Trash and restore round-trip passed')
+        print('Isolated Daochi v6: signed login, encrypted original restore, photo edits, empty albums, descriptions/covers/pinning, album rename/archive/delete and Trash restore round-trip passed')
     finally:
         process.terminate()
         process.wait(timeout=10)

@@ -103,6 +103,59 @@ class LibraryTest(unittest.TestCase):
         self.library.edit(photo_id, 'album_add', 'New album')
         self.assertEqual(self.library.query('uncategorized')['count'], 0)
 
+    def test_empty_album_details_pinning_cover_and_archive_preserve_originals(self):
+        first = self.export('desktop', 'Holiday', 'red')
+        second = self.export('desktop', 'Family', 'blue')
+        self.library.import_folders([first.parents[1]])
+        photo_id = digest_file(first)
+        self.library.edit_album('', 'create', 'Empty')
+        self.library.rename_album('Empty', 'Empty renamed')
+        self.assertEqual([a['name'] for a in self.library.album_list('empty')], ['Empty renamed'])
+        self.library.edit_album('Holiday', 'description', 'Our holiday')
+        self.library.edit_album('Holiday', 'pinned')
+        self.library.edit_album('Holiday', 'cover', photo_id)
+        self.assertEqual(self.library.album_list()[0]['name'], 'Holiday')
+        self.assertEqual(self.library.album_details('Holiday')['description'], 'Our holiday')
+        self.assertTrue(self.library.album_list()[0]['thumbnail'])
+        with self.assertRaises(ValueError):
+            self.library.edit_album('Family', 'cover', photo_id)
+        self.library.edit(photo_id, 'album_add', 'Family')
+        self.library.edit_album('Holiday', 'archived')
+        self.assertEqual(self.library.query()['count'], 1)
+        self.assertEqual(self.library.query('archive')['count'], 1)
+        self.assertEqual(self.library.query(album='Family')['count'], 2)
+        self.assertEqual(self.library.query(search='same')['count'], 2)
+        self.assertEqual([a['name'] for a in self.library.album_list('archived')], ['Holiday'])
+        self.library.edit_album('Holiday', 'archived')
+        self.assertEqual(self.library.query()['count'], 2)
+        self.library.edit(photo_id, 'hidden')
+        self.assertEqual(self.library.album_list()[0]['thumbnail'], '')
+        with self.assertRaises(ValueError):
+            self.library.edit_album('Holiday', 'delete_empty')
+        self.library.edit_album('Empty renamed', 'delete_empty')
+        self.assertNotIn('Empty renamed', [a['name'] for a in self.library.album_list('all')])
+        self.assertEqual(self.library.original(self.library.photo(photo_id)).read_bytes(), first.read_bytes())
+
+    def test_album_catalog_preserves_last_removed_membership_and_atomic_rename(self):
+        path = self.export('desktop', 'Holiday')
+        self.library.import_folders([path.parents[1]])
+        photo_id = digest_file(path)
+        self.library.edit(photo_id, 'album_remove', 'Holiday')
+        self.assertEqual(self.library.album_list()[0]['count'], 0)
+        self.library.rename_album('Holiday', 'Renamed empty')
+        self.library.edit_album('', 'create', 'Taken')
+        with self.assertRaises(ValueError):
+            self.library.rename_album('Renamed empty', 'Taken')
+        self.assertEqual(self.library.album_details('Renamed empty')['name'], 'Renamed empty')
+        self.library.import_folders([path.parents[1]])
+        self.assertEqual(self.library.query('uncategorized')['count'], 1)
+        self.assertEqual(len(self.library.album_list('all')), 2)
+        extra = path.parent / 'new.jpg'
+        Image.new('RGB', (80, 100), 'green').save(extra)
+        self.library.import_folders([path.parents[1]])
+        self.assertEqual(self.library.query(album='Holiday')['count'], 1)
+        self.assertNotEqual(self.library.album_details('Holiday')['id'], self.library.album_details('Renamed empty')['id'])
+
     def test_empty_original_restores_from_its_verified_empty_manifest(self):
         source = self.root / 'Camera'
         source.mkdir()

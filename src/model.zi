@@ -27,6 +27,7 @@ Photo :: struct {
     height: s32
 }
 Selection :: struct { id: [65]u8 }
+Album :: struct { name: [513]u8; thumbnail: [4097]u8; count: s32; pinned: bool; archived: bool }
 picked: Vec(Selection);
 picked_count: s32;
 selecting: bool;
@@ -50,9 +51,15 @@ count: s32;
 total: s32;
 matches: s32;
 pending: s32;
-albums: [256][513]u8;
-album_counts: [256]s32;
+catalog: Vec(Album);
 album_count: s32;
+album_mode: string = "active";
+album_sort: string = "name";
+album_description: [8193]u8;
+album_pinned: bool;
+album_archived: bool;
+export_status: [1025]u8;
+export_continuous: bool;
 view: string = "photos";
 sort: string = "newest";
 album: [513]u8;
@@ -117,8 +124,9 @@ SendRequest :: (action: string, id: string, value: string) {
     Property(*out, "view", view); Property(*out, "search", TextUntilNul(search[:]))
     Property(*out, "album", TextUntilNul(album[:])); Property(*out, "id", id); Property(*out, "value", value)
     Property(*out, "sort", sort)
+    Property(*out, "album_mode", album_mode); Property(*out, "album_sort", album_sort)
     mutation = action != "query" && action != "open" && action != "sync" && action != "import"
-    if mutation && picked_count > 0 && action != "album_rename" {
+    if mutation && picked_count > 0 && (action == "album_add" || action == "album_remove" || !StartsWithFoldASCII(action, "album_")) {
         BuilderPrint(*out, ",\"ids\":[")
         for i: 0..picked_count - 1 { if i > 0 { BuilderPrint(*out, ",") }; Quoted(*out, TextUntilNul(picked[i].id[:])) }
         BuilderPrint(*out, "]")
@@ -149,8 +157,20 @@ Tick :: () {
         Decode(json, 0, "error", message[:]); if message[0] != 0 { if appending { more_due = ticks + 300; appending = false }; return }
         total = Number(json, 0, "total"); matches = Number(json, 0, "count"); pending = Number(json, 0, "pending")
         Decode(json, 0, "status", message[:])
+        Decode(json, 0, "export_status", export_status[:]); export_continuous = Number(json, 0, "export_continuous") > 0
         if mutation { ClearSelection(); editor = "" }
         if FieldAt(json, 0, "album") >= 0 { Decode(json, 0, "album", album[:]); offset = 0; scroll = 0 }
+        if FieldAt(json, 0, "view") >= 0 {
+            fresh_view: [32]u8; Decode(json, 0, "view", fresh_view[:])
+            for i: 0..cast(s32)8 { if View(i) == TextUntilNul(fresh_view[:]) { view = View(i) } }
+        }
+        album_detail := FieldAt(json, 0, "album_detail")
+        album_description[0] = 0; album_pinned = false; album_archived = false
+        if album_detail >= 0 {
+            Decode(json, album_detail, "description", album_description[:])
+            album_pinned = Number(json, album_detail, "pinned") > 0
+            album_archived = Number(json, album_detail, "archived") > 0
+        }
         detail := FieldAt(json, 0, "detail")
         if detail >= 0 {
             Decode(json, detail, "id", detail_id[:]); Decode(json, detail, "caption", detail_caption[:])
@@ -178,9 +198,11 @@ Tick :: () {
             count += 1; page_count += 1; at = Space(json, ValueEnd(json, at, 0)); if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json, at + 1) }
         }
         appending = false
-        array = FieldAt(json, 0, "albums"); at = Space(json, array + 1); album_count = 0
-        while at >= 0 && at < cast(s32)json.count && json[at] != 93 && album_count < 256 {
-            Decode(json, at, "name", albums[album_count][:]); album_counts[album_count] = Number(json, at, "count")
+        array = FieldAt(json, 0, "albums"); at = Space(json, array + 1); album_count = 0; VecClear(catalog)
+        while at >= 0 && at < cast(s32)json.count && json[at] != 93 {
+            empty: Album; if !VecPush(catalog, empty) { break }; item := *catalog[album_count]
+            Decode(json, at, "name", item.name[:]); Decode(json, at, "thumbnail", item.thumbnail[:]); item.count = Number(json, at, "count")
+            item.pinned = Number(json, at, "pinned") > 0; item.archived = Number(json, at, "archived") > 0
             album_count += 1; at = Space(json, ValueEnd(json, at, 0)); if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json, at + 1) }
         }
         text: Vec(u8); BuilderPrint(*text, "% photos & videos · % albums · % queued", total, album_count, pending)
@@ -240,6 +262,8 @@ Apply :: (action: string, value: string = "") {
 }
 Find :: () { ClearSelection(); editor = ""; offset = 0; scroll = 0; selected = -1; Request() }
 ToggleSort :: () { if loading { return }; sort = ifx sort == "newest" then "oldest" else "newest"; Find() }
+AlbumFilter :: () { album_mode = ifx album_mode == "active" then "archived" else (ifx album_mode == "archived" then "empty" else "active"); Find() }
+AlbumSort :: () { album_sort = ifx album_sort == "name" then "newest" else (ifx album_sort == "newest" then "oldest" else "name"); Find() }
 Edit :: (out: []u8, start: s32, end: s32, replacement: string) {
     copied: [8193]u8; Set(copied[:], replacement)
     length := cast(s32)TextUntilNul(out).count; inserted := cast(s32)replacement.count

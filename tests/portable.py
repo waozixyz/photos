@@ -123,7 +123,31 @@ with tempfile.TemporaryDirectory() as folder:
                 time.sleep(.1)
             else:
                 raise AssertionError('Portable sort did not reach the library service')
-            print('Portable Photos: private service, thumbnails, favorite, bulk selection, album editor, archive/unarchive and sorting verified')
+            click(65, 137)  # Albums
+            click(240, 166)  # New album
+            click(500, 234)
+            xdo('type', '--delay', 45, '--clearmodifiers', '--', 'Empty portable'); time.sleep(.2)
+            click(251, 339)
+            for _ in range(50):
+                if any(a['name']=='Empty portable' for a in library.album_list('empty')): break
+                time.sleep(.1)
+            else: raise AssertionError('Portable empty album was not retained')
+            click(310, 210)  # Description
+            click(500, 234)
+            xdo('type', '--delay', 45, '--clearmodifiers', '--', 'A portable description'); time.sleep(.2)
+            click(251, 339)
+            assert library.album_details('Empty portable')['description']=='A portable description'
+            click(558, 210)  # Pin album
+            assert library.album_details('Empty portable')['pinned']==1
+            click(65, 371)  # Local sync
+            click(452, 484)  # Continuous export
+            click(500, 234)
+            xdo('type', '--delay', 45, '--clearmodifiers', '--', str(folder/'continuous')); time.sleep(.2)
+            click(251, 339)
+            assert library.setting('export')['continuous']
+            click(620, 484)  # Stop export
+            assert not library.setting('export')['continuous']
+            print('Portable Photos: gallery, batch organization, archive/sort, empty albums, descriptions, pinning and continuous export controls verified')
         finally:
             process.terminate()
             try:

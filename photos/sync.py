@@ -25,6 +25,7 @@ from .library import atomic, packed, digest_file
 
 APP = 'photos'
 COLLECTION = 'private.photos.v1.records.media'
+ALBUM_COLLECTION = 'private.photos.v1.records.albums'
 CHUNK = 8 * 1024 * 1024
 RECORD_PAGE = 200
 HASH = re.compile(r'^[0-9a-f]{64}$')
@@ -221,16 +222,54 @@ class Client:
         photo['metadata'] = json.loads(photo['metadata'])
         photo['edits'] = json.loads(photo['edits'])
         photo.pop('dirty', None)
+        return self.seal_record(photo, COLLECTION, 'photos.media.v1')
+
+    def album_record(self, album):
+        album = dict(album)
+        album.pop('dirty', None)
+        return self.seal_record(album, ALBUM_COLLECTION, 'photos.album.v1')
+
+    def seal_record(self, value, collection, schema):
         nonce = secrets.token_bytes(24)
-        aad = dict(account_id=self.account, app_id=APP, collection=COLLECTION, id=photo['id'], schema='photos.media.v1')
-        cipher = encrypt(packed(photo).encode(), packed(aad).encode(), nonce, self.key)
+        aad = dict(account_id=self.account, app_id=APP, collection=collection, id=value['id'], schema=schema)
+        cipher = encrypt(packed(value).encode(), packed(aad).encode(), nonce, self.key)
         envelope = dict(profile='daochi-record-v1', alg='xchacha20poly1305', key_id='main',
                         nonce=encode(nonce), aad=aad, ciphertext=encode(cipher))
-        return dict(collection=COLLECTION, id=photo['id'], key_id='main', nonce=encode(nonce),
+        return dict(collection=collection, id=value['id'], key_id='main', nonce=encode(nonce),
                     ciphertext=encode(packed(envelope).encode()), schema_version=1,
-                    updated_at=datetime.fromtimestamp(photo['updated'], timezone.utc).isoformat().replace('+00:00', 'Z'))
+                    updated_at=datetime.fromtimestamp(value['updated'], timezone.utc).isoformat().replace('+00:00', 'Z'))
+
+    def accept_album(self, record):
+        envelope = json.loads(decode(record['ciphertext']))
+        aad = dict(account_id=self.account, app_id=APP, collection=ALBUM_COLLECTION, id=record['id'], schema='photos.album.v1')
+        if envelope.get('aad') != aad or envelope.get('nonce') != record.get('nonce') or envelope.get('key_id') != record.get('key_id') or envelope.get('alg') != 'xchacha20poly1305':
+            raise ValueError('Album metadata was moved or altered')
+        album = json.loads(decrypt(decode(envelope['ciphertext']), packed(aad).encode(), decode(envelope['nonce']), self.key))
+        if album.get('id') != record['id'] or self.library.album_name(album.get('name')) != album.get('name'):
+            raise ValueError('Invalid album record')
+        if not isinstance(album.get('description'), str) or len(album['description'].encode()) > 8192 or not isinstance(album.get('cover'), str) or album['cover'] and not HASH.fullmatch(album['cover']):
+            raise ValueError('Invalid album details')
+        if any(type(album.get(k)) not in {bool, int} or album[k] not in (0, 1) for k in ['pinned', 'archived', 'deleted']):
+            raise ValueError('Invalid album state')
+        if any(type(album.get(k)) not in {int, float} or not 0 <= album[k] < 32503680000 for k in ['created', 'updated']):
+            raise ValueError('Invalid album date')
+        existing = self.library.db.execute('SELECT * FROM albums WHERE id=?', (album['id'],)).fetchone()
+        if existing and existing['updated'] >= album['updated']:
+            return
+        other = self.library.db.execute('SELECT * FROM albums WHERE name=? AND id<>?', (album['name'], album['id'])).fetchone()
+        if other:
+            # Legacy photo records may have reconstructed a zero-version name.
+            # A real conflicting edit must remain queued for explicit resolution.
+            if other['updated'] != 0:
+                raise ValueError('Album name conflict; local edits are retained')
+            self.library.db.execute('DELETE FROM albums WHERE id=?', (other['id'],))
+        columns = ['id', 'name', 'description', 'cover', 'pinned', 'archived', 'deleted', 'created', 'updated']
+        self.library.db.execute('INSERT OR REPLACE INTO albums(' + ','.join(columns) + ',dirty) VALUES(' + ','.join('?' for _ in columns) + ',0)', [album[k] for k in columns])
 
     def accept(self, record):
+        if record.get('collection') == ALBUM_COLLECTION:
+            self.accept_album(record)
+            return
         if record.get('collection') != COLLECTION or not HASH.fullmatch(record.get('id', '')):
             return
         if record.get('deleted_at'):
@@ -260,6 +299,8 @@ class Client:
             photo[key] = packed(photo[key])
         self.library.db.execute('INSERT OR REPLACE INTO photos(' + ','.join(columns) + ',dirty) VALUES(' + ','.join('?' for _ in columns) + ',0)',
                                 [photo[c] for c in columns])
+        for name in json.loads(photo['albums']):
+            self.library._ensure_album(name, dirty=0)
 
     def exchange(self, records=None):
         uploaded = None
@@ -301,7 +342,7 @@ class Client:
             try:
                 self.library.db.execute('BEGIN IMMEDIATE')
                 for record in incoming:
-                    if not isinstance(record, dict) or record.get('collection') != COLLECTION or not HASH.fullmatch(record.get('id', '')):
+                    if not isinstance(record, dict) or record.get('collection') not in {COLLECTION, ALBUM_COLLECTION} or not HASH.fullmatch(record.get('id', '')):
                         raise ValueError('Node returned an unsupported photo record; the cursor was retained')
                     self.accept(record)
                 for key, value in [('server_version', version if complete else since),
@@ -320,7 +361,8 @@ class Client:
         self.check_node()
         self.exchange()
         rows = self.library.db.execute('SELECT * FROM photos WHERE dirty=1 ORDER BY updated LIMIT ?', (maximum,)).fetchall()
-        records = []
+        album_rows = self.library.db.execute('SELECT * FROM albums WHERE dirty=1 ORDER BY updated LIMIT ?', (maximum,)).fetchall()
+        records = [self.album_record(row) for row in album_rows]
         if rows:
             self.library.set_setting('status', 'Syncing originals to ThinkPad · local only')
             # Workers handle immutable files and encrypted HTTP only. All SQLite
@@ -338,8 +380,11 @@ class Client:
                 raise ValueError('Node did not confirm the upload; it remains queued')
             for row in rows:
                 self.library.db.execute('UPDATE photos SET dirty=0 WHERE id=? AND updated=?', (row['id'], row['updated']))
+            for row in album_rows:
+                self.library.db.execute('UPDATE albums SET dirty=0 WHERE id=? AND updated=?', (row['id'], row['updated']))
             self.library.db.commit()
         pending = self.library.db.execute('SELECT COUNT(*) FROM photos WHERE dirty=1').fetchone()[0]
+        pending += self.library.db.execute('SELECT COUNT(*) FROM albums WHERE dirty=1').fetchone()[0]
         self.library.set_setting('status', f'ThinkPad sync · {pending:,} queued' if pending else 'All photos synced · ThinkPad only')
         return pending
 

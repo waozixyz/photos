@@ -76,6 +76,15 @@ with tempfile.TemporaryDirectory() as folder:
         enter('Together');action('Save')
         assert library.query(album='Together')['count']==4, ([tuple(row) for row in library.db.execute('SELECT name,albums FROM photos')], state())
         action('Albums');state('albums')
+        action('New album');enter('Empty album');action('Save');state('photos',0)
+        action('Description');enter('An empty album description');action('Save')
+        assert library.album_details('Empty album')['description']=='An empty album description'
+        action('Rename album');enter('Empty renamed');action('Save')
+        action('Pin album');assert library.album_details('Empty renamed')['pinned']==1
+        action('Archive album');assert library.album_details('Empty renamed')['archived']==1
+        action('Albums');action('Active albums');state('albums')
+        action('Empty renamed');action('Unarchive album');action('Delete empty album');state('albums')
+        action('Archived albums');action('Empty albums');state('albums')
         subprocess.run(['import','-window',window,str(output/'albums.png')],check=True)
         action('Together');action('Rename album');enter('Trip');action('Save')
         assert library.query(album='Trip')['count']==4
@@ -84,7 +93,9 @@ with tempfile.TemporaryDirectory() as folder:
         state('photos',2)
         assert library.query(album='Trip')['count']==2
         assert library.query()['count']==4
-        action(control=100);action('Caption');enter('A native caption');action('Save')
+        action(control=100);action('Use as album cover')
+        assert library.album_details('Trip')['cover']
+        action('Caption');enter('A native caption');action('Save')
         assert library.query(search='A native caption')['count']==1, ([tuple(row) for row in library.db.execute('SELECT name,caption FROM photos')], state())
         action('Edit date');enter('invalid-date');action('Save')
         assert state()['editor']=='taken' and 'valid date' in state()['status']
@@ -106,12 +117,19 @@ with tempfile.TemporaryDirectory() as folder:
         assert library.query('trash')['count']==0
         subprocess.run(['import','-window',window,str(output/'uncategorized.png')],check=True)
         action('Local sync');state('sync')
+        action('Continuous export');enter(str(folder/'folder-backup'));action('Save')
+        from photos.worker import daemon
+        daemon(dict(root=str(library.root),sources=[]),once=True)
+        action('Sync');state('sync')
+        assert library.setting('export')['continuous'] and not library.setting('export')['requested']
+        assert len(list((folder/'folder-backup').rglob('*.jpg')))==4
+        action('Stop export');assert not library.setting('export')['continuous']
         subprocess.run(['import','-window',window,str(output/'sync.png')],check=True)
         xdo('windowsize',window,720,880);action('Photos');state('photos')
         subprocess.run(['import','-window',window,str(output/'narrow.png')],check=True)
         action('Select');action('Select loaded')
         subprocess.run(['import','-window',window,str(output/'selection-narrow.png')],check=True)
-        print('Private Xvfb: gallery, sorting, batch favorite and archive, album add/rename/remove, caption and date editors, archive/unarchive, uncategorized, local sync and narrow layout verified')
+        print('Private Xvfb: gallery, sorting, batch organization, empty albums, album description/cover/pin/archive/delete, caption/date editors, archive/uncategorized, continuous export/stop and narrow layout verified')
     finally:
         service.shutdown();service.server_close()
         process.terminate()

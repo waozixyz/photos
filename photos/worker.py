@@ -7,7 +7,7 @@ from pathlib import Path
 import time
 import urllib.error
 
-from .library import Library, atomic, packed
+from .library import Library, LibraryError, atomic, packed
 from .sync import Client
 
 
@@ -28,12 +28,18 @@ def process(request, config):
 
 def ui_query(library, request):
     result = library.query(request.get('view', 'photos'), request.get('search', ''),
-                           request.get('album', ''), request.get('offset', 0), sort=request.get('sort', 'newest'))
+                           request.get('album', ''), request.get('offset', 0), sort=request.get('sort', 'newest'),
+                           album_mode=request.get('album_mode', 'active'), album_sort=request.get('album_sort', 'name'))
     # The gallery needs only these fields. Full metadata and encrypted sync
     # manifests stay in the store rather than being decoded on every UI poll.
     fields = ('id', 'name', 'thumbnail', 'original', 'date', 'kind', 'favorite',
               'hidden', 'trashed', 'archived', 'width', 'height')
     result['photos'] = [{key: photo[key] for key in fields} for photo in result['photos']]
+    fields = ('name', 'count', 'thumbnail', 'pinned', 'archived')
+    result['albums'] = [{key: album[key] for key in fields} for album in result['albums']]
+    export = library.setting('export', {})
+    result['export_status'] = export.get('status', 'Choose a separate destination for a folder backup')
+    result['export_continuous'] = int(bool(export.get('continuous')))
     return result
 
 
@@ -55,6 +61,10 @@ def library_request(library, request, config):
         folders = request.get('folders') or [request.get('value', '')]
         if not folders or any(not isinstance(folder, str) or not folder.strip() or not Path(folder).expanduser().is_dir() for folder in folders):
             raise ValueError('Choose an existing folder to import')
+        exported = library.setting('export', {}).get('destination')
+        if exported:
+            from .export import destination
+            destination(library, exported, [*config.get('sources', []), *folders])
         sources = list(dict.fromkeys([*config.get('sources', []), *library.setting('sources', []), *folders]))
         library.set_setting('sources', sources)
         library.set_setting('import_requested', True)
@@ -62,6 +72,15 @@ def library_request(library, request, config):
     elif action == 'sync':
         library.set_setting('sync_requested', True)
         library.set_setting('status', 'ThinkPad sync requested')
+    elif action in {'export_start', 'export_continuous'}:
+        from .export import destination
+        target = destination(library, request.get('value', ''), config.get('sources', []))
+        library.set_setting('export', dict(destination=str(target), continuous=action == 'export_continuous',
+                                          requested=True, status='Export queued', revision=time.time_ns()))
+    elif action == 'export_stop':
+        state = library.setting('export', {})
+        state.update(continuous=False, requested=False, status='Continuous export stopped; folder copy retained', revision=time.time_ns())
+        library.set_setting('export', state)
     elif action == 'open':
         photo = library.photo(request['id'])
         if not library.original(photo).exists():
@@ -73,6 +92,12 @@ def library_request(library, request, config):
     elif action == 'album_rename':
         library.rename_album(request.get('album'), request.get('value'))
         request = {**request, 'album': request['value'].strip(), 'offset': 0}
+    elif action in {'album_create', 'album_description', 'album_cover', 'album_pinned', 'album_archived', 'album_delete_empty'}:
+        name = library.edit_album(request.get('album', ''), action.removeprefix('album_'), request.get('value'))
+        if action == 'album_delete_empty':
+            request = {**request, 'album': '', 'view': 'albums', 'offset': 0}
+        elif action == 'album_create':
+            request = {**request, 'album': name, 'view': 'photos', 'offset': 0}
     elif request.get('ids') is not None and action != 'export':
         library.edit_many(request['ids'], action, request.get('value'))
     elif action == 'export':
@@ -90,18 +115,30 @@ def library_request(library, request, config):
     result = ui_query(library, request)
     if request.get('id') and action != 'export':
         result['detail'] = library.details(request['id'])
-    if action == 'album_rename':
+    if action in {'album_rename', 'album_create', 'album_delete_empty'}:
         result['album'] = request['album']
+        result['view'] = request.get('view', 'photos')
     return result
 
 
 def daemon(config, once=False):
     library = Library(config['root'])
     lock = (library.root / '.worker.lock').open('a')
-    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        run_worker(library, config, once)
+    finally:
+        lock.close()
+        library.db.close()
+
+
+def run_worker(library, config, once=False):
     last_import = 0
+    last_export = 0
+    export_retry = 0
     client = Client(library, config) if config.get('node') else None
     while True:
+        pending = 0
         try:
             sources = library.setting('sources', config.get('sources', []))
             if sources and (time.monotonic() - last_import > 300 or library.setting('import_requested', False)):
@@ -114,8 +151,6 @@ def daemon(config, once=False):
             if config.get('node'):
                 pending = client.sync()
                 library.set_setting('sync_requested', False)
-                if pending and not once:
-                    continue
             else:
                 library.set_setting('status', 'Saved locally · configure the ThinkPad node to sync')
         except Exception as error:
@@ -130,10 +165,36 @@ def daemon(config, once=False):
             print(message, flush=True)
             if once:
                 raise
+        state = library.setting('export', {})
+        if time.monotonic() >= export_retry and (state.get('requested') or state.get('continuous') and time.monotonic() - last_export > 60):
+            try:
+                from .export import Export
+                state['status'] = 'Exporting library in the background'
+                library.set_setting('export', state)
+                cancelled = lambda: library.setting('export', {}).get('revision') != state.get('revision')
+                with Export(library, state['destination'], config.get('sources', []), client.materialize if client else None, cancelled) as output:
+                    result = output.run()
+                # Do not overwrite a user's Stop action or changed destination
+                # while a large export pass was running.
+                latest = library.setting('export', {})
+                if latest.get('revision') == state.get('revision'):
+                    latest.update(requested=False, status=f"Folder backup current · {result['photos']} photos", result=result)
+                    library.set_setting('export', latest)
+                last_export = time.monotonic()
+            except Exception as error:
+                latest = library.setting('export', {})
+                if latest.get('revision') == state.get('revision'):
+                    latest['status'] = str(error) if isinstance(error, LibraryError) else 'Folder export paused; it will retry without changing your originals'
+                    library.set_setting('export', latest)
+                    export_retry = time.monotonic() + 30
+                if once:
+                    raise
         if once:
             return
+        if pending:
+            continue
         for _ in range(30):
-            if library.setting('sync_requested', False) or library.setting('import_requested', False):
+            if library.setting('sync_requested', False) or library.setting('import_requested', False) or library.setting('export', {}).get('requested') and time.monotonic() >= export_retry:
                 break
             time.sleep(1)
 

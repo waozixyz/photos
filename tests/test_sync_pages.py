@@ -6,7 +6,7 @@ from unittest.mock import Mock
 
 from PIL import Image
 from photos.library import Library, digest_file
-from photos.sync import Client, COLLECTION
+from photos.sync import Client, COLLECTION, ALBUM_COLLECTION
 
 
 class SyncPagesTest(unittest.TestCase):
@@ -87,6 +87,26 @@ class SyncPagesTest(unittest.TestCase):
             changes_complete=True, server_version=100, changes=dict(encrypted_records=[])))
         self.client.exchange()
         self.assertEqual(self.library.setting('server_version'), 100)
+
+    def test_album_metadata_encryption_is_bound_and_page_failure_preserves_local_edit(self):
+        self.library.edit_album('', 'create', 'An empty album')
+        self.library.edit_album('An empty album', 'description', 'Private description')
+        record = self.client.album_record(self.library.album_details('An empty album'))
+        self.assertEqual(record['collection'], ALBUM_COLLECTION)
+        self.assertNotIn('Private description', json.dumps(record))
+        self.library.edit_album('An empty album', 'pinned')
+        self.client.accept(record)
+        self.assertEqual(self.library.album_details('An empty album')['pinned'], 1)
+        for changed in [{'collection': COLLECTION}, {'id': 'f' * 64}, {'nonce': 'tampered'}]:
+            with self.subTest(changed=changed):
+                response = self.page(self.records[0], True)
+                response['changes']['encrypted_records'].append({**record, **changed})
+                self.client.request = Mock(return_value=response)
+                with self.assertRaises(ValueError):
+                    self.client.exchange()
+                self.assertEqual(self.library.query()['total'], 0)
+                self.assertEqual(self.library.album_details('An empty album')['pinned'], 1)
+                self.assertEqual(self.library.setting('server_version', 0), 0)
 
 
 if __name__ == '__main__':

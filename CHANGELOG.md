@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.6
+
+- Create empty albums, edit descriptions, choose covers, pin favorites and browse active, archived or empty albums.
+- Archive an album to remove its photos from the home timeline while keeping them searchable and available in other albums.
+- Keep album details and empty albums in the encrypted ThinkPad backup.
+- Export the library into album folders with originals and metadata, and keep the copy current with optional continuous export.
+- Preserve files edited outside Photos and refuse export destinations that overlap import folders or the private library.
+
 ## 0.1.5
 
 - Restore retained empty originals from their encrypted backup without treating them as unfinished uploads.

@@ -170,6 +170,13 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         Label(session, 72, "Encrypted sync uses your ThinkPad's Daochi node only.", .{x + 18.0, body.y + 122.0, width - 36.0, 30.0})
         Label(session, 73, "Folder imports keep the source files untouched and merge duplicates.", .{x + 18.0, body.y + 164.0, width - 36.0, 30.0})
         Label(session, 74, "Offline changes are saved here and sync resumes automatically.", .{x + 18.0, body.y + 206.0, width - 36.0, 30.0})
+        Label(session, 209, "Folder backup", .{x + 18.0, body.y + 254.0, width - 36.0, 30.0}, 22)
+        Label(session, 210, TextUntilNul(Model.export_status[:]), .{x + 18.0, body.y + 294.0, width - 36.0, 30.0}, 14)
+        if Action(session, 211, "Export library", .{x + 18.0, body.y + 336.0, 148.0, 38.0}, !Model.loading) { Model.BeginEdit("export_start", "Export library", "", "Separate folder; exports albums and metadata, excluding Hidden and Trash") }
+        if Action(session, 212, "Continuous export", .{x + 178.0, body.y + 336.0, 174.0, 38.0}, !Model.loading) { Model.BeginEdit("export_continuous", "Enable continuous export", "", "Separate folder; album changes are mirrored in the background") }
+        if Model.export_continuous {
+            if Action(session, 213, "Stop export", .{x + 366.0, body.y + 336.0, 126.0, 38.0}, !Model.loading) { Model.Apply("export_stop") }
+        }
     } else if Model.selected >= 0 && Model.selected < Model.count {
         photo: *Photo = *Model.photos[Model.selected]
         if Action(session, 50, "Back", .{x, body.y, 68.0, 36.0}) { Model.selected = -1 }
@@ -199,7 +206,18 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, 98, "Rename", .{x + step + 8.0, bottom, step, 36.0}, ready) { Model.BeginEdit("rename", "Rename photo", TextUntilNul(photo.name[:]), "File name; the original bytes stay intact") }
         if Action(session, 99, "Remove from album", .{x + 2.0 * (step + 8.0), bottom, step * 2.0 + 8.0, 36.0}, ready) { Model.BeginEdit("album_remove", "Remove photo from album", TextUntilNul(Model.album[:]), "Album name; removing membership keeps the photo") }
         if Action(session, 95, ifx photo.archived then "Unarchive" else "Archive", .{x + 4.0 * (step + 8.0), bottom, step, 36.0}, ready) { SelectedAction("archived") }
+        if Model.album[0] != 0 && ready && !photo.hidden && !photo.trashed {
+            if Action(session, 205, "Use as album cover", .{x + width - 186.0, body.y + 44.0, 186.0, 36.0}) { Model.Apply("album_cover", TextUntilNul(photo.id[:])) }
+        }
     } else {
+        if Model.view == "albums" {
+            if Action(session, 200, "New album", .{x, body.y, 112.0, 36.0}, !Model.loading) { Model.BeginEdit("album_create", "Create album", "", "An empty album stays in your library until you add photos") }
+            filter := ifx Model.album_mode == "active" then "Active albums" else (ifx Model.album_mode == "archived" then "Archived albums" else "Empty albums")
+            if Action(session, 201, filter, .{x + 122.0, body.y, 156.0, 36.0}, !Model.loading) { Model.AlbumFilter() }
+            ordering := ifx Model.album_sort == "name" then "Album name" else (ifx Model.album_sort == "newest" then "Newest albums" else "Oldest albums")
+            if Action(session, 202, ordering, .{x + 288.0, body.y, 156.0, 36.0}, !Model.loading) { Model.AlbumSort() }
+            body.y += 44.0; body.height -= 44.0
+        }
         if Model.view != "albums" {
             if Action(session, 45, ifx Model.selecting then "Done" else "Select", .{x, body.y, 78.0, 36.0}) { if Model.selecting { Model.ClearSelection() } else { Model.selecting = true } }
             if Model.selecting {
@@ -215,6 +233,15 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                 if Action(session, 60, ifx Model.sort == "newest" then "Newest first" else "Oldest first", .{x + width - 132.0, body.y, 132.0, 36.0}, !Model.loading) { Model.ToggleSort() }
             }
             body.y += 44.0; body.height -= 44.0
+            if Model.album[0] != 0 && !Model.selecting {
+                step := (width - 24.0) / 4.0
+                if Action(session, 203, "Description", .{x, body.y, step, 36.0}, !Model.loading) { Model.BeginEdit("album_description", "Album description", TextUntilNul(Model.album_description[:]), "Describe this album") }
+                if Action(session, 204, ifx Model.album_pinned then "Unpin album" else "Pin album", .{x + step + 8.0, body.y, step, 36.0}, !Model.loading) { Model.Apply("album_pinned") }
+                if Action(session, 206, ifx Model.album_archived then "Unarchive album" else "Archive album", .{x + 2.0 * (step + 8.0), body.y, step, 36.0}, !Model.loading) { Model.Apply("album_archived") }
+                if Action(session, 207, "Delete empty album", .{x + 3.0 * (step + 8.0), body.y, step, 36.0}, !Model.loading && Model.matches == 0) { Model.Apply("album_delete_empty") }
+                body.y += 44.0; body.height -= 44.0
+                if Model.album_description[0] != 0 { Label(session, 208, TextUntilNul(Model.album_description[:]), .{x, body.y, width, 28.0}, 14); body.y += 32.0; body.height -= 32.0 }
+            }
             if Model.selecting { BulkBar(session, .{x, body.y, width, 80.0}); height: float32 = ifx width < 720.0 then 132.0 else 88.0; body.y += height; body.height -= height }
         }
         pointer := Input.PointerSample(session)
@@ -244,8 +271,13 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
             }
             if by + height < body.y || by > body.y + body.height { continue }
             if Model.view == "albums" {
-                if Action(session, cast(s32)(100 + i), TextUntilNul(Model.albums[i][:]), .{bx, by, width, 56.0}) {
-                    Model.ClearSelection(); Model.Set(Model.album[:], TextUntilNul(Model.albums[i][:])); Model.view = "photos"; Model.offset = 0; Model.scroll = 0; Model.Request(); break
+                item := *Model.catalog[i]
+                clicked := Action(session, cast(s32)(1000 + i), TextUntilNul(item.name[:]), .{bx + 68.0, by, width - 190.0, 56.0})
+                ImageAt(session, cast(u64)(4000000 + i), TextUntilNul(item.thumbnail[:]), TextUntilNul(item.name[:]), .{bx, by, 56.0, 56.0}, true)
+                info: Vec(u8); BuilderPrint(*info, "% items", item.count); if item.pinned { BuilderPrint(*info, " · Pinned") }
+                text := BuilderFinish(info); Label(session, cast(u64)(4100000 + i), text, .{bx + width - 120.0, by + 16.0, 120.0, 24.0}, 13); Model.Release(text)
+                if clicked {
+                    Model.ClearSelection(); Model.Set(Model.album[:], TextUntilNul(item.name[:])); Model.view = "photos"; Model.offset = 0; Model.scroll = 0; Model.Request(); break
                 }
             } else {
                 photo: *Photo = *Model.photos[i]

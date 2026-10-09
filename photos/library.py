@@ -70,6 +70,11 @@ class Library:
                 path TEXT PRIMARY KEY, size INTEGER, mtime INTEGER,
                 meta_stamp TEXT, photo_id TEXT REFERENCES photos(id));
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS albums (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL DEFAULT '',
+                cover TEXT NOT NULL DEFAULT '', pinned INTEGER NOT NULL DEFAULT 0,
+                archived INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0,
+                created REAL NOT NULL, updated REAL NOT NULL, dirty INTEGER NOT NULL DEFAULT 1);
         ''')
         for column, declaration in [('edits', "TEXT NOT NULL DEFAULT '{}'"),
                                     ('archived', 'INTEGER NOT NULL DEFAULT 0')]:
@@ -80,6 +85,14 @@ class Library:
                 if column not in {row[1] for row in self.db.execute('PRAGMA table_info(photos)')}:
                     self.db.execute(f'ALTER TABLE photos ADD COLUMN {column} {declaration}')
         self.db.commit()
+        self.import_album_names = {}
+        if not self.setting('album_catalog_migrated', False):
+            with self.db:
+                self.db.execute('BEGIN IMMEDIATE')
+                if not self.setting('album_catalog_migrated', False):
+                    for row in self.db.execute('SELECT DISTINCT value FROM photos,json_each(photos.albums)').fetchall():
+                        self._ensure_album(row[0])
+                    self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)', ('album_catalog_migrated', 'true'))
 
     def setting(self, key, default=None):
         row = self.db.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
@@ -181,7 +194,7 @@ class Library:
         except (TypeError, ValueError, AttributeError):
             taken = stat.st_mtime
         relative = path.relative_to(source_root)
-        album = str(relative.parent) if relative.parent != Path('.') else source_root.name
+        album = self.import_album_names.get(str(path.parent), str(relative.parent) if relative.parent != Path('.') else source_root.name)
         if existing:
             # An edit may have completed while EXIF/sidecars were being read.
             # Re-read its markers under the writer lock before merging.
@@ -194,6 +207,8 @@ class Library:
         exported_albums = {name for name in exported_albums if isinstance(name, str) and name.strip() and len(name.encode()) <= 512}
         albums = sorted((set(json.loads(existing['albums']) if existing else []) | {album} | exported_albums)
                         - set(edits.get('removed_albums', [])))
+        for name in albums:
+            self._ensure_album(name)
         combined = json.loads(existing['metadata']) if existing else {}
         combined.update(metadata)
         if existing:
@@ -242,6 +257,29 @@ class Library:
                 raise ValueError('Choose an existing source folder outside the Photos library')
             for base, directories, filenames in os.walk(root, followlinks=False):
                 directories[:] = sorted(d for d in directories if d not in {'metadata', '.meta', '.git'} and not (Path(base) / d).is_symlink())
+                album_sidecar = Path(base) / '.photos-album.json'
+                if album_sidecar.is_file() and not album_sidecar.is_symlink():
+                    try:
+                        if album_sidecar.stat().st_size > 16384:
+                            raise LibraryError('Album metadata is too large')
+                        info = json.loads(album_sidecar.read_bytes())
+                        name = self.album_name(info.get('name'))
+                        description = info.get('description', '')
+                        cover = info.get('cover', '')
+                        if not isinstance(description, str) or len(description.encode()) > 8192 or not isinstance(cover, str) or cover and (len(cover) != 64 or any(c not in '0123456789abcdef' for c in cover)):
+                            raise LibraryError('Invalid album metadata')
+                        if any(type(info.get(k, 0)) not in {int, bool} or info.get(k, 0) not in (0, 1) for k in ['pinned', 'archived']):
+                            raise LibraryError('Invalid album state')
+                        self.import_album_names[str(Path(base))] = name
+                        with self.db:
+                            self.db.execute('BEGIN IMMEDIATE')
+                            existed = self.db.execute('SELECT 1 FROM albums WHERE name=?', (name,)).fetchone()
+                            album = self._ensure_album(name)
+                            if not existed:
+                                self.db.execute('UPDATE albums SET description=?,cover=?,pinned=?,archived=? WHERE id=?',
+                                                (description, cover, int(info.get('pinned', 0)), int(info.get('archived', 0)), album['id']))
+                    except (ValueError, OSError, AttributeError):
+                        result['warning'] += 1
                 for name in sorted(filenames):
                     try:
                         result[self.import_file(Path(base) / name, root)] += 1
@@ -295,6 +333,8 @@ class Library:
         elif action in {'album_add', 'album_remove'}:
             albums = set(json.loads(photo['albums']))
             name = self.album_name(value)
+            if action == 'album_add':
+                self._ensure_album(name)
             albums.add(name) if action == 'album_add' else albums.discard(name)
             removed = set(edits.get('removed_albums', []))
             removed.discard(name) if action == 'album_add' else removed.add(name)
@@ -326,14 +366,95 @@ class Library:
             return
         with self.db:
             self.db.execute('BEGIN IMMEDIATE')
-            if self.db.execute('SELECT 1 FROM photos,json_each(photos.albums) WHERE value=? LIMIT 1', (new,)).fetchone():
+            current = self.album_details(old)
+            if self.db.execute('SELECT 1 FROM albums WHERE name=? AND deleted=0', (new,)).fetchone():
                 raise LibraryError('An album with that name already exists')
             ids = [r[0] for r in self.db.execute('SELECT id FROM photos WHERE EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=?)', (old,))]
-            if not ids:
-                raise LibraryError('Album not found')
+            if self.db.execute('SELECT 1 FROM albums WHERE name=? AND deleted=1', (new,)).fetchone():
+                raise LibraryError('That album name is retained for synchronization; choose another name')
+            self.db.execute('UPDATE albums SET name=?,updated=?,dirty=1 WHERE id=?', (new, time.time(), current['id']))
             for photo_id in ids:
                 self._edit(photo_id, 'album_remove', old)
                 self._edit(photo_id, 'album_add', new)
+
+    def _ensure_album(self, name, dirty=1):
+        name = self.album_name(name)
+        existing = self.db.execute('SELECT * FROM albums WHERE name=?', (name,)).fetchone()
+        if existing:
+            return existing
+        album_id = hashlib.sha256(('photos.album.v1:' + name).encode()).hexdigest()
+        # A renamed album retains its identity. Later imports into its old
+        # folder need a distinct album rather than an orphaned membership.
+        while self.db.execute('SELECT 1 FROM albums WHERE id=?', (album_id,)).fetchone():
+            album_id = hashlib.sha256((album_id + ':next').encode()).hexdigest()
+        now = time.time() if dirty else 0
+        self.db.execute('INSERT OR IGNORE INTO albums(id,name,created,updated,dirty) VALUES(?,?,?,?,?)',
+                        (album_id, name, now, now, dirty))
+        # A tombstone prevents stale source scans from recreating a deleted album.
+        return self.db.execute('SELECT * FROM albums WHERE name=?', (name,)).fetchone()
+
+    def album_details(self, name):
+        row = self.db.execute('SELECT * FROM albums WHERE name=? AND deleted=0', (name,)).fetchone()
+        if not row:
+            raise LibraryError('Album not found')
+        return dict(row)
+
+    def edit_album(self, name, action, value=None):
+        with self.db:
+            self.db.execute('BEGIN IMMEDIATE')
+            if action == 'create':
+                name = self.album_name(value)
+                if self.db.execute('SELECT 1 FROM albums WHERE name=?', (name,)).fetchone():
+                    raise LibraryError('An album with that name already exists or is retained for synchronization')
+                self._ensure_album(name)
+                return name
+            album = self.album_details(name)
+            if action == 'description':
+                if not isinstance(value, str) or len(value.encode()) > 8192:
+                    raise LibraryError('Enter at most 8192 bytes of text')
+                self.db.execute('UPDATE albums SET description=?,updated=?,dirty=1 WHERE id=?', (value, time.time(), album['id']))
+            elif action == 'cover':
+                if value:
+                    photo = self.photo(value)
+                    if name not in json.loads(photo['albums']) or photo['hidden'] or photo['trashed']:
+                        raise LibraryError('Choose a visible photo in this album for its cover')
+                self.db.execute('UPDATE albums SET cover=?,updated=?,dirty=1 WHERE id=?', (value or '', time.time(), album['id']))
+            elif action in {'pinned', 'archived'}:
+                self.db.execute(f'UPDATE albums SET {action}=?,updated=?,dirty=1 WHERE id=?',
+                                (int(not album[action]), time.time(), album['id']))
+            elif action == 'delete_empty':
+                # Hidden and trashed members count as members too. Never detach originals here.
+                if self.db.execute('SELECT 1 FROM photos,json_each(photos.albums) WHERE value=? LIMIT 1', (name,)).fetchone():
+                    raise LibraryError('Only an album with no photos can be deleted')
+                self.db.execute('UPDATE albums SET deleted=1,updated=?,dirty=1 WHERE id=?', (time.time(), album['id']))
+            else:
+                raise LibraryError('Unknown album action')
+        return name
+
+    def album_list(self, mode='active', sort='name', search=''):
+        if mode not in {'active', 'archived', 'empty', 'all'} or sort not in {'name', 'newest', 'oldest'}:
+            raise LibraryError('Choose a valid album filter and ordering')
+        members = {}
+        for row in self.db.execute('''SELECT p.id,p.taken,j.value FROM photos p,json_each(p.albums) j
+                                      WHERE p.trashed=0 AND p.hidden=0 ORDER BY p.taken DESC,p.id'''):
+            members.setdefault(row['value'], []).append(row['id'])
+        result = []
+        for row in self.db.execute('SELECT * FROM albums WHERE deleted=0'):
+            album = dict(row)
+            ids = members.get(album['name'], [])
+            if search and search.casefold() not in album['name'].casefold():
+                continue
+            if mode == 'active' and album['archived'] or mode == 'archived' and not album['archived']:
+                continue
+            if mode == 'empty' and (album['archived'] or ids):
+                continue
+            cover = album['cover'] if album['cover'] in ids else (ids[0] if ids else '')
+            preview = self.thumbnail(cover)
+            album.update(count=len(ids), thumbnail=str(preview) if cover and preview.is_file() else '')
+            result.append(album)
+        result.sort(key=lambda a: (not a['pinned'], a['name'].casefold(), a['id']) if sort == 'name' else
+                    (not a['pinned'], -a['created'] if sort == 'newest' else a['created'], a['id']))
+        return result
 
     def details(self, photo_id):
         photo = self.photo(photo_id)
@@ -349,7 +470,7 @@ class Library:
                     taken=datetime.fromtimestamp(photo['taken'], timezone.utc).isoformat(),
                     location=f"{geo.get('latitude', '')}, {geo.get('longitude', '')}" if isinstance(geo, dict) and 'latitude' in geo else '')
 
-    def query(self, view='photos', search='', album='', offset=0, limit=60, sort='newest'):
+    def query(self, view='photos', search='', album='', offset=0, limit=60, sort='newest', album_mode='active', album_sort='name'):
         if sort not in {'newest', 'oldest'}:
             raise LibraryError('Choose newest first or oldest first')
         where, args = ['trashed=0', 'hidden=0'], []
@@ -362,13 +483,14 @@ class Library:
         elif view == 'videos':
             where.append("kind='video'")
         elif view == 'archive':
-            where.append('archived=1')
+            where.append('(archived=1 OR EXISTS(SELECT 1 FROM json_each(photos.albums) j JOIN albums a ON a.name=j.value WHERE a.archived=1 AND a.deleted=0))')
         elif view == 'uncategorized':
             where.append('json_array_length(albums)=0')
         elif view == 'photos' and not album and not search:
             # Archive removes items only from the home timeline. Albums and
             # search retain them, unlike Hidden and Trash.
             where.append('archived=0')
+            where.append('NOT EXISTS(SELECT 1 FROM json_each(photos.albums) j JOIN albums a ON a.name=j.value WHERE a.archived=1 AND a.deleted=0)')
         if album:
             where.append('EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=?)')
             args.append(album)
@@ -388,12 +510,16 @@ class Library:
             photo['original'] = str(self.original(photo)) if self.original(photo).exists() else ''
             photo['albums'] = json.loads(photo['albums'])
             photos.append(photo)
-        albums = [dict(name=row[0], count=row[1]) for row in self.db.execute('''
-            SELECT value,COUNT(*) FROM photos,json_each(photos.albums)
-            WHERE trashed=0 AND hidden=0 GROUP BY value ORDER BY value COLLATE NOCASE''')]
+        albums = self.album_list(album_mode, album_sort, search if view == 'albums' else '')
         totals = self.db.execute('SELECT COUNT(*),COALESCE(SUM(size),0),SUM(dirty) FROM photos').fetchone()
-        return dict(photos=photos, count=count, albums=albums, total=totals[0], bytes=totals[1], pending=totals[2] or 0,
+        album_pending = self.db.execute('SELECT COUNT(*) FROM albums WHERE dirty=1').fetchone()[0]
+        result = dict(photos=photos, count=count, albums=albums, total=totals[0], bytes=totals[1], pending=(totals[2] or 0) + album_pending,
                     status=self.setting('status', 'Local library · ThinkPad sync only'), importing=self.setting('import', {}))
+        if album:
+            row = self.db.execute('SELECT * FROM albums WHERE name=? AND deleted=0', (album,)).fetchone()
+            if row:
+                result['album_detail'] = dict(row)
+        return result
 
     def export(self, photo_id, folder):
         photo = self.photo(photo_id)
