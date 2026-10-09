@@ -44,6 +44,7 @@ Publish :: () {
     BuilderPrint(*out,",\"guest_active\":%",Model.guest_active)
     BuilderPrint(*out,",\"app_lock_enabled\":%,\"app_locked\":%",Model.app_lock_enabled,Model.app_locked)
     BuilderPrint(*out,",\"app_lock_method\":%",Model.app_lock_method)
+    BuilderPrint(*out,",\"app_lock_delay\":%",Model.app_lock_delay)
     BuilderPrint(*out,",\"detected_words\":%",TextDetection.count)
     BuilderPrint(*out,",\"detected_codes\":%,\"chosen_code\":%",QRDetection.count,QRDetection.chosen)
     BuilderPrint(*out,",\"slideshow_active\":%,\"slideshow_paused\":%,\"slideshow_offset\":%,\"slideshow_count\":%,\"slideshow_interval\":%,\"slideshow_albums\":%",Model.slide_active,Model.slide_paused,Model.slide_offset,Model.slide_count,Model.slide_intervals[Model.slide_interval],Model.slide_album_count)

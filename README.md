@@ -338,9 +338,14 @@ Permission checks continue while viewing; an unavailable service clears photos,
 playback, extracted text and other previews within a short access lease. A stale
 query or permission response cannot reopen the library after it locks.
 Originals, account keys and encrypted ThinkPad backup remain unchanged.
-This currently provides opening and manual locking. Background auto-lock timers,
-system authentication and phone app-switcher hiding remain unfinished compared
-with [Ente app lock](https://ente.com/help/photos/features/account/app-lock).
+Choose Lock after leaving Photos: Immediately, 5 seconds, 15 seconds, 1 minute,
+5 minutes or 30 minutes. Losing keyboard focus starts the background timer;
+returning before the deadline cancels it. An expired deadline locks before a
+returning focus event or delayed authentication can reveal the library. The
+delay stays on this device and survives restart and app credential changes.
+Guest view keeps its restricted gallery when focus changes and still requires
+authentication to leave. System authentication and phone app-switcher hiding
+remain unfinished compared with [Ente app lock](https://ente.com/help/photos/features/account/app-lock).
 The screen and its access-expiry decisions are Ziran/Kryon; the local session
 adapter still uses Python and the existing native Argon2id verifier.
 

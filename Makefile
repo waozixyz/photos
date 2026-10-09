@@ -1,9 +1,18 @@
 .DEFAULT_GOAL := build
-.PHONY: app-lock-window-test app-lock-portable-test
+.PHONY: app-lock-policy-test
+app-lock-policy-test:
+	$(ZIRAN) build --project $(PACKAGE_FLAGS) --root tests --target=c --entry app_lock_policy_test:main --exe -o build/app-lock-policy tests/app_lock_policy_test.zi
+	build/app-lock-policy/app_lock_policy_test
+	$(ZIRAN) bundle --project $(PACKAGE_FLAGS) --root tests --entry app_lock_policy_test:Answer -o build/app-lock-policy-test.zib tests/app_lock_policy_test.zi
+	test "$$($(ZIRAN) run build/app-lock-policy-test.zib)" = 42
+test: app-lock-policy-test
+.PHONY: app-lock-window-test app-lock-portable-test app-lock-hosted-test
 app-lock-window-test: build
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/app_lock_window.py
 app-lock-portable-test: bundle
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_APP_LOCK_PORTABLE=1 $(PYTHON) tests/app_lock_window.py
+app-lock-hosted-test: bundle
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_APP_LOCK_PORTABLE=1 PHOTOS_APP_LOCK_HOSTED=1 $(PYTHON) tests/app_lock_window.py
 .PHONY: guest-window-test guest-portable-test
 guest-window-test: build
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/guest_window.py

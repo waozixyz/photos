@@ -6,6 +6,7 @@ Map :: #import "map";
 TextDetection :: #import "text_detection";
 QRDetection :: #import "qr_detection";
 Collage :: #import "collage";
+AppLockPolicy :: #import "app_lock_policy";
 #if #defined(POSIX_THREADS) {
     Clock :: #import "kryon/ClockLinux";
 } else {
@@ -144,6 +145,9 @@ app_lock_auth_pending: bool;
 app_lock_check_pending: bool;
 app_lock_method: s32;
 app_lock_begin_pending: bool;
+app_lock_delay: s32;
+app_lock_since: s64 = -1;
+app_lock_revoke_pending: bool;
 edit_value: [8193]u8;
 detail_id: [65]u8;
 detail_caption: [8193]u8;
@@ -345,10 +349,26 @@ ReadPhoto :: (json: string, start: s32, photo: *Photo) -> s32 {
     }
     return ifx at >= 0 && at < cast(s32)json.count && json[at] == 125 then at + 1 else -1
 }
-Tick :: () {
+CheckAppBackground :: (focused: bool, now: s64) -> bool {
+    decision := AppLockPolicy.Background(app_lock_enabled,app_locked,guest_active,focused,app_lock_since,now,app_lock_delay)
+    app_lock_since = decision.since
+    if !decision.lock { return false }
+    // A submitted authentication or heartbeat may arrive after this deadline.
+    // Clear its authority before accepting a response, and revoke on the next
+    // free service slot even if the old response is discarded.
+    app_lock_auth_pending = false; app_lock_revoke_pending = true; app_lock_poll = 0
+    EnterAppLock(); Set(message[:],"Photos locked while in the background")
+    return true
+}
+Tick :: (window_focused: bool) {
     if app_lock_begin_pending { app_lock_begin_pending = false; app_lock_enabled = true; EnterAppLock() }
     ticks += 1;
     now := Clock.Milliseconds()
+    unused CheckAppBackground(window_focused,now)
+    if app_lock_revoke_pending && !loading && now >= app_lock_poll {
+        app_lock_poll = now+500; Request("app_lock_lock")
+        if loading { app_lock_revoke_pending = false }
+    }
     if slide_active && (now < 0 || (slide_id[0] != 0 && now >= slide_valid_until)) {
         StopSlides(); Set(message[:],"Slideshow access ended; reopen the gallery to retry")
     }
@@ -373,6 +393,7 @@ Tick :: () {
         json := Transport.Value()
         ReadHeader(json)
         if Lookup(json,0,"app_lock_method") >= 0 { app_lock_method = Number(json,0,"app_lock_method"); if app_locked { editor_hint = AppLockHint() } }
+        if Lookup(json,0,"app_lock_delay") >= 0 { app_lock_delay = Number(json,0,"app_lock_delay") }
         if Lookup(json,0,"guest_configured") >= 0 { guest_configured = Number(json,0,"guest_configured") > 0 }
         if guest_active && (Lookup(json,0,"guest_active") < 0 || (Number(json,0,"guest_active") == 0 && Number(json,0,"guest_exit_authorized") != 1)) {
             ClearGuestDisplay(); Set(message[:],"Guest view is unavailable; authenticate to leave"); return
@@ -396,7 +417,12 @@ Tick :: () {
             }
             if Lookup(json,0,"app_locked") >= 0 { app_locked = false; app_lock_valid_until = Clock.Milliseconds()+2500; app_lock_poll = Clock.Milliseconds()+500 }
             if Lookup(json,0,"app_lock_token") >= 0 { Decode(json,0,"app_lock_token",app_lock_token[:]) }
-            if Number(json,0,"app_lock_checked") == 1 { return }
+            if CheckAppBackground(window_focused,Clock.Milliseconds()) { return }
+            if Number(json,0,"app_lock_checked") == 1 {
+                if Lookup(json,0,"status") >= 0 { Decode(json,0,"status",message[:]) }
+                if Lookup(json,0,"error") >= 0 { Decode(json,0,"error",message[:]) }
+                return
+            }
         }
         if collage_request {
             collage_request = false
@@ -805,7 +831,20 @@ ResetGuest :: () {
 EnterAppLock :: () {
     if !app_locked { ResetGuest(); BeginEdit("app_lock_unlock","Unlock Photos","",AppLockHint()) }
     else { ClearGuestDisplay() }
-    app_locked = true; app_lock_valid_until = 0; Wipe(app_lock_token[:])
+    app_locked = true; app_lock_valid_until = 0; app_lock_since = -1; Wipe(app_lock_token[:])
+}
+AppLockDelay :: (seconds: s32) {
+    if !AppLockReady() || !app_lock_enabled { return }
+    value: Vec(u8); BuilderPrint(*value,"%",seconds); text := BuilderFinish(value)
+    Request("app_lock_delay","",text); Release(text)
+}
+AppLockDelayLabel :: () -> string {
+    if app_lock_delay == 5 { return "5 seconds" }
+    if app_lock_delay == 15 { return "15 seconds" }
+    if app_lock_delay == 60 { return "1 minute" }
+    if app_lock_delay == 300 { return "5 minutes" }
+    if app_lock_delay == 1800 { return "30 minutes" }
+    return "Immediately"
 }
 AppLockReady :: () -> bool { return !loading || app_lock_check_pending }
 AppLockHint :: () -> string { return ifx app_lock_method == 1 then "Your app PIN" else (ifx app_lock_method == 2 then "Your app password" else "Your local Hidden password") }

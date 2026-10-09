@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.40
+
+- Lock Photos automatically after leaving it, immediately or after 5 seconds, 15 seconds, 1 minute, 5 minutes or 30 minutes.
+- Return before the selected delay to keep browsing; an expired delay clears photos and previews and requires your app credential again.
+- Keep the delay on this device across restarts and credential changes, while Guest view retains its restricted gallery.
+
 ## 0.1.39
 
 - Choose a separate app PIN or password to protect opening Photos without needing to set up Hidden first.

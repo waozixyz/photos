@@ -1,0 +1,16 @@
+// Background timing is app policy; the host supplies only owned-window focus.
+Decision :: struct { since: s64; lock: bool }
+Background :: (enabled: bool, locked: bool, guest: bool, focused: bool,
+    since: s64, now: s64, seconds: s32) -> Decision {
+    result: Decision; result.since = -1
+    if !enabled || locked || guest { return result }
+    if now < 0 || seconds < 0 || seconds > 1800 { result.lock = true; return result }
+    // Check a past deadline before a focus-return event can clear the timer.
+    if since >= 0 && (now < since || now-since >= cast(s64)seconds*1000) {
+        result.lock = true; return result
+    }
+    if focused { return result }
+    result.since = ifx since < 0 then now else since
+    result.lock = seconds == 0
+    return result
+}

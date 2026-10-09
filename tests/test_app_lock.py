@@ -197,3 +197,27 @@ class AppLockTest(unittest.TestCase):
             result = subprocess.run([str(program), action], input=struct.pack('!I',len(value))+value, capture_output=True)
             self.assertEqual(result.returncode, 2); self.assertFalse(result.stdout); self.assertFalse(result.stderr)
         with self.assertRaises(LibraryError): vault.authenticate(self.library, '0042')
+
+    def test_background_delay_is_authenticated_bounded_local_and_preserves_credentials(self):
+        self.enable(); token = self.unlock()
+        original = app_lock.path(self.library).read_bytes()
+        self.assertEqual(self.request(action='app_lock_delay', value='5')['app_locked'], 1)
+        self.assertEqual(app_lock.path(self.library).read_bytes(), original)
+        for delay in ['-1','1','600','999999',None,True,[],{}]:
+            result = self.request(action='app_lock_delay', value=delay, app_lock_token=token)
+            self.assertIn('error', result); self.assertEqual(app_lock.path(self.library).read_bytes(), original)
+        for delay in [5,15,60,300,1800,0]:
+            result = self.request(action='app_lock_delay', value=str(delay), app_lock_token=token)
+            self.assertEqual(result['app_lock_delay'], delay); self.assertFalse(result['app_locked'])
+            self.assertNotIn('photos', result); self.assertFalse(app_lock.unlocked(self.library, token))
+            token = result['app_lock_token']; self.assertTrue(app_lock.unlocked(self.library, token))
+            original = app_lock.path(self.library).read_bytes()
+        self.request(action='app_lock_delay', value='15', app_lock_token=token)
+        app_lock.revoke(self.library)
+        result = self.request(action='query')
+        self.assertEqual(result['app_lock_delay'], 15); self.assertEqual(result['app_locked'], 1)
+        token = self.unlock()
+        self.request(action='app_lock_pin', value='0042', app_lock_token=token)
+        result = self.request(action='app_lock_unlock', value='0042')
+        self.assertEqual(result['app_lock_delay'], 15)
+        self.assertEqual((self.source/'Photo.png').read_bytes(), self.original)

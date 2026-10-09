@@ -1,0 +1,39 @@
+Policy :: #import "app_lock_policy";
+
+#program_export
+Answer :: () -> s32 {
+    result := Policy.Background(true,false,false,false,-1,100,0)
+    if !result.lock { return 1 }
+    result = Policy.Background(true,false,false,false,-1,100,5)
+    if result.lock || result.since != 100 { return 2 }
+    result = Policy.Background(true,false,false,false,100,5099,5)
+    if result.lock || result.since != 100 { return 3 }
+    result = Policy.Background(true,false,false,false,100,5100,5)
+    if !result.lock { return 4 }
+    result = Policy.Background(true,false,false,true,100,5100,5)
+    if !result.lock { return 5 }
+    result = Policy.Background(true,false,false,true,100,5099,5)
+    if result.lock || result.since != -1 { return 6 }
+    result = Policy.Background(true,false,false,true,-1,50000,0)
+    if result.lock || result.since != -1 { return 7 }
+    result = Policy.Background(true,false,false,false,100,99,5)
+    if !result.lock { return 8 }
+    result = Policy.Background(true,false,false,false,-1,-1,5)
+    if !result.lock { return 9 }
+    result = Policy.Background(false,false,false,false,100,50000,0)
+    if result.lock || result.since != -1 { return 10 }
+    result = Policy.Background(true,true,false,false,100,50000,0)
+    if result.lock || result.since != -1 { return 11 }
+    result = Policy.Background(true,false,true,false,100,50000,0)
+    if result.lock || result.since != -1 { return 12 }
+    result = Policy.Background(true,false,false,false,0,1799999,1800)
+    if result.lock || result.since != 0 { return 13 }
+    result = Policy.Background(true,false,false,true,0,1800000,1800)
+    if !result.lock { return 14 }
+    result = Policy.Background(true,false,false,false,-1,0,1801)
+    if !result.lock { return 15 }
+    return 42
+}
+
+#program_export
+main :: () -> s32 { return ifx Answer() == 42 then 0 else 1 }

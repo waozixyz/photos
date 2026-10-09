@@ -9,6 +9,7 @@ Viewer :: #import "viewer";
 Map :: #import "map";
 TextDetection :: #import "text_detection";
 QRDetection :: #import "qr_detection";
+HostWindow :: #import "kryon/Window";
 #if #defined(POSIX_THREADS) {
     Window :: #import "desktop";
     HostTheme :: #import "kryon/SystemThemeHostLinux";
@@ -443,7 +444,7 @@ GuestView :: (session: Session, viewport: Rectangle, key: s32, modifiers: s32, t
 #program_export
 Frame :: (session: Session, viewport: Rectangle) -> s32 {
     Prepare(); defer { Publish() }
-    Model.Tick()
+    Model.Tick(HostWindow.WindowFocused())
     background: BoxProps; background.key = 1; background.bounds = viewport; background.fill = BackgroundColor(); Box(session, background)
     key := KeyboardTake(session); modifiers := KeyboardModifiers(session); typed_bytes: [256]u8; typed := TypedTextTake(session, typed_bytes[:])
     if Model.guest_active { GuestView(session,viewport,key,modifiers,typed); return 0 }
@@ -478,8 +479,19 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Model.editor == "app_lock_settings" {
             if Action(session,635,ifx Model.app_lock_enabled then "Change app PIN" else "Set app PIN",.{x,y+234.0,168.0,40.0},Model.AppLockReady()) { Model.BeginEdit("app_lock_pin","Set app PIN","","4 through 12 digits; separate from Hidden") }
             if Action(session,636,ifx Model.app_lock_enabled then "Change app password" else "Set app password",.{x+184.0,y+234.0,204.0,40.0},Model.AppLockReady()) { Model.BeginEdit("app_lock_password","Set app password","","At least 8 characters; separate from Hidden") }
+            if Model.app_lock_enabled {
+                Label(session,637,"Lock after leaving Photos",.{x,y+290.0,width,28.0},18)
+                Label(session,638,Model.AppLockDelayLabel(),.{x,y+318.0,width,24.0},15)
+                choices: [6]string = .{"Immediately","5 seconds","15 seconds","1 minute","5 minutes","30 minutes"}
+                seconds: [6]s32 = .{0,5,15,60,300,1800}
+                step := (width-16.0)/3.0
+                for i: 0..5 {
+                    bounds: Rectangle = .{x+cast(float32)(i%3)*(step+8.0),y+354.0+cast(float32)(i/3)*48.0,step,40.0}
+                    if Action(session,639+cast(s32)i,choices[i],bounds,Model.AppLockReady()) { Model.AppLockDelay(seconds[i]) }
+                }
+            }
         }
-        Label(session,633,TextUntilNul(Model.message[:]),.{x,y+300.0,width,56.0},15)
+        Label(session,633,TextUntilNul(Model.message[:]),.{x,y+(ifx Model.editor == "app_lock_settings" && Model.app_lock_enabled then 458.0 else 300.0),width,56.0},15)
         return 0
     }
     if Model.slide_active {

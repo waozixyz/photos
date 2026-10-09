@@ -11,6 +11,7 @@ from . import vault
 sessions = {}
 failures = {}
 SESSION_SECONDS = 600
+AUTO_LOCK_SECONDS = {0, 5, 15, 60, 300, 1800}
 
 
 def path(library):
@@ -20,7 +21,7 @@ def path(library):
 def settings(library):
     marker = path(library)
     if not os.path.lexists(marker):
-        return dict(enabled=False, method='hidden', verifier='')
+        return dict(enabled=False, method='hidden', verifier='', auto_lock=0)
     try:
         if marker.is_symlink() or marker.stat().st_size > 1024:
             raise ValueError()
@@ -28,8 +29,10 @@ def settings(library):
         if not isinstance(value, dict) or type(value.get('version')) is not int or type(value.get('enabled')) is not bool:
             raise ValueError()
         if value['version'] == 1 and set(value) == {'version', 'enabled'}:
-            return dict(enabled=value['enabled'], method='hidden', verifier='')
-        if value['version'] != 2 or set(value) != {'version', 'enabled', 'method', 'verifier'}:
+            return dict(enabled=value['enabled'], method='hidden', verifier='', auto_lock=0)
+        required = {'version', 'enabled', 'method', 'verifier'}
+        if value['version'] == 3: required.add('auto_lock')
+        if value['version'] not in {2, 3} or set(value) != required:
             raise ValueError()
         if value['method'] not in {'hidden', 'pin', 'password'} or not isinstance(value['verifier'], str):
             raise ValueError()
@@ -39,11 +42,14 @@ def settings(library):
         elif not verifier.startswith('$argon2id$') or len(verifier) >= 128:
             raise ValueError()
         verifier.encode('ascii')
+        delay = value.get('auto_lock', 0)
+        if type(delay) is not int or delay not in AUTO_LOCK_SECONDS: raise ValueError()
+        value['auto_lock'] = delay
         return value
     except (OSError, ValueError, UnicodeError, TypeError, RecursionError):
         # Preserve recovery of old damaged markers using the existing Hidden
         # verifier, while never treating an unreadable marker as disabled.
-        return dict(enabled=True, method='hidden', verifier='')
+        return dict(enabled=True, method='hidden', verifier='', auto_lock=0)
 
 
 def enabled(library):
@@ -95,6 +101,7 @@ def state(library, token='', renew=False):
     config = settings(library); active = config['enabled']
     return dict(app_lock_enabled=int(active), app_locked=int(active and not unlocked(library, token, renew)),
                 app_lock_configured=int(vault.configured(library)),
+                app_lock_delay=config['auto_lock'],
                 app_lock_method={'hidden': 0, 'pin': 1, 'password': 2}[config['method']])
 
 
@@ -154,19 +161,35 @@ def route(library, request):
         return empty(library)
     if active and not unlocked(library, token):
         return empty(library)
+    if action == 'app_lock_delay':
+        try:
+            value = request.get('value')
+            if not active: raise LibraryError('Enable App lock before choosing its background delay')
+            if not isinstance(value, str) or value not in {str(i) for i in AUTO_LOCK_SECONDS}:
+                raise LibraryError('Choose Immediately, 5 seconds, 15 seconds, 1 minute, 5 minutes or 30 minutes')
+            config = {**settings(library), 'version': 3, 'auto_lock': int(value)}
+            atomic(path(library), packed(config).encode())
+            revoke(library); token = grant(library)
+            return dict(state(library, token), app_lock_token=token, app_lock_checked=1,
+                        status='Background lock delay saved on this device')
+        except LibraryError as error:
+            return dict(state(library, token), error=str(error), app_lock_checked=1)
     if action in {'app_lock_enable', 'app_lock_disable', 'app_lock_pin', 'app_lock_password'}:
         try:
             if action in {'app_lock_pin', 'app_lock_password'}:
                 method = 'pin' if action == 'app_lock_pin' else 'password'
                 verifier = vault.hash_password(request.get('value'), pin=method == 'pin')
-                config = dict(version=2, enabled=True, method=method, verifier=verifier)
+                config = dict(version=3, enabled=True, method=method, verifier=verifier,
+                              auto_lock=settings(library)['auto_lock'])
             else:
                 if action == 'app_lock_enable':
                     hidden_token = vault.authenticate(library, request.get('value'))
                     vault.lock(library, hidden_token)
                 else:
                     authenticate(library, request.get('value'))
-                config = dict(version=1, enabled=action == 'app_lock_enable')
+                config = (dict(version=3, enabled=True, method='hidden', verifier='',
+                               auto_lock=settings(library)['auto_lock']) if action == 'app_lock_enable'
+                          else dict(version=1, enabled=False))
             if active and not unlocked(library, token):
                 raise LibraryError('App access ended; unlock before changing its settings')
             atomic(path(library), packed(config).encode())
