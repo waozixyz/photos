@@ -53,7 +53,7 @@ class GuestTest(unittest.TestCase):
     def test_all_owner_actions_and_arbitrary_ids_are_denied_before_dispatch(self):
         self.start()
         for action in ['favorite', 'hidden', 'trash', 'restore', 'caption', 'export', 'export_start', 'import', 'swipe_selection',
-                       'sync', 'image_begin', 'video_save', 'collage_save', 'detect_text', 'detect_qr',
+                       'sync', 'recovery_save', 'recovery_restore', 'image_begin', 'video_save', 'collage_save', 'detect_text', 'detect_qr',
                        'person_tag', 'people_enable', 'album_create', 'vault_unlock', 'vault_change', 'guest_start']:
             result = self.request(action=action, id=self.ids[0], value=self.password,
                                   vault_token=self.owner_token, guest_bypass=True)

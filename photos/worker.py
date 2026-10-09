@@ -110,6 +110,21 @@ def library_request(library, request, config, guest_bypass=False):
                 return result
             return response
     action = request.get('action', 'query')
+    if action in {'recovery_save', 'recovery_restore'}:
+        from . import recovery
+        try:
+            value = json.loads(request.get('value', ''))
+            if not isinstance(value, list) or len(value) != 2 or not all(isinstance(v, str) for v in value):
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise LibraryError('Choose a recovery file and its separate password') from None
+        if action == 'recovery_save':
+            recovery.save(library, config, request, *value)
+            message = 'Encrypted recovery file saved; keep its password separately'
+        else:
+            message = recovery.restore(library, config, request, *value)
+        result = ui_query(library, request); result['status'] = message
+        return result
     if action == 'swipe_selection':
         value = request.get('value')
         if not isinstance(value, str) or value not in {'on', 'off'}:

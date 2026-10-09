@@ -617,3 +617,20 @@ It must be given the pinned ThinkPad node ID before enabling sync. Never point
 Photos at a public node. Uninstalling the app must retain the library and keys.
 Keep a separate backup of `private/identity.json`: losing its account and content
 keys makes the encrypted ThinkPad copy unreadable. Do not send keys in chat.
+
+Local sync also offers Save recovery file. Choose a new full file path outside
+the library, then enter and confirm a separate password of at least 12 characters.
+Unlock Photos and Hidden first when they are configured. The file contains only
+encrypted account/content keys and their pinned ThinkPad identity, using native
+Argon2id and XChaCha20-Poly1305. Keep its password separately and retain another
+safe copy of the recovery file. Original photos, device identity and local
+passwords are unchanged.
+
+Restore backup keys is an initial setup operation. Use a new empty library with
+the same ThinkPad pin, no generated account/device keys and background backup
+stopped (`scripts/install.py --defer-sync` supports this setup). Choose the file
+and enter its recovery password. Photos verifies the account key pair before
+publishing keys, and creates a fresh device identity on the next signed sync.
+Existing libraries and accounts cannot be overwritten. Reconnect the private
+ThinkPad tunnel and start backup to download the encrypted records and originals.
+Local app/Hidden password reset with a recovery proof remains unfinished.

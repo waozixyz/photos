@@ -112,6 +112,23 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         assert not second.setting('semantic_enabled', False)
         original = Path(peer.materialize(photo_id))
         assert original.read_bytes() == (source/'fixture.jpg').read_bytes()
+        # Recover the original account and content keys from an encrypted
+        # offline file, then authenticate and restore using a fresh device.
+        from photos import recovery
+        recovery_file = folder/'account.photos-recovery'
+        recovery_password = 'isolated recovery fixture password'
+        recovery.save(first,config,{},str(recovery_file),recovery_password)
+        recovered = Library(folder/'recovered')
+        try:
+            recovery.restore(recovered,config,{},str(recovery_file),recovery_password)
+            recovered_client = Client(recovered,config)
+            assert recovered_client.account==client.account and recovered_client.key==client.key
+            assert recovered_client.device_public!=client.device_public
+            assert recovered_client.sync()==0
+            assert recovered.query()['total']==2
+            assert Path(recovered_client.materialize(photo_id)).read_bytes()==(source/'fixture.jpg').read_bytes()
+            assert existing_identity.read_bytes()==existing_bytes
+        finally: recovered.db.close()
         second.edit(photo_id,'favorite')
         second.edit(photo_id,'album_add','New local album')
         assert peer.sync() == 0

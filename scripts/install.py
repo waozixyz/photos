@@ -81,6 +81,12 @@ def main():
     shutil.copyfile(pages,installed/'sync_page.next')
     os.chmod(installed/'sync_page.next',0o755)
     os.replace(installed/'sync_page.next',installed/'sync_page')
+    recovery = repo/'build/recovery-crypto/recovery_crypto'
+    if not recovery.is_file():
+        parser.error('Build native Photos recovery before installing')
+    shutil.copyfile(recovery,installed/'recovery_crypto.next')
+    os.chmod(installed/'recovery_crypto.next',0o755)
+    os.replace(installed/'recovery_crypto.next',installed/'recovery_crypto')
     metadata_reader = repo/'build/read-metadata/read_metadata'
     if not metadata_reader.is_file():
         parser.error('Build Photos metadata reading before installing')

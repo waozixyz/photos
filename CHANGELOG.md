@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.49
+
+- Save an encrypted recovery file for your private backup keys, protected by a separate password confirmed before saving.
+- Restore the same encrypted backup account into a new empty library, with a fresh device identity and the original ThinkPad pin retained.
+- Refuse incorrect passwords, altered recovery files, existing keys and active background backups; keep existing photos and credentials intact.
+
 ## 0.1.48
 
 - Keep restored photos, albums, private people/search indexes and backup progress together when a sync page fails or is interrupted.

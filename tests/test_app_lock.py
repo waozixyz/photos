@@ -45,7 +45,7 @@ class AppLockTest(unittest.TestCase):
     def test_opening_and_all_owner_actions_require_a_separate_app_session(self):
         self.enable()
         for action in ['query', 'open', 'favorite', 'hidden', 'trash', 'export', 'import', 'sync', 'swipe_selection',
-                       'playback_check', 'vault_unlock', 'guest_start', 'app_lock_disable']:
+                       'playback_check', 'recovery_save', 'recovery_restore', 'vault_unlock', 'guest_start', 'app_lock_disable']:
             result = self.request(action=action, id=self.identity, value=self.password, vault_token=self.hidden)
             self.assertEqual(result['app_locked'], 1); self.assertFalse(result['photos']); self.assertFalse(result['albums'])
             self.assertNotIn('playback_path', result)
