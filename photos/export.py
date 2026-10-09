@@ -151,7 +151,7 @@ class Export:
         for name, album in albums.items():
             relative = folders[name] + '/.photos-album.json'
             desired.add(relative)
-            fields = ('name', 'description', 'cover', 'pinned', 'archived')
+            fields = ('name', 'description', 'cover', 'pinned', 'archived', 'filter')
             written += self.write(relative, packed({k: album[k] for k in fields}).encode())
         for photo in rows:
             memberships = [folders[name] for name in json.loads(photo['albums']) if name in folders] or ['Uncategorized']

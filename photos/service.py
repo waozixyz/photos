@@ -7,7 +7,7 @@ import socket
 import socketserver
 import struct
 
-from .library import LibraryError, packed
+from .library import Library, LibraryError, packed
 from .worker import configuration, process
 
 LIMIT = 1024 * 1024
@@ -49,6 +49,12 @@ class Handler(socketserver.BaseRequestHandler):
             result = process(value, self.server.config)
         except LibraryError as error:
             result = dict(error=str(error))
+            from . import vault
+            library = Library(self.server.config['root'])
+            try:
+                result.update(vault.state(library, value.get('vault_token', '')))
+            finally:
+                library.db.close()
         except Exception as error:
             result = dict(error=f'Local request failed ({type(error).__name__}); your originals are safe')
         output = packed(result).encode()

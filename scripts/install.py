@@ -51,6 +51,9 @@ def main():
     authenticator = repo/'build/vault-auth/vault_auth'
     if not authenticator.is_file():
         parser.error('Build the Photos authentication helper before installing')
+    gallery = repo/'build/library-query/library_query'
+    if not gallery.is_file():
+        parser.error('Build the Photos gallery engine before installing')
     shutil.copyfile(binary,installed/'photos-desktop.next')
     os.chmod(installed/'photos-desktop.next',0o755)
     os.replace(installed/'photos-desktop.next',installed/'photos-desktop')
@@ -60,6 +63,9 @@ def main():
     shutil.copyfile(authenticator,installed/'vault_auth.next')
     os.chmod(installed/'vault_auth.next',0o755)
     os.replace(installed/'vault_auth.next',installed/'vault_auth')
+    shutil.copyfile(gallery,installed/'library_query.next')
+    os.chmod(installed/'library_query.next',0o755)
+    os.replace(installed/'library_query.next',installed/'library_query')
     shutil.copyfile(repo/'scripts/worker.py',installed/'worker.py')
     shutil.copyfile(repo/'scripts/service.py',installed/'service.py')
     shutil.copytree(repo/'photos',installed/'photos',dirs_exist_ok=True,ignore=shutil.ignore_patterns('__pycache__'))

@@ -133,7 +133,16 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         assert (source/'fixture.jpg').read_bytes() == original.read_bytes()
         second.edit(photo_id, 'location', ''); peer.sync(); client.sync()
         assert first.details(photo_id)['location'] == ''
-        print('Isolated Daochi v6: signed album/photo/Trash baseline plus edited PNG copy, metadata, location correction/removal and full copy restore passed')
+        first.edit_album('', 'smart_create', 'Dynamic favorites', search='is:favorite year:2024')
+        assert client.sync() == 0; assert peer.sync() == 0
+        assert second.album_details('Dynamic favorites')['filter']=='is:favorite year:2024'
+        assert second.query(album='Dynamic favorites')['count']==2
+        second.edit_album('Dynamic favorites','filter','type:photo has:location');peer.sync();client.sync()
+        assert first.album_details('Dynamic favorites')['filter']=='type:photo has:location'
+        assert first.query(album='Dynamic favorites')['count']==1
+        first.edit_album('Dynamic favorites','delete_empty');client.sync();peer.sync()
+        assert 'Dynamic favorites' not in [a['name'] for a in second.album_list()]
+        print('Isolated Daochi v6: signed photo/album/Trash/editor baseline plus smart search creation, update, dynamic matches and deletion round trip passed')
     finally:
         process.terminate()
         process.wait(timeout=10)

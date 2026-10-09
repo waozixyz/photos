@@ -28,8 +28,10 @@ with tempfile.TemporaryDirectory() as folder:
     calls = []
     original_process = service_module.process
     def record_request(request, config):
-        calls.append(dict(request))
-        return original_process(request, config)
+        call=dict(request);calls.append(call)
+        result=original_process(request, config)
+        call['_unlocked']=result.get('vault_unlocked')
+        return result
     service_module.process = record_request
     env = {**os.environ, 'KRYON_SERVICE_ROOT': str(folder)}
     with Server(dict(root=str(library.root)), folder / 'kryon/services/photos.sock') as service:
@@ -39,6 +41,10 @@ with tempfile.TemporaryDirectory() as folder:
         player = Path(os.environ.get('PHOTOS_PLAYER', kryon / 'build/bin/zib'))
         process = subprocess.Popen([str(player), str(ROOT / 'build/photos-portable.zib')], env=env)
         def xdo(*args):
+            if args == ('click', '1'):
+                subprocess.check_call(['xdotool', 'mousedown', '1'])
+                time.sleep(.12)
+                return subprocess.check_output(['xdotool', 'mouseup', '1'], text=True).strip()
             return subprocess.check_output(['xdotool', *map(str, args)], text=True).strip()
         try:
             window = ''
@@ -153,7 +159,8 @@ with tempfile.TemporaryDirectory() as folder:
                     if check(): return
                     assert process.poll() is None
                     time.sleep(.05)
-                raise AssertionError((reason,[(r['action'],r.get('view')) for r in calls[-5:]]))
+                subprocess.run(['import','-window',window,str(shot.with_name('portable-failed.png'))],check=True)
+                raise AssertionError((reason,[(r['action'],r.get('view'),r.get('value') if r['action']=='album_filter' else '') for r in calls[-5:]]))
             click(65, 90);click(260, 300)
             parent_id = next(r['id'] for r in reversed(calls) if r['action']=='open')
             original_bytes = library.original(library.photo(parent_id)).read_bytes()
@@ -191,10 +198,35 @@ with tempfile.TemporaryDirectory() as folder:
             click(300,312)  # Unlock Hidden
             click(500,234);xdo('type','--delay',45,'--clearmodifiers','--','Synthetic portable password');time.sleep(.2);click(251,339)
             wait_for(lambda: any(r['action']=='vault_unlock' for r in calls), 'Portable Hidden did not unlock')
+            click(925,853)  # Change password, while authenticated
+            click(500,234);xdo('type','--delay',45,'--clearmodifiers','--','Synthetic portable replacement');time.sleep(.2);click(251,339)
+            click(500,234);xdo('type','--delay',45,'--clearmodifiers','--','Synthetic portable replacement');time.sleep(.2)
+            subprocess.run(['import','-window',window,str(shot.with_name('portable-password-change.png'))],check=True)
+            click(251,339)
+            wait_for(lambda: any(r['action']=='vault_change' and r.get('_unlocked')==0 for r in calls), 'Portable Hidden password did not change and relock')
+            click(300,312);click(500,234)
+            xdo('type','--delay',45,'--clearmodifiers','--','Synthetic portable replacement');time.sleep(.2);click(251,339)
+            wait_for(lambda: any(r['action']=='vault_unlock' and r.get('value')=='Synthetic portable replacement' and r.get('_unlocked')==1 for r in calls), 'Portable replacement password did not unlock')
             click(65,90);click(65,277)
             wait_for(lambda: sum(r['action']=='vault_lock' for r in calls)>=2, 'Portable Hidden did not relock on exit')
             subprocess.run(['import','-window',window,str(shot.with_name('portable-hidden-locked.png'))],check=True)
-            print('Portable Photos: organization/export/editor/memories baseline plus Hidden password setup, unlock, explicit lock and leave/reenter lock verified')
+            click(65,90);click(420,32)
+            xdo('type','--delay',45,'--clearmodifiers','--','type:photo has:location');time.sleep(.2);click(1133,32)
+            click(342,166)  # Save search
+            click(500,234);xdo('type','--delay',45,'--clearmodifiers','--','Portable smart album');time.sleep(.2);click(251,339)
+            wait_for(lambda: library.db.execute('SELECT 1 FROM albums WHERE name=? AND filter=?',('Portable smart album','type:photo has:location')).fetchone(), 'Portable smart search was not saved')
+            # Only the now-hidden parent has GPS coordinates in this fixture.
+            assert library.query(album='Portable smart album')['count']==0
+            click(811,210)  # Edit search
+            click(500,234)
+            xdo('keydown','ctrl');time.sleep(.1);xdo('key','a');time.sleep(.1);xdo('keyup','ctrl');time.sleep(.1)
+            xdo('type','--delay',45,'--clearmodifiers','--','is:favorite');time.sleep(.2);click(251,339)
+            wait_for(lambda: library.album_details('Portable smart album')['filter']=='is:favorite', 'Portable smart search was not updated')
+            assert library.query(album='Portable smart album')['count']==2
+            click(1060,210)  # Delete smart album; originals retained
+            wait_for(lambda: not library.db.execute('SELECT 1 FROM albums WHERE name=? AND deleted=0',('Portable smart album',)).fetchone(), 'Portable smart album was not deleted')
+            assert library.query()['total']==3
+            print('Portable Photos: baseline organization/export/editor/memories plus Hidden password change/relock, structured search and smart album creation/edit/deletion verified')
         finally:
             process.terminate()
             try:

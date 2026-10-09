@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.9
+
+- Combine capture dates, media type, albums, tags, captions, favorites, archive state and location availability in searches, with quoted phrases and exclusions.
+- Save searches as smart albums that update when photos are imported or their properties change; rename, pin, edit or remove the saved search while keeping originals.
+- Keep smart album searches in encrypted ThinkPad backup and library exports.
+- Keep Hidden photos protected if their privacy state changes while a gallery page or selection edit is being processed.
+- Change Hidden's local password with confirmation while unlocked; relock all local sessions while keeping originals and backup keys intact.
+
 ## 0.1.8
 
 - Protect Hidden with a confirmed local password and masked input, using the same lock in the standalone app and Harmony.

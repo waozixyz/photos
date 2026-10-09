@@ -30,7 +30,16 @@ keep browsing controls available. Browse albums, favorites, videos, hidden items
 Trash. Archive photos individually or in bulk to remove them from the home feed;
 they stay in albums and search results. Browse Archive to unarchive them.
 Uncategorized shows photos without album memberships. Choose Newest first or
-Oldest first in galleries and albums. Search names, dates, captions, tags and albums. Open a photo to view its
+Oldest first in galleries and albums. Search names, dates, captions, tags and albums.
+Combine filters such as `type:photo album:"Summer trip" year:2024 -tag:work`.
+`is:favorite`, `is:archived`, `has:location`, `has:caption` and `has:tags` filter
+properties. `from:2024-06-01 to:2024-06-30` includes both capture days in UTC;
+`on:2024-06-15` selects one day. Search tips explains phrases, exclusions and
+the available filters. Structured capture-date filters currently accept years
+1970 through 2999; older originals remain browsable and searchable by their date text.
+Search values are bound SQLite parameters and literal
+percent/underscore characters are preserved. The gallery and search engine is Ziran.
+Open a photo to view its
 original, capture time, dimensions, file size, caption, tags, albums and location.
 Use the dedicated editors to change captions, tags, file names and capture dates.
 Dates without an explicit time-zone offset use UTC. Left/right arrows browse
@@ -74,6 +83,17 @@ corrected dates survive later source rescans and are included in encrypted sync.
 Empty Export destinations use `~/Pictures/Photos Export`. Source files and
 synced originals are never permanently deleted by Trash.
 
+Save search creates a smart album from the current Photos search. Matching photos
+update automatically as imports and edits change the library, without storing
+duplicate originals or changing regular album memberships. Smart albums always
+exclude Hidden and Trash. Their definitions are encrypted and synced to the
+ThinkPad and preserved by library export/import. Edit search changes the rules;
+pinning and renaming work like regular albums. Delete smart album removes only
+the saved search. Membership changes, explicit covers and whole-album archiving
+apply to regular albums; a smart album uses its newest matching photo as its cover.
+These are saved searches; Ente's automatically curated trip and people albums
+remain unfinished.
+
 Local sync offers Export library and Continuous export. Choose a destination
 outside the library and every import source. Background export writes unchanged
 originals into album folders, including multiple memberships, with JSON sidecars
@@ -100,8 +120,11 @@ or changed through the local service, including hidden items in Trash and mixed
 selections. Leaving Hidden or using Lock Hidden revokes the unlock; it also expires
 after ten minutes and on service restart. Authentication is local to each device,
 while the Hidden property remains in encrypted sync. This is an application access
-lock; local originals retain their existing storage format. System biometrics,
-password changes and password recovery remain unfinished.
+lock; local originals retain their existing storage format. System biometrics and
+password recovery remain unfinished. While Hidden is unlocked, Change password
+accepts and confirms a replacement password, then relocks every local session.
+Your originals and encrypted-backup keys stay intact. The local password is not
+synced to other devices.
 Trash retains originals indefinitely, without automatic expiry or permanent deletion.
 
 The Ente comparison uses its [feature overview](https://ente.com/features/),
@@ -112,13 +135,14 @@ and [export behavior](https://ente.com/help/photos/features/backup-and-sync/expo
 The remaining replacement work includes:
 
 - Mobile clients, permission-aware background camera backup and device space recovery.
-- On-device face grouping, semantic search, maps, curated memories and smart albums.
+- On-device face grouping, semantic search, maps, curated memories and automatically curated trip/people albums.
 - Advanced photo editing, video playback/editing, Live Photo pairing and broader HEIC/RAW previews.
 - Private sharing, collaboration, public links, comments and account recovery.
   Any sharing design needs to honor the owner's ThinkPad-only sync restriction.
-- System authentication, Hidden password changes/recovery and a deliberate deletion/retention policy.
-- A Ziran library/sync service. The native UI and portable app are Ziran/Kryon;
-  the SQLite importer, metadata service and encrypted sync worker remain Python.
+- System authentication, Hidden password recovery and a deliberate deletion/retention policy.
+- A complete Ziran library/sync service. The native UI, portable app, gallery/search
+  engine, image processor and password verifier are Ziran/Kryon; the SQLite importer,
+  metadata mutation service and encrypted sync worker remain Python.
 
 The native image processor needs GdkPixbuf and GObject on the Linux desktop host;
 Hidden authentication also needs libsodium.

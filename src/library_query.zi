@@ -1,0 +1,105 @@
+// Read-only gallery and search engine. This helper creates no keys, files,
+// windows or network connections; SQLite supplies one consistent WAL snapshot.
+using SQLite :: #import "sqlite/SQLite";
+Search :: #import "search";
+Clock :: #import "std/date_time_linux";
+#import "std/date_parse"
+#import "std/byte_text_linux"
+#import "std/json_scan"
+#import "std/text_buffer"
+libc :: #system_library "libc";
+Read :: (fd: s32, output: *u8, count: usize) -> s64 #foreign libc "read";
+
+Decode :: (json: string, key: string, bytes: []u8) -> bool {
+    at := FieldAt(json, 0, key)
+    if at < 0 { return true }
+    length := ReadStringText(json, at, bytes)
+    if length < 0 || length >= cast(s32)bytes.count { return false }
+    bytes[length] = 0; return true
+}
+Number :: (json: string, key: string, default_value: s32) -> s32 {
+    value := ReadNumber(json, FieldAt(json, 0, key))
+    if !value.valid || value.value < 0.0 || value.value > 2147483647.0 { return default_value }
+    return cast(s32)value.value
+}
+Failure :: (message: string) -> s32 { print("{\"error\":\"%\"}\n", message); return 1 }
+Prepare :: (database: *void, sql: string, query: *Search.Predicate, statement: **void) -> bool {
+    if SqlitePrepareText(database, sql, -1, statement, null) != SQLITE_OK { return false }
+    for i: 0..query.count - 1 {
+        if SqliteBindTextString(statement.*, cast(s32)i + 1, TextUntilNul(query.parameters[i].bytes[:]), -1) != SQLITE_OK { return false }
+    }
+    return true
+}
+main :: (argc: s32, argv: **u8) -> s32 {
+    if argc != 2 { return Failure("Supply the private library database") }
+    input: [16385]u8; length: s32
+    while length < 16384 {
+        amount := Read(0, *input[length], cast(usize)(16384 - length))
+        if amount < 0 { return Failure("Cannot read gallery request") }; if amount == 0 { break }; length += cast(s32)amount
+    }
+    if length == 0 || length >= 16384 { return Failure("Gallery request exceeds its limit") }
+    json := TextFromBytes(input[:length])
+    if Space(json, ValueEnd(json, 0, 0)) != length || json[0] != 123 { return Failure("Choose a valid gallery request") }
+    view: [32]u8; search: [513]u8; album: [513]u8; sort: [16]u8; memory: [11]u8; filter: [513]u8
+    if !Decode(json,"view",view[:]) || !Decode(json,"search",search[:]) || !Decode(json,"album",album[:]) ||
+        !Decode(json,"sort",sort[:]) || !Decode(json,"memory_date",memory[:]) || !Decode(json,"filter",filter[:]) { return Failure("Gallery value exceeds its limit") }
+    order := TextUntilNul(sort[:]); page := Number(json, "offset", 0); limit := Number(json, "limit", 60)
+    if order != "newest" && order != "oldest" { return Failure("Choose newest first or oldest first") }
+    if limit < 1 { limit = 1 }; if limit > 100 { limit = 100 }
+    query: Search.Predicate
+    name := TextUntilNul(view[:]); hidden := Number(json,"hidden_access",0) == 1
+    if name == "trash" { Search.AddSQL(*query, "trashed>0"); if !hidden { Search.AddSQL(*query, " AND hidden=0") } }
+    else if name == "hidden" { Search.AddSQL(*query, ifx hidden then "trashed=0 AND hidden=1" else "0") }
+    else {
+        Search.AddSQL(*query, "trashed=0 AND hidden=0")
+        if name == "favorites" { Search.AddSQL(*query," AND favorite=1") }
+        else if name == "videos" { Search.AddSQL(*query," AND kind='video'") }
+        else if name == "archive" { Search.AddSQL(*query," AND (archived=1 OR EXISTS(SELECT 1 FROM json_each(photos.albums) j JOIN albums a ON a.name=j.value WHERE a.archived=1 AND a.deleted=0))") }
+        else if name == "uncategorized" { Search.AddSQL(*query," AND json_array_length(albums)=0") }
+        else if name == "photos" && album[0] == 0 && search[0] == 0 && filter[0] == 0 || name == "memories" {
+            Search.AddSQL(*query," AND archived=0 AND NOT EXISTS(SELECT 1 FROM json_each(photos.albums) j JOIN albums a ON a.name=j.value WHERE a.archived=1 AND a.deleted=0)")
+        }
+    }
+    // A saved search never turns into a Hidden or Trash album, even when
+    // callers combine it with another gallery view or an unlocked vault.
+    if filter[0] != 0 { Search.AddSQL(*query," AND trashed=0 AND hidden=0") }
+    if album[0] != 0 && filter[0] == 0 { Search.AddSQL(*query," AND EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=?)"); Search.Bind(*query,TextUntilNul(album[:])) }
+    if name == "memories" {
+        if memory[0] == 0 { unused WriteIsoDay(Clock.UnixNow(),memory[:]) }
+        day := Search.Date(TextUntilNul(memory[:]))
+        if day < 0 { return Failure("Choose a valid memories day in YYYY-MM-DD format") }
+        Search.AddSQL(*query," AND strftime('%m-%d',taken,'unixepoch')=? AND taken<?")
+        Search.Bind(*query,TextUntilNul(memory[5:11])); Search.BindNumber(*query,UtcSeconds(DateNumber(TextUntilNul(memory[:]),0,4),1,1,0,0,0))
+    }
+    Search.Parse(*query,TextUntilNul(filter[:])); Search.Parse(*query,TextUntilNul(search[:]))
+    if query.error != "" { return Failure(query.error) }
+    if name == "validate" { print("{\"valid\":1}\n"); return 0 }
+    database: *void
+    if SqliteOpenText(TextFromCString(argv[1]),*database,1) != SQLITE_OK { if database != null { unused SqliteClose(database) }; return Failure("Cannot open the private gallery database") }
+    defer { unused SqliteClose(database) }
+    unused SqliteBusyTimeout(database,10000)
+    if SqliteExecText(database,"BEGIN") != SQLITE_OK { return Failure("Cannot open a gallery snapshot") }
+    defer { unused SqliteExecText(database,"ROLLBACK") }
+    where := BuilderFinish(query.sql)
+    sql: Vec(u8); BuilderPrint(*sql,"SELECT COUNT(*) FROM photos WHERE %",where); count_sql := BuilderFinish(sql)
+    statement: *void
+    if !Prepare(database,count_sql,*query,*statement) { return Failure("Cannot prepare the gallery query") }
+    if SqliteStep(statement) != SQLITE_ROW { unused SqliteFinalize(statement); return Failure("Cannot count gallery matches") }
+    matches := SqliteColumnInt64(statement,0); unused SqliteFinalize(statement); statement = null
+    rows: Vec(u8); BuilderPrint(*rows,"SELECT id FROM photos WHERE % ORDER BY taken %,id LIMIT % OFFSET %",where,ifx order == "newest" then "DESC" else "ASC",limit,page)
+    rows_sql := BuilderFinish(rows)
+    if !Prepare(database,rows_sql,*query,*statement) { return Failure("Cannot prepare the gallery page") }
+    defer { unused SqliteFinalize(statement) }
+    output: Vec(u8); BuilderPrint(*output,"{\"count\":%,\"memory_date\":\"%\",\"ids\":[",matches,TextUntilNul(memory[:]))
+    count: s32
+    while true {
+        result := SqliteStep(statement)
+        if result == SQLITE_DONE { break }
+        if result != SQLITE_ROW { return Failure("Cannot read the gallery page") }
+        id := TextFromCString(SqliteColumnText(statement,0))
+        if id.count != 64 { return Failure("Gallery contains an invalid photo identity") }
+        for byte: id { if !(byte >= 48 && byte <= 57 || byte >= 97 && byte <= 102) { return Failure("Gallery contains an invalid photo identity") } }
+        BuilderPrint(*output,"%\"%\"",ifx count == 0 then "" else ",",id); count += 1
+    }
+    BuilderPrint(*output,"]}"); response := BuilderFinish(output); print("%\n",response); return 0
+}

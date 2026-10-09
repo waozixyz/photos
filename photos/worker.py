@@ -33,12 +33,18 @@ def ui_query(library, request):
                            album_mode=request.get('album_mode', 'active'), album_sort=request.get('album_sort', 'name'),
                            memory_date=request.get('memory_date', ''), hidden_access=vault.unlocked(library, request.get('vault_token', '')))
     result.update(vault.state(library, request.get('vault_token', '')))
+    # A native page or slow catalog query may outlast the unlock. Recheck
+    # before returning any Hidden paths to the caller.
+    if not result['vault_unlocked']:
+        result['photos'] = [photo for photo in result['photos'] if not photo['hidden']]
+        if request.get('view') == 'hidden':
+            result['count'] = 0
     # The gallery needs only these fields. Full metadata and encrypted sync
     # manifests stay in the store rather than being decoded on every UI poll.
     fields = ('id', 'name', 'thumbnail', 'original', 'date', 'kind', 'favorite',
               'hidden', 'trashed', 'archived', 'width', 'height')
     result['photos'] = [{key: photo[key] for key in fields} for photo in result['photos']]
-    fields = ('name', 'count', 'thumbnail', 'pinned', 'archived')
+    fields = ('name', 'count', 'thumbnail', 'pinned', 'archived', 'smart')
     result['albums'] = [{key: album[key] for key in fields} for album in result['albums']]
     export = library.setting('export', {})
     result['export_status'] = export.get('status', 'Choose a separate destination for a folder backup')
@@ -48,6 +54,11 @@ def ui_query(library, request):
 
 def library_request(library, request, config):
     action = request.get('action', 'query')
+    def authorize(photo):
+        return not photo['hidden'] or vault.unlocked(library, request.get('vault_token', ''))
+    def require_access(photo_id):
+        if not authorize(library.photo(photo_id)):
+            raise LibraryError('Hidden is locked; authenticate before opening or changing hidden photos')
     if action in {'vault_setup', 'vault_unlock'}:
         token = vault.authenticate(library, request.get('value'), setup=action == 'vault_setup')
         request = {**request, 'vault_token': token, 'view': 'hidden', 'offset': 0}
@@ -59,6 +70,13 @@ def library_request(library, request, config):
         from . import editing
         editing.close(library, request.get('edit_session', ''))
         return ui_query(library, {**request, 'vault_token': ''})
+    if action == 'vault_change':
+        vault.change_password(library, request.get('vault_token', ''), request.get('value'))
+        from . import editing
+        editing.close(library, request.get('edit_session', ''))
+        result = ui_query(library, {**request, 'vault_token': '', 'view': 'hidden', 'offset': 0})
+        result.update(vault_token='', view='hidden', status='Password changed; Hidden locked')
+        return result
     if action not in {'query', 'import', 'sync', 'memory_date', 'image_close'} and vault.protected(library, request):
         result = ui_query(library, {**request, 'vault_token': ''})
         result.update(error='Hidden is locked; authenticate before opening or changing hidden photos', vault_unlocked=0)
@@ -81,13 +99,19 @@ def library_request(library, request, config):
         if action == 'image_preview':
             result = ui_query(library, request)
             result.update(editing.preview(library, photo['id'], request.get('value'), request.get('edit_session', '')))
+            try:
+                require_access(photo['id'])
+            except LibraryError:
+                editing.close(library, result['edit_session'])
+                raise
             return result
-        copy_id = editing.save(library, photo['id'], request.get('value'))
+        copy_id = editing.save(library, photo['id'], request.get('value'), authorize=authorize)
         editing.close(library, request.get('edit_session', ''))
         result = ui_query(library, request)
         result['status'] = 'Edited copy saved; original retained'
         result['saved_copy'] = copy_id
-        result['detail'] = library.details(photo['id'])
+        if authorize(library.photo(photo['id'])):
+            result['detail'] = library.details(photo['id'])
         return result
     if action == 'query':
         result = ui_query(library, request)
@@ -129,6 +153,7 @@ def library_request(library, request, config):
         photo = library.photo(request['id'])
         if not library.original(photo).exists():
             Client(library, config).materialize(photo['id'])
+        require_access(photo['id'])
         result = ui_query(library, request)
         result['opened'] = request['id']
         result['detail'] = library.details(request['id'])
@@ -136,14 +161,14 @@ def library_request(library, request, config):
     elif action == 'album_rename':
         library.rename_album(request.get('album'), request.get('value'))
         request = {**request, 'album': request['value'].strip(), 'offset': 0}
-    elif action in {'album_create', 'album_description', 'album_cover', 'album_pinned', 'album_archived', 'album_delete_empty'}:
-        name = library.edit_album(request.get('album', ''), action.removeprefix('album_'), request.get('value'))
+    elif action in {'album_create', 'album_smart_create', 'album_filter', 'album_description', 'album_cover', 'album_pinned', 'album_archived', 'album_delete_empty'}:
+        name = library.edit_album(request.get('album', ''), action.removeprefix('album_'), request.get('value'), search=request.get('search', ''))
         if action == 'album_delete_empty':
             request = {**request, 'album': '', 'view': 'albums', 'offset': 0}
-        elif action == 'album_create':
-            request = {**request, 'album': name, 'view': 'photos', 'offset': 0}
+        elif action in {'album_create', 'album_smart_create'}:
+            request = {**request, 'album': name, 'view': 'photos', 'offset': 0, 'search': ''}
     elif request.get('ids') is not None and action != 'export':
-        library.edit_many(request['ids'], action, request.get('value'))
+        library.edit_many(request['ids'], action, request.get('value'), authorize=authorize)
     elif action == 'export':
         ids = request.get('ids', [request.get('id')])
         if not isinstance(ids, list) or not 0 < len(ids) <= 1000 or any(not isinstance(i, str) for i in ids):
@@ -152,16 +177,19 @@ def library_request(library, request, config):
             photo = library.photo(photo_id)
             if not library.original(photo).exists():
                 Client(library, config).materialize(photo['id'])
+            require_access(photo['id'])
             exported = library.export(photo_id, request.get('value') or str(Path.home() / 'Pictures/Photos Export'))
         library.set_setting('status', 'Original and metadata exported to ' + str(Path(exported).parent))
     else:
-        library.edit(request['id'], action, request.get('value'))
+        library.edit(request['id'], action, request.get('value'), authorize=authorize)
     result = ui_query(library, request)
     if request.get('id') and action != 'export' and (not library.photo(request['id'])['hidden'] or vault.unlocked(library, request.get('vault_token', ''))):
         result['detail'] = library.details(request['id'])
-    if action in {'album_rename', 'album_create', 'album_delete_empty'}:
+    if action in {'album_rename', 'album_create', 'album_smart_create', 'album_delete_empty'}:
         result['album'] = request['album']
         result['view'] = request.get('view', 'photos')
+        if action in {'album_create', 'album_smart_create'}:
+            result['search'] = ''
     return result
 
 

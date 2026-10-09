@@ -27,7 +27,7 @@ Photo :: struct {
     height: s32
 }
 Selection :: struct { id: [65]u8 }
-Album :: struct { name: [513]u8; thumbnail: [4097]u8; count: s32; pinned: bool; archived: bool }
+Album :: struct { name: [513]u8; thumbnail: [4097]u8; count: s32; pinned: bool; archived: bool; smart: bool }
 picked: Vec(Selection);
 picked_count: s32;
 selecting: bool;
@@ -64,6 +64,7 @@ album_count: s32;
 album_mode: string = "active";
 album_sort: string = "name";
 album_description: [8193]u8;
+album_filter: [513]u8;
 album_pinned: bool;
 album_archived: bool;
 export_status: [1025]u8;
@@ -179,14 +180,16 @@ Tick :: () {
         Decode(json, 0, "export_status", export_status[:]); export_continuous = Number(json, 0, "export_continuous") > 0
         if mutation { ClearSelection(); editor = "" }
         if FieldAt(json, 0, "album") >= 0 { Decode(json, 0, "album", album[:]); offset = 0; scroll = 0 }
+        if FieldAt(json, 0, "search") >= 0 { Decode(json, 0, "search", search[:]); search_cursor = 0; search_anchor = 0 }
         if FieldAt(json, 0, "view") >= 0 {
             fresh_view: [32]u8; Decode(json, 0, "view", fresh_view[:])
             for i: 0..cast(s32)9 { if View(i) == TextUntilNul(fresh_view[:]) { view = View(i) } }
         }
         album_detail := FieldAt(json, 0, "album_detail")
-        album_description[0] = 0; album_pinned = false; album_archived = false
+        album_description[0] = 0; album_filter[0] = 0; album_pinned = false; album_archived = false
         if album_detail >= 0 {
             Decode(json, album_detail, "description", album_description[:])
+            Decode(json, album_detail, "filter", album_filter[:])
             album_pinned = Number(json, album_detail, "pinned") > 0
             album_archived = Number(json, album_detail, "archived") > 0
         }
@@ -222,6 +225,7 @@ Tick :: () {
             empty: Album; if !VecPush(catalog, empty) { break }; item := *catalog[album_count]
             Decode(json, at, "name", item.name[:]); Decode(json, at, "thumbnail", item.thumbnail[:]); item.count = Number(json, at, "count")
             item.pinned = Number(json, at, "pinned") > 0; item.archived = Number(json, at, "archived") > 0
+            item.smart = Number(json, at, "smart") > 0
             album_count += 1; at = Space(json, ValueEnd(json, at, 0)); if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json, at + 1) }
         }
         text: Vec(u8); BuilderPrint(*text, "% photos & videos · % albums · % queued", total, album_count, pending)
@@ -287,16 +291,17 @@ Apply :: (action: string, value: string = "") {
 }
 SaveEditor :: () {
     if loading { return }
-    if editor == "vault_setup" {
+    if editor == "vault_setup" || editor == "vault_change" {
         chars: s32; i: s32
         while i < 1024 && edit_value[i] != 0 { if (edit_value[i] & 192) != 128 { chars += 1 }; i += 1 }
         if chars < 8 { Set(message[:], "Use at least 8 characters for your Hidden password"); return }
         for index: 0..1024 { vault_first[index] = edit_value[index] }
-        Wipe(edit_value[:]); BeginEdit("vault_confirm", "Confirm Hidden password", "", "Type the same password again"); return
+        changing := editor == "vault_change"
+        Wipe(edit_value[:]); BeginEdit(ifx changing then "vault_change_confirm" else "vault_confirm", "Confirm Hidden password", "", "Type the same password again"); return
     }
-    if editor == "vault_confirm" || editor == "vault_unlock" {
-        if editor == "vault_confirm" && TextUntilNul(edit_value[:]) != TextUntilNul(vault_first[:]) { Set(message[:], "Passwords do not match"); return }
-        Request(ifx editor == "vault_confirm" then "vault_setup" else "vault_unlock", "", TextUntilNul(edit_value[:]))
+    if editor == "vault_confirm" || editor == "vault_change_confirm" || editor == "vault_unlock" {
+        if editor != "vault_unlock" && TextUntilNul(edit_value[:]) != TextUntilNul(vault_first[:]) { Set(message[:], "Passwords do not match"); return }
+        Request(ifx editor == "vault_confirm" then "vault_setup" else (ifx editor == "vault_change_confirm" then "vault_change" else "vault_unlock"), "", TextUntilNul(edit_value[:]))
         Wipe(vault_first[:]); Wipe(edit_value[:]); cursor = 0; anchor = 0; return
     }
     Apply(editor, TextUntilNul(edit_value[:]))

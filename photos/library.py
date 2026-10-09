@@ -85,6 +85,11 @@ class Library:
                 self.db.execute('BEGIN IMMEDIATE')
                 if column not in {row[1] for row in self.db.execute('PRAGMA table_info(photos)')}:
                     self.db.execute(f'ALTER TABLE photos ADD COLUMN {column} {declaration}')
+        if 'filter' not in {row[1] for row in self.db.execute('PRAGMA table_info(albums)')}:
+            with self.db:
+                self.db.execute('BEGIN IMMEDIATE')
+                if 'filter' not in {row[1] for row in self.db.execute('PRAGMA table_info(albums)')}:
+                    self.db.execute("ALTER TABLE albums ADD COLUMN filter TEXT NOT NULL DEFAULT ''")
         self.db.commit()
         self.import_album_names = {}
         if not self.setting('album_catalog_migrated', False):
@@ -272,6 +277,12 @@ class Library:
                         name = self.album_name(info.get('name'))
                         description = info.get('description', '')
                         cover = info.get('cover', '')
+                        smart_filter = info.get('filter', '')
+                        if not isinstance(smart_filter, str):
+                            raise LibraryError('Invalid smart album search')
+                        if smart_filter:
+                            from .query import validate
+                            validate(self, smart_filter)
                         if not isinstance(description, str) or len(description.encode()) > 8192 or not isinstance(cover, str) or cover and (len(cover) != 64 or any(c not in '0123456789abcdef' for c in cover)):
                             raise LibraryError('Invalid album metadata')
                         if any(type(info.get(k, 0)) not in {int, bool} or info.get(k, 0) not in (0, 1) for k in ['pinned', 'archived']):
@@ -282,8 +293,8 @@ class Library:
                             existed = self.db.execute('SELECT 1 FROM albums WHERE name=?', (name,)).fetchone()
                             album = self._ensure_album(name)
                             if not existed:
-                                self.db.execute('UPDATE albums SET description=?,cover=?,pinned=?,archived=? WHERE id=?',
-                                                (description, cover, int(info.get('pinned', 0)), int(info.get('archived', 0)), album['id']))
+                                self.db.execute('UPDATE albums SET description=?,cover=?,pinned=?,archived=?,filter=? WHERE id=?',
+                                                (description, cover, int(info.get('pinned', 0)), int(info.get('archived', 0)), smart_filter, album['id']))
                     except (ValueError, OSError, AttributeError):
                         result['warning'] += 1
                 for name in sorted(filenames):
@@ -299,10 +310,10 @@ class Library:
         self.set_setting('import_failures', failures)
         return result
 
-    def edit(self, photo_id, action, value=None):
-        self.edit_many([photo_id], action, value)
+    def edit(self, photo_id, action, value=None, authorize=None):
+        self.edit_many([photo_id], action, value, authorize=authorize)
 
-    def edit_many(self, photo_ids, action, value=None):
+    def edit_many(self, photo_ids, action, value=None, authorize=None):
         if not isinstance(photo_ids, list) or not 0 < len(photo_ids) <= 1000 or any(not isinstance(i, str) for i in photo_ids):
             raise LibraryError('Select between 1 and 1000 photos')
         # Acquire the writer before reading, and roll back the whole selection
@@ -310,6 +321,8 @@ class Library:
         with self.db:
             self.db.execute('BEGIN IMMEDIATE')
             for photo_id in dict.fromkeys(photo_ids):
+                if authorize is not None and not authorize(self.photo(photo_id)):
+                    raise LibraryError('Hidden is locked; authenticate before changing hidden photos')
                 self._edit(photo_id, action, value)
 
     @staticmethod
@@ -339,6 +352,9 @@ class Library:
         elif action in {'album_add', 'album_remove'}:
             albums = set(json.loads(photo['albums']))
             name = self.album_name(value)
+            definition = self.db.execute('SELECT filter FROM albums WHERE name=? AND deleted=0', (name,)).fetchone()
+            if definition and definition['filter']:
+                raise LibraryError('Smart album membership follows its search; edit the search or photo properties instead')
             if action == 'album_add':
                 self._ensure_album(name)
             albums.add(name) if action == 'album_add' else albums.discard(name)
@@ -428,14 +444,19 @@ class Library:
             raise LibraryError('Album not found')
         return dict(row)
 
-    def edit_album(self, name, action, value=None):
+    def edit_album(self, name, action, value=None, search=''):
+        if action in {'smart_create', 'filter'}:
+            from .query import validate
+            search = validate(self, search if action == 'smart_create' else value)
         with self.db:
             self.db.execute('BEGIN IMMEDIATE')
-            if action == 'create':
+            if action in {'create', 'smart_create'}:
                 name = self.album_name(value)
                 if self.db.execute('SELECT 1 FROM albums WHERE name=?', (name,)).fetchone():
                     raise LibraryError('An album with that name already exists or is retained for synchronization')
                 self._ensure_album(name)
+                if action == 'smart_create':
+                    self.db.execute('UPDATE albums SET filter=? WHERE name=?', (search, name))
                 return name
             album = self.album_details(name)
             if action == 'description':
@@ -443,19 +464,27 @@ class Library:
                     raise LibraryError('Enter at most 8192 bytes of text')
                 self.db.execute('UPDATE albums SET description=?,updated=?,dirty=1 WHERE id=?', (value, time.time(), album['id']))
             elif action == 'cover':
+                if album['filter']:
+                    raise LibraryError('Smart albums use the newest matching photo as their cover')
                 if value:
                     photo = self.photo(value)
                     if name not in json.loads(photo['albums']) or photo['hidden'] or photo['trashed']:
                         raise LibraryError('Choose a visible photo in this album for its cover')
                 self.db.execute('UPDATE albums SET cover=?,updated=?,dirty=1 WHERE id=?', (value or '', time.time(), album['id']))
             elif action in {'pinned', 'archived'}:
+                if action == 'archived' and album['filter']:
+                    raise LibraryError('Archive individual photos or regular albums; smart albums are saved searches')
                 self.db.execute(f'UPDATE albums SET {action}=?,updated=?,dirty=1 WHERE id=?',
                                 (int(not album[action]), time.time(), album['id']))
             elif action == 'delete_empty':
                 # Hidden and trashed members count as members too. Never detach originals here.
-                if self.db.execute('SELECT 1 FROM photos,json_each(photos.albums) WHERE value=? LIMIT 1', (name,)).fetchone():
+                if not album['filter'] and self.db.execute('SELECT 1 FROM photos,json_each(photos.albums) WHERE value=? LIMIT 1', (name,)).fetchone():
                     raise LibraryError('Only an album with no photos can be deleted')
                 self.db.execute('UPDATE albums SET deleted=1,updated=?,dirty=1 WHERE id=?', (time.time(), album['id']))
+            elif action == 'filter':
+                if not album['filter']:
+                    raise LibraryError('Create a smart album to save a search')
+                self.db.execute('UPDATE albums SET filter=?,updated=?,dirty=1 WHERE id=?', (search, time.time(), album['id']))
             else:
                 raise LibraryError('Unknown album action')
         return name
@@ -475,11 +504,18 @@ class Library:
                 continue
             if mode == 'active' and album['archived'] or mode == 'archived' and not album['archived']:
                 continue
-            if mode == 'empty' and (album['archived'] or ids):
+            if album['filter']:
+                from .query import page
+                matched = page(self, view='photos', filter=album['filter'], sort='newest', limit=1)
+                ids = matched['ids']
+                count = matched['count']
+            else:
+                count = len(ids)
+            if mode == 'empty' and (album['archived'] or count):
                 continue
             cover = album['cover'] if album['cover'] in ids else (ids[0] if ids else '')
             preview = self.thumbnail(cover)
-            album.update(count=len(ids), thumbnail=str(preview) if cover and preview.is_file() else '')
+            album.update(count=count, smart=int(bool(album['filter'])), thumbnail=str(preview) if cover and preview.is_file() else '')
             result.append(album)
         result.sort(key=lambda a: (not a['pinned'], a['name'].casefold(), a['id']) if sort == 'name' else
                     (not a['pinned'], -a['created'] if sort == 'newest' else a['created'], a['id']))
@@ -500,54 +536,21 @@ class Library:
                     location=f"{geo.get('latitude', '')}, {geo.get('longitude', '')}" if isinstance(geo, dict) and 'latitude' in geo else '')
 
     def query(self, view='photos', search='', album='', offset=0, limit=60, sort='newest', album_mode='active', album_sort='name', memory_date='', hidden_access=True):
-        if sort not in {'newest', 'oldest'}:
-            raise LibraryError('Choose newest first or oldest first')
-        where, args = ['trashed=0', 'hidden=0'], []
-        if view == 'trash':
-            where = ['trashed>0']
-            if not hidden_access:
-                where.append('hidden=0')
-        elif view == 'hidden':
-            where = ['trashed=0', 'hidden=1']
-            if not hidden_access:
-                where.append('0')
-        elif view == 'favorites':
-            where.append('favorite=1')
-        elif view == 'videos':
-            where.append("kind='video'")
-        elif view == 'archive':
-            where.append('(archived=1 OR EXISTS(SELECT 1 FROM json_each(photos.albums) j JOIN albums a ON a.name=j.value WHERE a.archived=1 AND a.deleted=0))')
-        elif view == 'uncategorized':
-            where.append('json_array_length(albums)=0')
-        elif view == 'memories':
-            try:
-                day = datetime.strptime(memory_date, '%Y-%m-%d').date() if memory_date else datetime.now(timezone.utc).date()
-                if memory_date and day.isoformat() != memory_date:
-                    raise ValueError()
-            except (TypeError, ValueError):
-                raise LibraryError('Choose a valid day, for example 2026-10-08') from None
-            where.extend(["strftime('%m-%d',taken,'unixepoch')=?", 'taken<?', 'archived=0',
-                          'NOT EXISTS(SELECT 1 FROM json_each(photos.albums) j JOIN albums a ON a.name=j.value WHERE a.archived=1 AND a.deleted=0)'])
-            args.extend([day.strftime('%m-%d'), datetime(day.year, 1, 1, tzinfo=timezone.utc).timestamp()])
-        elif view == 'photos' and not album and not search:
-            # Archive removes items only from the home timeline. Albums and
-            # search retain them, unlike Hidden and Trash.
-            where.append('archived=0')
-            where.append('NOT EXISTS(SELECT 1 FROM json_each(photos.albums) j JOIN albums a ON a.name=j.value WHERE a.archived=1 AND a.deleted=0)')
-        if album:
-            where.append('EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=?)')
-            args.append(album)
-        if search:
-            where.append('(name LIKE ? OR caption LIKE ? OR tags LIKE ? OR albums LIKE ? OR strftime(\'%Y-%m-%d\',taken,\'unixepoch\') LIKE ?)')
-            args.extend(['%' + search + '%'] * 5)
-        clause = ' AND '.join(where)
-        count = self.db.execute('SELECT COUNT(*) FROM photos WHERE ' + clause, args).fetchone()[0]
-        direction = 'DESC' if sort == 'newest' else 'ASC'
-        rows = self.db.execute('SELECT * FROM photos WHERE ' + clause + f' ORDER BY taken {direction},id LIMIT ? OFFSET ?',
-                               [*args, max(1, min(100, int(limit))), max(0, int(offset))]).fetchall()
+        from .query import page
+        album_detail = self.db.execute('SELECT * FROM albums WHERE name=? AND deleted=0', (album,)).fetchone() if album else None
+        smart_filter = album_detail['filter'] if album_detail else ''
+        response = page(self, view=view, search=search, album=album, offset=max(0, int(offset)),
+                        limit=max(1, min(100, int(limit))), sort=sort, memory_date=memory_date,
+                        hidden_access=int(bool(hidden_access)), filter=smart_filter)
+        count = response['count']
+        rows = [self.photo(photo_id) for photo_id in response['ids']]
         photos = []
         for row in rows:
             photo = dict(row)
+            # Native ID paging and row hydration are separate reads. A photo
+            # hidden by another request in between must not expose its paths.
+            if photo['hidden'] and not hidden_access:
+                continue
             photo['thumbnail'] = str(self.thumbnail(photo['id'])) if self.thumbnail(photo['id']).exists() else ''
             photo['date'] = datetime.fromtimestamp(photo['taken'], timezone.utc).strftime('%Y-%m-%d')
             photo['original'] = str(self.original(photo)) if self.original(photo).exists() else ''
@@ -559,7 +562,7 @@ class Library:
         result = dict(photos=photos, count=count, albums=albums, total=totals[0], bytes=totals[1], pending=(totals[2] or 0) + album_pending,
                     status=self.setting('status', 'Local library · ThinkPad sync only'), importing=self.setting('import', {}))
         if view == 'memories':
-            result['memory_date'] = day.isoformat()
+            result['memory_date'] = response['memory_date']
         if album:
             row = self.db.execute('SELECT * FROM albums WHERE name=? AND deleted=0', (album,)).fetchone()
             if row:

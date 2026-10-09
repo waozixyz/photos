@@ -1,0 +1,133 @@
+// Search syntax and predicates belong to Photos, not the UI toolkit.
+// Every user value becomes a bound SQLite parameter.
+#import "std/text_buffer"
+#import "std/text"
+#import "std/date_parse"
+
+Parameter :: struct { bytes: [2049]u8 }
+Predicate :: struct {
+    sql: Vec(u8)
+    parameters: [128]Parameter
+    count: s32
+    error: string
+}
+Term :: struct { bytes: [1025]u8; length: s32; colon: s32; negative: bool }
+
+AddSQL :: (query: *Predicate, sql: string) { BuilderPrint(*query.sql, "%", sql) }
+Bind :: (query: *Predicate, value: string, like: bool = false) {
+    if query.count >= 128 || value.count > 1024 { query.error = "Search has too many or oversized filters"; return }
+    index := query.count; query.count += 1; at: s32
+    if like { query.parameters[index].bytes[at] = 37; at += 1 }
+    for byte: value {
+        if like && (byte == 37 || byte == 95 || byte == 92) { query.parameters[index].bytes[at] = 92; at += 1 }
+        query.parameters[index].bytes[at] = byte; at += 1
+    }
+    if like { query.parameters[index].bytes[at] = 37; at += 1 }
+    query.parameters[index].bytes[at] = 0
+}
+BindNumber :: (query: *Predicate, value: s64) {
+    out: Vec(u8); BuilderPrint(*out, "%", value); text := BuilderFinish(out); Bind(query, text)
+}
+Recognized :: (name: string) -> bool {
+    return name == "type" || name == "is" || name == "favorite" || name == "archived" ||
+        name == "album" || name == "tag" || name == "name" || name == "caption" ||
+        name == "from" || name == "to" || name == "after" || name == "before" ||
+        name == "on" || name == "year" || name == "has"
+}
+Date :: (value: string) -> s64 {
+    if value.count != 10 || value[4] != 45 || value[7] != 45 { return -1 }
+    year := DateNumber(value, 0, 4); month := DateNumber(value, 5, 2); day := DateNumber(value, 8, 2)
+    if year < 1970 || year > 2999 { return -1 }
+    seconds := UtcSeconds(year, month, day, 0, 0, 0)
+    return ifx seconds == 0 && value != "1970-01-01" then -1 else seconds
+}
+Boolean :: (value: string) -> s32 {
+    if value == "true" || value == "1" { return 1 }
+    if value == "false" || value == "0" { return 0 }
+    return -1
+}
+TextMatch :: (query: *Predicate, value: string) {
+    AddSQL(query, "(name LIKE ? ESCAPE '\\' OR caption LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\' OR albums LIKE ? ESCAPE '\\' OR strftime('%Y-%m-%d',taken,'unixepoch') LIKE ? ESCAPE '\\')")
+    for i: 0..4 { Bind(query, value, true) }
+}
+ApplyTerm :: (query: *Predicate, key: string, value: string) {
+    if value.count == 0 { query.error = "A search filter needs a value"; return }
+    if key == "" { TextMatch(query, value) }
+    else if key == "type" {
+        if value != "photo" && value != "image" && value != "video" { query.error = "Choose type:photo or type:video"; return }
+        AddSQL(query, "kind=?"); Bind(query, ifx value == "image" then "photo" else value)
+    } else if key == "favorite" || key == "archived" {
+        enabled := Boolean(value)
+        if enabled < 0 { query.error = "Use true or false for favorite and archived filters"; return }
+        AddSQL(query, ifx key == "favorite" then "favorite=?" else "archived=?"); BindNumber(query, cast(s64)enabled)
+    } else if key == "is" {
+        if value == "favorite" { AddSQL(query, "favorite=1") }
+        else if value == "archived" { AddSQL(query, "(archived=1 OR EXISTS(SELECT 1 FROM json_each(photos.albums) j JOIN albums a ON a.name=j.value WHERE a.archived=1 AND a.deleted=0))") }
+        else if value == "video" || value == "photo" { AddSQL(query, "kind=?"); Bind(query, value) }
+        else if value == "uncategorized" { AddSQL(query, "json_array_length(albums)=0") }
+        else if value == "untagged" { AddSQL(query, "trim(tags)='' ") }
+        else { query.error = "Choose is:favorite, archived, video, photo, uncategorized or untagged" }
+    } else if key == "album" {
+        AddSQL(query, "EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=? COLLATE NOCASE)"); Bind(query, value)
+    } else if key == "name" || key == "caption" || key == "tag" {
+        if key == "name" { AddSQL(query, "name LIKE ? ESCAPE '\\'") }
+        else if key == "caption" { AddSQL(query, "caption LIKE ? ESCAPE '\\'") }
+        else { AddSQL(query, "tags LIKE ? ESCAPE '\\'") }
+        Bind(query, value, true)
+    } else if key == "has" {
+        if value == "caption" { AddSQL(query, "trim(caption)<>''") }
+        else if value == "tags" { AddSQL(query, "trim(tags)<>''") }
+        else if value == "location" {
+            AddSQL(query, "(coalesce(json_extract(metadata,'$.geoData.latitude'),json_extract(metadata,'$.geoDataExif.latitude')) BETWEEN -90 AND 90 AND coalesce(json_extract(metadata,'$.geoData.longitude'),json_extract(metadata,'$.geoDataExif.longitude')) BETWEEN -180 AND 180)")
+        } else { query.error = "Choose has:location, has:caption or has:tags" }
+    } else if key == "year" {
+        year := DateNumber(value, 0, 4)
+        if value.count != 4 || year < 1970 || year > 2999 { query.error = "Choose a four-digit capture year"; return }
+        AddSQL(query, "taken>=? AND taken<?"); BindNumber(query, UtcSeconds(year, 1, 1, 0, 0, 0)); BindNumber(query, UtcSeconds(year + 1, 1, 1, 0, 0, 0))
+    } else {
+        date := Date(value)
+        if date < 0 { query.error = "Use a valid capture date in YYYY-MM-DD format"; return }
+        if key == "on" { AddSQL(query, "taken>=? AND taken<?"); BindNumber(query, date); BindNumber(query, date + 86400) }
+        else if key == "from" || key == "after" { AddSQL(query, "taken>=?"); BindNumber(query, ifx key == "from" then date else date + 86400) }
+        else { AddSQL(query, "taken<?"); BindNumber(query, ifx key == "to" then date + 86400 else date) }
+    }
+}
+Parse :: (query: *Predicate, value: string) {
+    if value.count == 0 { return }
+    if value.count > 512 { query.error = "Search is limited to 512 bytes"; return }
+    terms: [64]Term; count: s32; cursor: s32; structured: bool; quoted: bool
+    while cursor < cast(s32)value.count {
+        while cursor < cast(s32)value.count && (value[cursor] == 32 || value[cursor] == 9) { cursor += 1 }
+        if cursor >= cast(s32)value.count { break }
+        if count >= 64 { query.error = "Search has too many filters"; return }
+        terms[count].colon = -1
+        if value[cursor] == 45 { terms[count].negative = true; cursor += 1; structured = true }
+        while cursor < cast(s32)value.count {
+            byte := value[cursor]
+            if byte == 34 { quoted = !quoted; structured = true; cursor += 1; continue }
+            if !quoted && (byte == 32 || byte == 9) { break }
+            if byte == 92 && cursor + 1 < cast(s32)value.count && (value[cursor + 1] == 34 || value[cursor + 1] == 92) { cursor += 1; byte = value[cursor] }
+            at := terms[count].length
+            if at >= 1024 { query.error = "Search term is too long"; return }
+            terms[count].bytes[at] = byte; terms[count].length += 1; cursor += 1
+        }
+        if quoted { query.error = "Close the quoted phrase in your search"; return }
+        text := TextUntilNul(terms[count].bytes[:])
+        for at: 0..terms[count].length - 1 {
+            if text[at] == 58 {
+                if Recognized(text[:at]) { terms[count].colon = cast(s32)at; structured = true }
+                break
+            }
+        }
+        count += 1
+    }
+    if !structured { AddSQL(query, " AND "); TextMatch(query, value); return }
+    for i: 0..count - 1 {
+        text := TextUntilNul(terms[i].bytes[:]); colon := terms[i].colon
+        key := ifx colon >= 0 then text[:colon] else ""
+        term := ifx colon >= 0 then text[colon + 1:cast(s32)text.count] else text
+        AddSQL(query, ifx terms[i].negative then " AND NOT (" else " AND (")
+        ApplyTerm(query, key, term); AddSQL(query, ")")
+        if query.error != "" { return }
+    }
+}

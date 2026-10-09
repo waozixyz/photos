@@ -12,6 +12,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from PIL import Image
 from photos.library import Library
 from photos.service import Server
+import photos.service as service_module
 
 ROOT=Path(__file__).resolve().parents[1]
 assert os.environ.get('PHOTOS_PRIVATE_XVFB')=='1'
@@ -26,10 +27,25 @@ with tempfile.TemporaryDirectory() as folder:
     library=Library(folder/'library');library.import_folders([album.parent])
     config=folder/'config.json';config.write_text(json.dumps(dict(root=str(library.root),sources=[])))
     env=os.environ.copy();env['PHOTOS_CONFIG']=str(config);env['KRYON_SERVICE_ROOT']=str(folder)
+    calls=[]
+    original_process=service_module.process
+    def record_request(request, config):
+        summary={key:request.get(key) for key in ('action','view','search','album','offset')}
+        try:
+            result=original_process(request,config)
+            summary.update(count=result.get('count'),rows=len(result.get('photos',[])),unlocked=result.get('vault_unlocked'),error=result.get('error'))
+            return result
+        finally:
+            calls.append(summary)
+    service_module.process=record_request
     service=Server(dict(root=str(library.root),sources=[]),folder/'kryon/services/photos.sock')
     threading.Thread(target=service.serve_forever,daemon=True).start()
     process=subprocess.Popen([str(ROOT/'build/photos-desktop')],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
     def xdo(*args):
+        if args == ('click','1'):
+            subprocess.check_call(['xdotool','mousedown','1'])
+            time.sleep(.12)
+            return subprocess.check_output(['xdotool','mouseup','1'],text=True).strip()
         return subprocess.check_output(['xdotool',*map(str,args)],text=True).strip()
     try:
         window=''
@@ -43,15 +59,20 @@ with tempfile.TemporaryDirectory() as folder:
         xdo('windowsize',window,1180,880)
         xdo('windowmove',window,0,0)
         xdo('windowfocus',window)
-        def state(view=None, nodes=None):
+        def state(view=None, nodes=None, selection=None):
+            geometry=xdo('getwindowgeometry','--shell',window)
+            expected_right=int(next(line.split('=',1)[1] for line in geometry.splitlines() if line.startswith('WIDTH=')))-12
             for _ in range(100):
                 raw=subprocess.check_output(['xprop','-id',window,'_HARMONY_APP_STATE'],text=True)
                 if ' = ' in raw:
                     value=json.loads(ast.literal_eval(raw.split(' = ',1)[1].strip()))
-                    if not value['loading'] and (nodes is None or value['nodes']==nodes) and (view is None or value['view']==view):
+                    find=next((c for c in value['controls'] if c['control']=='42'),None)
+                    resized=find and abs(find['x']+find['width']-expected_right)<.1
+                    if resized and not value['loading'] and (nodes is None or value['nodes']==nodes) and (view is None or value['view']==view) and (selection is None or value['selection_count']==selection):
                         return value
                 time.sleep(.1)
-            raise AssertionError('Photos did not finish rendering')
+            subprocess.run(['import','-window',window,str(output/'failed.png')],check=True)
+            raise AssertionError(('Photos did not finish rendering', value, 'recent requests', calls[-12:], 'hidden rows', library.db.execute('SELECT COUNT(*) FROM photos WHERE hidden=1 AND trashed=0').fetchone()[0]))
         def action(label=None,control=None):
             button=None
             for _ in range(100):
@@ -72,7 +93,7 @@ with tempfile.TemporaryDirectory() as folder:
         action(control=100);action('Favorite');time.sleep(.5)
         assert library.db.execute('SELECT SUM(favorite) FROM photos').fetchone()[0]==1
         action('Back');action('Select');action(control=100);action(control=101)
-        assert state()['selection_count']==2, state()
+        assert state(selection=2)['selection_count']==2
         action('Favorite')
         assert library.db.execute('SELECT SUM(favorite) FROM photos').fetchone()[0]==2
         action('Select');action('Select loaded');action('Add to album')
@@ -186,11 +207,36 @@ with tempfile.TemporaryDirectory() as folder:
         action('Unlock Hidden');enter('An incorrect password');action('Save')
         assert 'Incorrect password' in state()['status']
         enter('Synthetic window password');action('Save');state('hidden',1)
+        action('Change password');enter('Synthetic replacement password');action('Save')
+        assert state()['editor']=='vault_change_confirm'
+        enter('A different replacement');action('Save')
+        assert 'do not match' in state()['status']
+        enter('Synthetic replacement password')
+        subprocess.run(['import','-window',window,str(output/'hidden-password-change.png')],check=True)
+        action('Save');state('hidden',0)
+        assert not state()['vault_unlocked']
+        assert 'Synthetic replacement password' not in json.dumps(state())
+        action('Unlock Hidden');enter('Synthetic replacement password');action('Save');state('hidden',1)
         action('Photos');state('photos',4)
         action('Hidden');state('hidden',0)
         assert not state()['vault_unlocked']
+        action('Photos');state('photos',4)
+        action('Search tips')
+        assert state()['editor']=='search_help'
+        action('Back')
+        action(control=40)
+        xdo('type','--delay',45,'--clearmodifiers','--','is:favorite type:photo');action('Find')
+        state('photos',2)
+        action('Save search');enter('Native smart album');action('Save')
+        state('photos',2)
+        assert library.album_details('Native smart album')['filter']=='is:favorite type:photo'
+        action('Edit search');enter('year:2024');action('Save');state('photos',1)
+        action('Edit search');enter('has:location');action('Save');state('photos',4)
+        subprocess.run(['import','-window',window,str(output/'smart-album.png')],check=True)
+        action('Delete smart album');state('albums')
+        assert library.query()['total']==5
         assert library.original(library.photo(parent['id'])).read_bytes()==original_bytes
-        print('Private Xvfb: organization/export/editor/memories baseline plus Hidden password confirmation, masked input, rejected password, editor relock and leave/reenter lock verified')
+        print('Private Xvfb: baseline organization/export/editor/memories plus confirmed Hidden password changes, search tips, structured filters, dynamic smart album creation/edit/deletion and original preservation verified')
     finally:
         service.shutdown();service.server_close()
         process.terminate()

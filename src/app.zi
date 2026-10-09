@@ -81,7 +81,7 @@ Field :: (session: Session, bounds: Rectangle, is_search: bool, key: s32, modifi
     props: TextFieldProps; props.key = ifx is_search then 40 else 41; props.focus_id = ifx is_search then 40 else 41; props.bounds = bounds
     editing := !is_search && Model.editor != ""
     props.label = ifx is_search then "Search" else (ifx editing then Model.editor_title else "Import folder")
-    props.placeholder = ifx is_search then "Search names, captions, tags, albums or dates" else (ifx editing then Model.editor_hint else "Path to a local folder")
+    props.placeholder = ifx is_search then "Search photos or combine type:, album:, tag:, year: filters" else (ifx editing then Model.editor_hint else "Path to a local folder")
     value: [8193]u8
     Model.Set(value[:], ifx is_search then TextUntilNul(Model.search[:]) else (ifx editing then TextUntilNul(Model.edit_value[:]) else TextUntilNul(Model.input[:])))
     props.value = TextUntilNul(value[:])
@@ -127,7 +127,7 @@ BulkBar :: (session: Session, bounds: Rectangle) {
     if Action(session, 65, "Add to album", BulkBounds(bounds, 4), ready) { Model.BeginEdit("album_add", "Add selection to album", "", "Enter an album name") }
     if Action(session, 66, "Edit date", BulkBounds(bounds, 5), ready) { Model.BeginEdit("taken", "Set date for selection", "", "2024-06-15 14:30:00+00:00 (UTC if no offset)") }
     if Action(session, 67, "Export selection", BulkBounds(bounds, 6), ready) { Model.BeginEdit("export", "Export selected originals", "", "Destination folder; empty uses Pictures/Photos Export") }
-    if Action(session, 68, "Remove from album", BulkBounds(bounds, 7), ready && Model.album[0] != 0) { Model.Apply("album_remove", TextUntilNul(Model.album[:])) }
+    if Action(session, 68, "Remove from album", BulkBounds(bounds, 7), ready && Model.album[0] != 0 && Model.album_filter[0] == 0) { Model.Apply("album_remove", TextUntilNul(Model.album[:])) }
     if Action(session, 69, ifx Model.view == "archive" then "Unarchive" else "Archive", BulkBounds(bounds, 8), ready) { Model.Apply("archived_set", ifx Model.view == "archive" then "0" else "1") }
     if Action(session, 214, "Edit location", BulkBounds(bounds, 9), ready) { Model.BeginEdit("location", "Set location for selection", "", "Latitude, longitude; leave empty to remove location") }
 }
@@ -182,8 +182,8 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
     }
     Label(session, 3, "ThinkPad only", .{left, viewport.y + viewport.height - 76.0, sidebar, 22.0}, 13)
     Label(session, 4, "Private local library", .{left, viewport.y + viewport.height - 50.0, sidebar, 22.0}, 12)
-    search := Field(session, .{x, top, width - 78.0, 40.0}, true, key, modifiers, typed)
-    if Action(session, 42, "Find", .{x + width - 70.0, top, 70.0, 40.0}) || search { Model.Find() }
+    search_committed := Field(session, .{x, top, width - 78.0, 40.0}, true, key, modifiers, typed)
+    if Action(session, 42, "Find", .{x + width - 70.0, top, 70.0, 40.0}) || search_committed { Model.Find() }
     Label(session, 5, TextUntilNul(Model.summary[:]), .{x, top + 49.0, width, 24.0}, 14)
     y := top + 84.0
     if Model.editor == "" {
@@ -194,6 +194,18 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
     body := Rectangle.{x, y + 52.0, width, viewport.height - 216.0}
     if Model.editor == "image" {
         ImageEditor(session, body)
+    } else if Model.editor == "search_help" {
+        Label(session, 310, "Find photos with filters", .{x + 12.0, body.y + 12.0, width - 24.0, 34.0}, 22)
+        tips: [8]string = .{"Combine filters to narrow your results. Dates use capture time in UTC.",
+            "type:photo or type:video   ·   is:favorite or is:archived",
+            "album:\"Summer trip\"   ·   tag:family   ·   name:IMG",
+            "caption:\"birthday cake\"   ·   has:location   ·   has:tags",
+            "year:2024   ·   on:2024-06-15",
+            "from:2024-06-01 to:2024-06-30 includes both days.",
+            "-tag:work excludes a match. Quotes keep a phrase together.",
+            "Save search creates a smart album that updates as your photos change."}
+        for i: 0..7 { Label(session, cast(u64)(311 + i), tips[i], .{x + 12.0, body.y + 68.0 + cast(float32)i * 38.0, width - 24.0, 32.0}, 14) }
+        if Action(session, 319, "Back", .{x + 12.0, body.y + 390.0, 94.0, 38.0}) { Model.CancelEditor() }
     } else if Model.editor != "" {
         Label(session, 91, Model.editor_title, .{x + 12.0, body.y + 12.0, width - 24.0, 34.0}, 22)
         committed := Field(session, .{x + 12.0, body.y + 64.0, width - 24.0, 44.0}, false, key, modifiers, typed)
@@ -255,7 +267,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, 98, "Rename", .{x + step + 8.0, bottom, step, 36.0}, ready) { Model.BeginEdit("rename", "Rename photo", TextUntilNul(photo.name[:]), "File name; the original bytes stay intact") }
         if Action(session, 99, "Remove from album", .{x + 2.0 * (step + 8.0), bottom, step * 2.0 + 8.0, 36.0}, ready) { Model.BeginEdit("album_remove", "Remove photo from album", TextUntilNul(Model.album[:]), "Album name; removing membership keeps the photo") }
         if Action(session, 95, ifx photo.archived then "Unarchive" else "Archive", .{x + 4.0 * (step + 8.0), bottom, step, 36.0}, ready) { SelectedAction("archived") }
-        if Model.album[0] != 0 && ready && !photo.hidden && !photo.trashed {
+        if Model.album[0] != 0 && Model.album_filter[0] == 0 && ready && !photo.hidden && !photo.trashed {
             if Action(session, 205, "Use as album cover", .{x + width - 186.0, body.y + 44.0, 186.0, 36.0}) { Model.Apply("album_cover", TextUntilNul(photo.id[:])) }
         }
     } else {
@@ -277,6 +289,9 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
             } else if Model.album[0] != 0 {
                 Label(session, 48, TextUntilNul(Model.album[:]), .{x + 88.0, body.y + 7.0, width - 376.0, 26.0})
                 if Action(session, 49, "Rename album", .{x + width - 278.0, body.y, 138.0, 36.0}, !Model.loading) { Model.BeginEdit("album_rename", "Rename album", TextUntilNul(Model.album[:]), "New album name; originals and other albums stay intact") }
+            } else {
+                if Action(session, 320, "Save search", .{x + 88.0, body.y, 126.0, 36.0}, !Model.loading && Model.search[0] != 0 && Model.view == "photos") { Model.BeginEdit("album_smart_create", "Name this smart album", "", "Saved search; matching photos update automatically") }
+                if Action(session, 321, "Search tips", .{x + 224.0, body.y, 112.0, 36.0}) { Model.CancelEditor(); Model.editor = "search_help" }
             }
             if !Model.selecting {
                 if Action(session, 60, ifx Model.sort == "newest" then "Newest first" else "Oldest first", .{x + width - 132.0, body.y, 132.0, 36.0}, !Model.loading) { Model.ToggleSort() }
@@ -286,8 +301,12 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                 step := (width - 24.0) / 4.0
                 if Action(session, 203, "Description", .{x, body.y, step, 36.0}, !Model.loading) { Model.BeginEdit("album_description", "Album description", TextUntilNul(Model.album_description[:]), "Describe this album") }
                 if Action(session, 204, ifx Model.album_pinned then "Unpin album" else "Pin album", .{x + step + 8.0, body.y, step, 36.0}, !Model.loading) { Model.Apply("album_pinned") }
-                if Action(session, 206, ifx Model.album_archived then "Unarchive album" else "Archive album", .{x + 2.0 * (step + 8.0), body.y, step, 36.0}, !Model.loading) { Model.Apply("album_archived") }
-                if Action(session, 207, "Delete empty album", .{x + 3.0 * (step + 8.0), body.y, step, 36.0}, !Model.loading && Model.matches == 0) { Model.Apply("album_delete_empty") }
+                if Model.album_filter[0] != 0 {
+                    if Action(session, 322, "Edit search", .{x + 2.0 * (step + 8.0), body.y, step, 36.0}, !Model.loading) { Model.BeginEdit("album_filter", "Edit smart album search", TextUntilNul(Model.album_filter[:]), "Combine filters; Search tips explains their syntax") }
+                } else {
+                    if Action(session, 206, ifx Model.album_archived then "Unarchive album" else "Archive album", .{x + 2.0 * (step + 8.0), body.y, step, 36.0}, !Model.loading) { Model.Apply("album_archived") }
+                }
+                if Action(session, 207, ifx Model.album_filter[0] != 0 then "Delete smart album" else "Delete empty album", .{x + 3.0 * (step + 8.0), body.y, step, 36.0}, !Model.loading && (Model.matches == 0 || Model.album_filter[0] != 0)) { Model.Apply("album_delete_empty") }
                 body.y += 44.0; body.height -= 44.0
                 if Model.album_description[0] != 0 { Label(session, 208, TextUntilNul(Model.album_description[:]), .{x, body.y, width, 28.0}, 14); body.y += 32.0; body.height -= 32.0 }
             }
@@ -329,7 +348,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                 item := *Model.catalog[i]
                 clicked := Action(session, cast(s32)(1000 + i), TextUntilNul(item.name[:]), .{bx + 68.0, by, width - 190.0, 56.0})
                 ImageAt(session, cast(u64)(4000000 + i), TextUntilNul(item.thumbnail[:]), TextUntilNul(item.name[:]), .{bx, by, 56.0, 56.0}, true)
-                info: Vec(u8); BuilderPrint(*info, "% items", item.count); if item.pinned { BuilderPrint(*info, " · Pinned") }
+                info: Vec(u8); BuilderPrint(*info, "% items", item.count); if item.smart { BuilderPrint(*info, " · Smart") }; if item.pinned { BuilderPrint(*info, " · Pinned") }
                 text := BuilderFinish(info); Label(session, cast(u64)(4100000 + i), text, .{bx + width - 120.0, by + 16.0, 120.0, 24.0}, 13); Model.Release(text)
                 if clicked {
                     Model.ClearSelection(); Model.Set(Model.album[:], TextUntilNul(item.name[:])); Model.view = "photos"; Model.offset = 0; Model.scroll = 0; Model.Request(); break
@@ -354,8 +373,9 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if item_count == 0 { Label(session, 90, ifx Model.total == 0 then "Import a local folder to begin." else "No items match this view or search.", .{x + 20.0, body.y + 48.0, width - 40.0, 40.0}, 18) }
     }
     footer := viewport.y + viewport.height - 42.0
-    Label(session, 6, TextUntilNul(Model.message[:]), .{x, footer, width - 182.0, 28.0}, 12)
+    Label(session, 6, TextUntilNul(Model.message[:]), .{x, footer, width - (ifx Model.view == "hidden" && Model.vault_unlocked then 342.0 else 182.0), 28.0}, 12)
     if Model.view == "hidden" && Model.vault_unlocked {
+        if Action(session, 296, "Change password", .{x + width - 330.0, footer - 2.0, 176.0, 34.0}, !Model.loading && Model.editor == "") { Model.BeginEdit("vault_change", "Change Hidden password", "", "Choose at least 8 characters; changing it locks Hidden on this desktop") }
         if Action(session, 295, "Lock Hidden", .{x + width - 142.0, footer - 2.0, 142.0, 34.0}, !Model.loading) { Model.Apply("vault_lock"); Model.vault_unlocked = false; Model.Wipe(Model.vault_token[:]); Model.selected = -1; Model.CancelEditor() }
     }
     return 0

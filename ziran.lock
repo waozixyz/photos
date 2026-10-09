@@ -2,6 +2,22 @@
   "format": 1,
   "packages": [
     {
+      "commit": "040c41e9c1c772e553e61d51b08b37f332b06488",
+      "dependencies": {"sqlite3": "pbeb32cf8d2e03b02"},
+      "id": "p450e8db63484350c",
+      "name": "SQLite",
+      "ref": "master",
+      "url": "https://github.com/ziranlang/sqlite.git"
+    },
+    {
+      "commit": "2a00992af0347c47f04bafe27aa86f666268d638",
+      "dependencies": {"kryon": "pb2f6a8fcadead1d9"},
+      "id": "p4818b2449814c7f4",
+      "name": "Kss",
+      "ref": "master",
+      "url": "https://github.com/kryonlabs/kss.git"
+    },
+    {
       "commit": "fafa2cea97d0cb379d832086ba45a989fa6f9c8e",
       "dependencies": {},
       "id": "p5a77c9c35110e925",
@@ -11,28 +27,29 @@
       "url": "https://github.com/raysan5/raylib.git"
     },
     {
-      "commit": "adb895c7638a0fff285451062c28f19d63f356d0",
+      "commit": "46b70cb971f153c44e94dfe7267f8c2d2bb293fa",
       "dependencies": {"raylib": "p5a77c9c35110e925"},
-      "id": "p9f672cea7f3781b5",
+      "id": "pb2f6a8fcadead1d9",
       "name": "kryon",
       "ref": "master",
       "url": "https://github.com/kryonlabs/kryon.git"
     },
     {
-      "commit": "86c366c9e183cd152683d24cac6a2603cad64ab9",
-      "dependencies": {"kryon": "p9f672cea7f3781b5"},
-      "id": "padff2d5df1fdb5ee",
-      "name": "Kss",
-      "ref": "master",
-      "url": "https://github.com/kryonlabs/kss.git"
+      "commit": "b09c88c14082339b66c7b7158d609a771e64ca69",
+      "dependencies": {},
+      "id": "pbeb32cf8d2e03b02",
+      "name": "sqlite3",
+      "ref": "version-3.53.4",
+      "source": true,
+      "url": "https://github.com/sqlite/sqlite.git"
     }
   ],
   "root": {
-    "dependencies": {"kryon": "p9f672cea7f3781b5", "kss": "padff2d5df1fdb5ee"},
+    "dependencies": {"kryon": "pb2f6a8fcadead1d9", "kss": "p4818b2449814c7f4", "sqlite": "p450e8db63484350c"},
     "name": "photos"
   },
   "toolchain": {
-    "commit": "dfb56e2e8265abe3694dc0e21223559e4b953dfb",
+    "commit": "a59884b1cd628ec3625c24229e8185cfd27a931c",
     "ref": "master",
     "url": "https://github.com/ziranlang/ziran.git"
   }

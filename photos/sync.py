@@ -249,6 +249,12 @@ class Client:
             raise ValueError('Invalid album record')
         if not isinstance(album.get('description'), str) or len(album['description'].encode()) > 8192 or not isinstance(album.get('cover'), str) or album['cover'] and not HASH.fullmatch(album['cover']):
             raise ValueError('Invalid album details')
+        album.setdefault('filter', '')
+        if not isinstance(album['filter'], str) or len(album['filter'].encode()) > 512:
+            raise ValueError('Invalid smart album search')
+        if album['filter']:
+            from .query import validate
+            validate(self.library, album['filter'])
         if any(type(album.get(k)) not in {bool, int} or album[k] not in (0, 1) for k in ['pinned', 'archived', 'deleted']):
             raise ValueError('Invalid album state')
         if any(type(album.get(k)) not in {int, float} or not 0 <= album[k] < 32503680000 for k in ['created', 'updated']):
@@ -263,7 +269,7 @@ class Client:
             if other['updated'] != 0:
                 raise ValueError('Album name conflict; local edits are retained')
             self.library.db.execute('DELETE FROM albums WHERE id=?', (other['id'],))
-        columns = ['id', 'name', 'description', 'cover', 'pinned', 'archived', 'deleted', 'created', 'updated']
+        columns = ['id', 'name', 'description', 'cover', 'pinned', 'archived', 'deleted', 'created', 'updated', 'filter']
         self.library.db.execute('INSERT OR REPLACE INTO albums(' + ','.join(columns) + ',dirty) VALUES(' + ','.join('?' for _ in columns) + ',0)', [album[k] for k in columns])
 
     def accept(self, record):

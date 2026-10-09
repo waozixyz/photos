@@ -108,7 +108,7 @@ def close(library, token):
         shutil.rmtree(folder)
 
 
-def save(library, photo_id, value):
+def save(library, photo_id, value, authorize=None):
     adjustments = options(value)
     if adjustments == DEFAULT:
         raise LibraryError('Make an adjustment before saving a copy')
@@ -119,6 +119,8 @@ def save(library, photo_id, value):
     with library.db:
         library.db.execute('BEGIN IMMEDIATE')
         photo = library.photo(photo_id)
+        if authorize is not None and not authorize(photo):
+            raise LibraryError('Hidden is locked; authenticate before saving hidden photos')
         if photo['trashed']:
             raise LibraryError('Restore the photo from Trash before editing')
         existing = library.db.execute('SELECT id FROM photos WHERE id=?', (new_id,)).fetchone()
