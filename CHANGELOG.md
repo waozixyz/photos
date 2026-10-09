@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.30
+
+- Preserve unknown import metadata, explicit empty values, large numbers and complete captions while keeping later date, location and album corrections.
+- Keep imported photos, album definitions and source records together when an import fails or is interrupted, so retrying cannot skip an unfinished photo.
+- Retain pending backup updates when a changed sidecar is merged, without changing originals or private photo settings.
+
 ## 0.1.29
 
 - Import originals through a streaming, verified copy and publish them atomically without replacing an existing stored original.

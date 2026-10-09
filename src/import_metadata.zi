@@ -1,0 +1,212 @@
+// Immutable-original metadata and source-cache publication. This writer takes
+// its own fresh snapshot after the original has been copied and verified.
+using SQLite :: #import "sqlite/SQLite";
+Album :: #import "album_edit";
+#import "std/byte_text_linux"
+#import "std/json_scan"
+#import "std/text_buffer"
+c :: #system_library "c";
+Read :: (fd: s32, data: *u8, count: usize) -> s64 #foreign c "read";
+Write :: (fd: s32, data: *u8, count: usize) -> s64 #foreign c "write";
+Allocate :: (count: usize) -> *void #foreign c "malloc";
+Release :: (data: *void) #foreign c "free";
+glib :: #system_library "glib-2.0";
+Checksum :: (kind: s32, data: *u8, count: usize) -> *u8 #foreign glib "g_compute_checksum_for_data";
+Free :: (data: *void) #foreign glib "g_free";
+Timespec :: struct { seconds: s64; nanoseconds: s64 }
+GetTime :: (clock: s32, value: *Timespec) -> s32 #foreign c "clock_gettime";
+Send :: (text: string) -> bool {
+    bytes: [4096]u8; at: s32
+    while at < cast(s32)text.count {
+        count := cast(s32)text.count-at; if count > 4096 { count = 4096 }
+        for i: 0..count-1 { bytes[i] = text[at+i] }
+        written: s32
+        while written < count {
+            amount := Write(1,*bytes[written],cast(usize)(count-written))
+            if amount <= 0 { return false }; written += cast(s32)amount
+        }
+        at += count
+    }
+    return true
+}
+Failure :: (message: string) -> s32 {
+    out: Vec(u8); BuilderPrint(*out,"{\"error\":\"%\"}\n",message)
+    unused Send(BuilderFinish(out)); return 1
+}
+Execute :: (database: *void, sql: string) -> bool {
+    return SqliteExecText(database,sql) == SQLITE_OK
+}
+Bind :: (statement: *void, index: s32, value: string) -> bool {
+    return SqliteBindTextString(statement,index,value,cast(s32)value.count) == SQLITE_OK
+}
+// Documents have already been validated by SQLite. Locate raw values without
+// converting integers to float64 or rewriting unknown nested sidecar fields.
+End :: (text: string, at: s32) -> s32 {
+    if at < 0 || at >= cast(s32)text.count { return -1 }
+    if text[at] == 34 { span := ReadString(text,at); return ifx span.valid then span.after else -1 }
+    cursor := at; depth: s32
+    if text[at] == 123 || text[at] == 91 {
+        while cursor < cast(s32)text.count {
+            byte := text[cursor]
+            if byte == 34 {
+                span := ReadString(text,cursor); if !span.valid { return -1 }; cursor = span.after; continue
+            }
+            if byte == 123 || byte == 91 { depth += 1 }
+            if byte == 125 || byte == 93 { depth -= 1; if depth == 0 { return cursor+1 } }
+            cursor += 1
+        }
+        return -1
+    }
+    while cursor < cast(s32)text.count {
+        byte := text[cursor]
+        if byte == 44 || byte == 125 || byte == 93 || byte == 32 || byte == 9 || byte == 10 || byte == 13 { break }
+        cursor += 1
+    }
+    return cursor
+}
+Field :: (text: string, name: string) -> string {
+    cursor := Space(text,1)
+    while cursor < cast(s32)text.count && text[cursor] != 125 {
+        start := cursor; key := ReadString(text,start); if !key.valid { return "" }
+        cursor = Space(text,key.after); if cursor >= cast(s32)text.count || text[cursor] != 58 { return "" }
+        cursor = Space(text,cursor+1); after := End(text,cursor); if after < 0 { return "" }
+        if SpanEqualsASCII(text,key,name) { return text[cursor:after] }
+        cursor = Space(text,after); if cursor >= cast(s32)text.count || text[cursor] == 125 { break }
+        cursor = Space(text,cursor+1)
+    }
+    return ""
+}
+// Keep raw quoted keys and values; only decoded keys are used for comparison
+// and sorting. Explicit lengths retain embedded NULs in keys and captions.
+Collect :: (database: *void, text: string) -> bool {
+    statement: *void
+    if SqlitePrepareText(database,"INSERT OR REPLACE INTO merged_metadata(key,quoted,value) VALUES(?,?,?)",-1,*statement,null) != SQLITE_OK { return false }
+    defer { unused SqliteFinalize(statement) }
+    cursor := Space(text,1)
+    while cursor < cast(s32)text.count && text[cursor] != 125 {
+        start := cursor; key := ReadString(text,start); if !key.valid { return false }
+        decoded := ReadStringValue(text,start,16777216); if !decoded.valid { return false }
+        name := BuilderFinish(decoded.value)
+        cursor = Space(text,key.after); if cursor >= cast(s32)text.count || text[cursor] != 58 { return false }
+        cursor = Space(text,cursor+1); after := End(text,cursor); if after < 0 { return false }
+        if !Bind(statement,1,name) || !Bind(statement,2,text[start:key.after]) || !Bind(statement,3,text[cursor:after]) || SqliteStep(statement) != SQLITE_DONE { return false }
+        unused SqliteReset(statement); unused SqliteClearBindings(statement)
+        cursor = Space(text,after); if cursor >= cast(s32)text.count || text[cursor] == 125 { break }
+        cursor = Space(text,cursor+1)
+    }
+    return true
+}
+EnsureAlbum :: (database: *void, name: string, now: float64) -> bool {
+    statement: *void
+    if SqlitePrepareText(database,"SELECT 1 FROM albums WHERE name=?",-1,*statement,null) != SQLITE_OK { return false }
+    if !Bind(statement,1,name) { unused SqliteFinalize(statement); return false }
+    status := SqliteStep(statement); unused SqliteFinalize(statement)
+    if status == SQLITE_ROW { return true }; if status != SQLITE_DONE { return false }
+    key: Vec(u8); BuilderPrint(*key,"photos.album.v1:%",name)
+    text := BuilderFinish(key); storage := Allocate(cast(usize)text.count)
+    if storage == null { return false }; defer { Release(storage) }
+    bytes := BytesFromPointer(cast(*u8)storage,cast(u64)text.count)
+    for i: 0..text.count-1 { bytes[i] = text[i] }
+    hash := Checksum(2,cast(*u8)storage,cast(usize)text.count)
+    if hash == null { return false }; defer { Free(cast(*void)hash) }
+    identity: [65]u8; for i: 0..63 { identity[i] = hash[i] }
+    attempts: s32
+    while true {
+        exists := Album.Exists(database,TextFromCString(*identity[0]))
+        if exists < 0 { return false }; if exists == 0 { break }
+        attempts += 1; if attempts > 4096 { return false }
+        next: Vec(u8); BuilderPrint(*next,"%:next",TextFromCString(*identity[0]))
+        if !Album.Digest(BuilderFinish(next),identity[:]) { return false }
+    }
+    if SqlitePrepareText(database,"INSERT INTO albums(id,name,created,updated,dirty) VALUES(?,?,?,?,1)",-1,*statement,null) != SQLITE_OK { return false }
+    defer { unused SqliteFinalize(statement) }
+    return Bind(statement,1,TextFromCString(*identity[0])) && Bind(statement,2,name) &&
+        SqliteBindDouble(statement,3,now) == SQLITE_OK && SqliteBindDouble(statement,4,now) == SQLITE_OK && SqliteStep(statement) == SQLITE_DONE
+}
+main :: (argc: s32, argv: **u8) -> s32 {
+    if argc != 2 { return Failure("Supply the private library database") }
+    storage := Allocate(16777217); if storage == null { return Failure("Import metadata exceeds available memory") }
+    defer { Release(storage) }
+    input := BytesFromPointer(cast(*u8)storage,16777217); length: s32
+    while length < 16777217 {
+        count := Read(0,*input[length],cast(usize)(16777217-length))
+        if count < 0 { return Failure("Cannot read import metadata") }; if count == 0 { break }; length += cast(s32)count
+    }
+    if length == 0 || length > 16777216 { return Failure("Import metadata exceeds its limit") }
+    request := TextFromBytes(input[:length]); database: *void
+    if SqliteOpenText(TextFromCString(argv[1]),*database,SQLITE_OPEN_READWRITE) != SQLITE_OK {
+        if database != null { unused SqliteClose(database) }; return Failure("Cannot open the private library database")
+    }
+    defer { unused SqliteClose(database) }
+    unused SqliteBusyTimeout(database,5000)
+    if !Execute(database,"CREATE TEMP TABLE incoming(data TEXT NOT NULL); CREATE TEMP TABLE merged_metadata(key TEXT PRIMARY KEY,quoted TEXT NOT NULL,value TEXT NOT NULL)") { return Failure("Cannot prepare the import") }
+    statement: *void
+    if SqlitePrepareText(database,"INSERT INTO incoming VALUES(?)",-1,*statement,null) != SQLITE_OK { return Failure("Cannot prepare the import") }
+    valid := Bind(statement,1,request) && SqliteStep(statement) == SQLITE_DONE; unused SqliteFinalize(statement)
+    if !valid { return Failure("Cannot read import metadata") }
+    if SqlitePrepareText(database,"SELECT json_valid(data) FROM incoming",-1,*statement,null) != SQLITE_OK { return Failure("Choose valid import metadata") }
+    valid = SqliteStep(statement) == SQLITE_ROW && SqliteColumnInt(statement,0) == 1; unused SqliteFinalize(statement)
+    if !valid { return Failure("Choose valid import metadata") }
+    // Typed integer access preserves the source's nanosecond stamp exactly.
+    validation := "SELECT json_type(data)='object' AND json_type(data,'$.metadata')='object' AND json_type(data,'$.albums')='array' AND json_type(data,'$.id')='text' AND length(json_extract(data,'$.id'))=64 AND json_extract(data,'$.id') NOT GLOB '*[^0-9a-f]*' AND typeof(json_extract(data,'$.size'))='integer' AND json_extract(data,'$.size')>=0 AND typeof(json_extract(data,'$.mtime'))='integer' AND typeof(json_extract(data,'$.width'))='integer' AND typeof(json_extract(data,'$.height'))='integer' AND json_extract(data,'$.width')>=0 AND json_extract(data,'$.height')>=0 AND json_type(data,'$.taken') IN ('integer','real') AND json_type(data,'$.path')='text' AND length(json_extract(data,'$.path'))>0 AND json_type(data,'$.stamp')='text' AND json_type(data,'$.name')='text' AND json_type(data,'$.extension')='text' AND json_extract(data,'$.kind') IN ('photo','video') AND json_type(data,'$.caption')='text' AND json_type(data,'$.tags')='text' AND json_type(data,'$.favorite') IN ('true','false') AND json_type(data,'$.archived') IN ('true','false') AND json_type(data,'$.correct_date') IN ('true','false') AND json_type(data,'$.metadata.photosPeople') IS NULL AND json_type(data,'$.metadata.photosAutoAlbums') IS NULL AND NOT EXISTS(SELECT 1 FROM json_each(data,'$.albums') WHERE type<>'text' OR length(value)=0) FROM incoming"
+    if SqlitePrepareText(database,validation,-1,*statement,null) != SQLITE_OK { return Failure("Choose valid import metadata") }
+    valid = SqliteStep(statement) == SQLITE_ROW && SqliteColumnInt(statement,0) == 1; unused SqliteFinalize(statement)
+    if !valid { return Failure("Choose valid import metadata") }
+    if !Execute(database,"BEGIN IMMEDIATE") { return Failure("The library is busy; retry import") }
+    defer { unused Execute(database,"ROLLBACK") }
+    time: Timespec; if GetTime(0,*time) != 0 { return Failure("Cannot read the import time") }
+    now := cast(float64)time.seconds+cast(float64)time.nanoseconds/1000000000.0
+    // Keep the snapshot text alive until its fields have been collected.
+    if SqlitePrepareText(database,"SELECT metadata,edits FROM photos WHERE id=(SELECT json_extract(data,'$.id') FROM incoming)",-1,*statement,null) != SQLITE_OK { return Failure("Cannot load existing metadata") }
+    status := SqliteStep(statement); existing := status == SQLITE_ROW
+    if existing {
+        old := TextFromCString(SqliteColumnText(statement,0)); edits := TextFromCString(SqliteColumnText(statement,1))
+        valid = Collect(database,old) && Collect(database,Field(request,"metadata"))
+        separated := Field(edits,"live_separated")
+        if valid && separated != "" && separated != "false" && separated != "null" && separated != "0" {
+            valid = Execute(database,"DELETE FROM merged_metadata WHERE key='photosLive'; INSERT OR REPLACE INTO merged_metadata VALUES('photosLiveSeparated','\"photosLiveSeparated\"','true')")
+        }
+        location := Field(edits,"location")
+        if valid && location != "" {
+            valid = Execute(database,"DELETE FROM merged_metadata WHERE key IN ('geoData','geoDataExif')")
+            if valid && location != "null" {
+                insert: *void
+                if SqlitePrepareText(database,"INSERT INTO merged_metadata VALUES('geoData','\"geoData\"',?)",-1,*insert,null) != SQLITE_OK { valid = false }
+                else { valid = Bind(insert,1,location) && SqliteStep(insert) == SQLITE_DONE; unused SqliteFinalize(insert) }
+            }
+        }
+    } else { valid = status == SQLITE_DONE && Collect(database,Field(request,"metadata")) }
+    unused SqliteFinalize(statement)
+    if !valid || !Execute(database,"DELETE FROM merged_metadata WHERE key IN ('photosMotionScan','photosPeople','photosAutoAlbums')") { return Failure("Cannot merge import metadata") }
+    metadata: Vec(u8); BuilderPrint(*metadata,"{")
+    if SqlitePrepareText(database,"SELECT quoted,value FROM merged_metadata ORDER BY key COLLATE BINARY",-1,*statement,null) != SQLITE_OK { return Failure("Cannot merge import metadata") }
+    first := true
+    while true {
+        status = SqliteStep(statement); if status == SQLITE_DONE { break }
+        if status != SQLITE_ROW { unused SqliteFinalize(statement); return Failure("Cannot merge import metadata") }
+        if !first { BuilderPrint(*metadata,",") }
+        BuilderPrint(*metadata,"%:%",TextFromCString(SqliteColumnText(statement,0)),TextFromCString(SqliteColumnText(statement,1))); first = false
+    }
+    unused SqliteFinalize(statement); BuilderPrint(*metadata,"}"); combined := BuilderFinish(metadata)
+    // Sets are sorted consistently with the existing exported library format.
+    if !Execute(database,"CREATE TEMP TABLE merged_albums(name TEXT PRIMARY KEY); INSERT OR IGNORE INTO merged_albums SELECT value FROM incoming,json_each(data,'$.albums'); INSERT OR IGNORE INTO merged_albums SELECT value FROM photos,json_each(photos.albums) WHERE photos.id=(SELECT json_extract(data,'$.id') FROM incoming); DELETE FROM merged_albums WHERE name IN (SELECT value FROM photos,json_each(photos.edits,'$.removed_albums') WHERE photos.id=(SELECT json_extract(data,'$.id') FROM incoming))") { return Failure("Cannot merge import albums") }
+    if SqlitePrepareText(database,"SELECT name FROM merged_albums ORDER BY name",-1,*statement,null) != SQLITE_OK { return Failure("Cannot merge import albums") }
+    while true {
+        status = SqliteStep(statement); if status == SQLITE_DONE { break }
+        if status != SQLITE_ROW || !EnsureAlbum(database,TextFromCString(SqliteColumnText(statement,0)),now) { unused SqliteFinalize(statement); return Failure("Cannot retain import album definitions") }
+    }
+    unused SqliteFinalize(statement)
+    sql: string
+    if existing {
+        sql = "UPDATE photos SET metadata=?1,albums=(SELECT json_group_array(name) FROM (SELECT name FROM merged_albums ORDER BY name)),taken=CASE WHEN (SELECT json_extract(data,'$.correct_date') FROM incoming)=1 AND NOT coalesce(json_extract(edits,'$.taken'),0) THEN (SELECT json_extract(data,'$.taken') FROM incoming) ELSE taken END,updated=max(updated+0.000001,?2),dirty=1 WHERE id=(SELECT json_extract(data,'$.id') FROM incoming) AND (metadata<>?1 OR albums<>(SELECT json_group_array(name) FROM (SELECT name FROM merged_albums ORDER BY name)))"
+    } else {
+        sql = "INSERT INTO photos(id,name,extension,kind,size,taken,width,height,metadata,albums,favorite,caption,tags,updated,archived) SELECT json_extract(data,'$.id'),json_extract(data,'$.name'),json_extract(data,'$.extension'),json_extract(data,'$.kind'),json_extract(data,'$.size'),json_extract(data,'$.taken'),json_extract(data,'$.width'),json_extract(data,'$.height'),?1,(SELECT json_group_array(name) FROM (SELECT name FROM merged_albums ORDER BY name)),json_extract(data,'$.favorite'),json_extract(data,'$.caption'),json_extract(data,'$.tags'),?2,json_extract(data,'$.archived') FROM incoming"
+    }
+    if SqlitePrepareText(database,sql,-1,*statement,null) != SQLITE_OK { return Failure("Cannot store imported photo metadata") }
+    valid = Bind(statement,1,combined) && SqliteBindDouble(statement,2,now) == SQLITE_OK && SqliteStep(statement) == SQLITE_DONE; unused SqliteFinalize(statement)
+    if !valid { return Failure("Cannot store imported photo metadata") }
+    if !Execute(database,"INSERT OR REPLACE INTO sources SELECT json_extract(data,'$.path'),json_extract(data,'$.size'),json_extract(data,'$.mtime'),json_extract(data,'$.stamp'),json_extract(data,'$.id') FROM incoming") { return Failure("Cannot store the import source") }
+    if !Execute(database,"COMMIT") { return Failure("Cannot finish the import") }
+    response := ifx existing then "{\"saved\":1,\"added\":0}\n" else "{\"saved\":1,\"added\":1}\n"
+    unused Send(response); return 0
+}

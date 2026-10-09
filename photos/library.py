@@ -292,6 +292,34 @@ class Library:
             destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             from . import importing
             importing.copy(path, destination, photo_id, stat.st_size)
+        # Private face/provenance export imports retain their shared adapter
+        # transaction until those derived tables have a native writer too.
+        derived = any(key in metadata for key in ('photosPeople', 'photosAutoAlbums'))
+        if not derived:
+            from . import importing
+            exported_albums = metadata.get('albums', [])
+            if not isinstance(exported_albums, list):
+                exported_albums = []
+            albums = sorted({album} | {name for name in exported_albums
+                            if isinstance(name, str) and name.strip() and len(name.encode()) <= 512})
+            added = importing.merge(self, dict(id=photo_id, name=path.name, extension=path.suffix.lower(),
+                kind='video' if path.suffix.lower() in VIDEOS else 'photo', size=stat.st_size, taken=taken,
+                width=width, height=height, metadata=metadata, albums=albums,
+                favorite=album.casefold() in {'favorites', 'favourites'} or metadata.get('favorite') is True,
+                archived=metadata.get('archived') is True, caption=str(metadata.get('description', '')),
+                tags=metadata.get('tags', '') if isinstance(metadata.get('tags', ''), str) else '',
+                correct_date=bool(metadata.get('photoTakenTime')), path=str(path),
+                mtime=stat.st_mtime_ns, stamp=stamp))
+            if added:
+                photo = self.photo(photo_id)
+                self.preview(photo, self.original(photo))
+                self.db.commit()
+            from . import motion
+            try:
+                motion.detect(self, photo_id)
+            except LibraryError:
+                warning = True
+            return 'warning' if warning else ('added' if added else 'merged')
         # Copying keeps the database available. Another import or edit may have
         # completed during file/sidecar reads: merge from a fresh writer snapshot.
         self.db.execute('BEGIN IMMEDIATE')

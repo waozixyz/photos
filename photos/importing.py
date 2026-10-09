@@ -6,7 +6,7 @@ import re
 import subprocess
 import tempfile
 
-from .library import LibraryError
+from .library import LibraryError, packed
 
 
 def program():
@@ -16,6 +16,39 @@ def program():
     if helper is None:
         raise LibraryError('Build or install the Photos importer before importing originals')
     return helper
+
+
+def metadata_program():
+    root = Path(__file__).resolve().parents[1]
+    paths = [root/'import_metadata', root/'build/import-metadata/import_metadata']
+    helper = next((path for path in paths if path.is_file()), None)
+    if helper is None:
+        raise LibraryError('Build or install the Photos metadata importer before importing photos')
+    return helper
+
+
+def merge(library, request):
+    if library.db.in_transaction:
+        raise LibraryError('Finish the current library operation before importing metadata')
+    data = packed(request).encode()
+    if len(data)+1 > 16*1024*1024:
+        raise LibraryError('Import metadata exceeds its limit')
+    environment = {key: value for key, value in os.environ.items() if key not in {
+        'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS', 'SESSION_MANAGER'}}
+    try:
+        result = subprocess.run(['prlimit', '--as=536870912', '--cpu=30', '--',
+                                 str(metadata_program()), str(library.root/'library.sqlite')],
+                                input=data+b'\n', env=environment, capture_output=True, timeout=40)
+        response = json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        raise LibraryError('Import outcome could not be confirmed; rescan before retrying') from None
+    if not isinstance(response, dict):
+        raise LibraryError('Import returned an invalid response')
+    if response.get('error'):
+        raise LibraryError(response['error'])
+    if result.returncode or response.get('saved') != 1 or response.get('added') not in (0, 1):
+        raise LibraryError('Import outcome could not be confirmed; rescan before retrying')
+    return bool(response['added'])
 
 
 def copy(source, destination, identity, expected_size=None):

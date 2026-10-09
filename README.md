@@ -10,9 +10,14 @@ Corrected dates, captions, original metadata and locations survive import.
 Original copying runs in a headless Ziran importer: it streams and verifies the
 complete SHA-256 before atomically publishing a private copy, rejects symbolic
 links, and preserves an existing destination if its bytes differ. Interrupted
-copies are cleaned up by the local import adapter. Folder traversal, sidecar
-metadata, source indexing and derived indexes still use the compatibility service;
-the complete importer port remains in progress.
+copies are cleaned up by the local import adapter. Ordinary original imports
+merge metadata, album definitions and the exact source-cache stamp in one native
+Ziran transaction, taking a fresh snapshot after copying. Unknown sidecar values,
+explicit nulls, large integers and long captions survive unchanged. Failed or
+interrupted writes roll back the photo, albums and source-cache record together;
+metadata updates retain a newer backup stamp. Folder traversal, EXIF/sidecar
+extraction and imports carrying private face or automatic-album indexes still
+use the compatibility service; the complete importer port remains in progress.
 
 The owner's merged desktop library is `/mnt/storage/Photos`, imported from
 `/mnt/storage/adel` and `/mnt/storage/Album`. Private data never belongs in this
@@ -411,9 +416,10 @@ The remaining replacement work includes:
   Any sharing design needs to honor the owner's ThinkPad-only sync restriction.
 - System authentication, Hidden password recovery and a deliberate deletion/retention policy.
 - A complete Ziran library/sync service. The native UI, portable app, gallery/search
-  engine, image processor, password verifier and photo-property writer are Ziran/Kryon.
-  Album/date/location/name mutations, the importer, authorization adapter and encrypted
-  sync worker remain Python.
+  engine, image processor, password verifier, photo/album-property writers,
+  original copying and ordinary import metadata/source-cache writes are Ziran/Kryon.
+  Folder traversal, EXIF/sidecar extraction, private derived-index import writes,
+  authorization adapter and encrypted sync worker remain Python.
 
 Choose Play video to watch a video in the Photos window. Pause/resume, Replay,
 the position slider, five-second seek buttons, volume and Mute work offline.

@@ -58,8 +58,14 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         source.mkdir(parents=True)
         Image.new('RGB',(500,300),'#4c9180').save(source/'fixture.jpg')
         Image.new('RGB',(300,500),'#ce9157').save(source/'second.jpg')
+        imported_metadata = {'unknownCameraFields': {'empty': None, 'integer': 10**100,
+                             'values': [True, False, '日本語\n\0']}}
+        (source/'fixture.jpg.json').write_text(packed(imported_metadata))
         first = Library(folder/'desktop')
         first.import_folders([source.parent])
+        assert json.loads(first.photo(digest_file(source/'fixture.jpg'))['metadata']) == imported_metadata
+        assert first.db.execute('SELECT mtime FROM sources WHERE path=?',
+                               (str(source/'fixture.jpg'),)).fetchone()[0] == (source/'fixture.jpg').stat().st_mtime_ns
         config = dict(node=origin, node_id=node['node_id'])
         client = Client(first, config)
         assert client.sync() == 0
@@ -79,6 +85,7 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         peer = Client(second, config)
         assert peer.sync() == 0
         assert second.query()['total'] == 2
+        assert json.loads(second.photo(photo_id)['metadata']) == imported_metadata
         assert semantic.encrypted_index(second, photo_id) == semantic.encrypted_index(first, photo_id)
         assert not second.setting('semantic_enabled', False)
         original = Path(peer.materialize(photo_id))

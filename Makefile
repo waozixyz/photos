@@ -1,6 +1,8 @@
 .DEFAULT_GOAL := build
-.PHONY: original-importer
-original-importer:
+.PHONY: original-importer metadata-importer
+metadata-importer:
+	LDLIBS='-l:libsqlite3.so.0 -lglib-2.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry import_metadata:main --exe -o build/import-metadata src/import_metadata.zi
+original-importer: metadata-importer
 	LDLIBS='-lglib-2.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry import_original:main --exe -o build/import-original src/import_original.zi
 .PHONY: library-editor
 library-editor:
