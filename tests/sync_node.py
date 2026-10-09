@@ -13,6 +13,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PIL import Image
 from photos.library import Library, packed, digest_file
 from photos.sync import Client
+import photos.sync
+
+# Exercise actual signed continuation requests even with this tiny fixture.
+photos.sync.RECORD_PAGE = 1
 
 repo = Path(__file__).resolve().parents[1]
 node_binary = os.environ.get('PHOTOS_DAOCHI') or shutil.which('daochi')

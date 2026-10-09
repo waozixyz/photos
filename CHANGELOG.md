@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.3
+
+- Keep large ThinkPad backups moving with small encrypted metadata pages.
+- Resume interrupted metadata downloads from their last verified page, preserving queued edits.
+
 ## 0.1.2
 
 - Select multiple photos to organize, favorite, hide, restore, export or correct their dates together.

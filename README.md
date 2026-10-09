@@ -18,8 +18,10 @@ loopback. Photos refuses public URLs, redirects, proxies, identity changes, and
 node policies that would replicate Photos outward. Originals and metadata are
 encrypted client-side using XChaCha20-Poly1305. Requests use Daochi v6 account and
 device signatures; downloaded originals must match their SHA-256 and size.
-The ThinkPad node stores a complete encrypted copy. Photos retrieves previews
+When sync completes, the ThinkPad node holds a complete encrypted copy. Photos retrieves previews
 and materializes originals when needed; its installed index is private local data.
+Large libraries exchange metadata in signed pages with private local checkpoints.
+The ThinkPad node needs the paged encrypted-record sync endpoint for this version.
 
 Photos opens to a newest-first feed grouped by day. Older photos load as you
 scroll, with only visible thumbnails drawn. The app follows Harmony’s colors

@@ -26,6 +26,7 @@ from .library import atomic, packed, digest_file
 APP = 'photos'
 COLLECTION = 'private.photos.v1.records.media'
 CHUNK = 8 * 1024 * 1024
+RECORD_PAGE = 200
 HASH = re.compile(r'^[0-9a-f]{64}$')
 
 
@@ -258,20 +259,59 @@ class Client:
                                 [photo[c] for c in columns])
 
     def exchange(self, records=None):
-        request = dict(protocol_version=6, app_id=APP, user_id_hash=self.account, client_id=self.client_id,
-                       client_clock=int(time.time() * 1000), since_server_version=self.library.setting('server_version', 0),
-                       encrypted_records=records or [])
-        result = self.request('/api/v1/sync', 'POST', packed(request).encode())
-        incoming = result.get('changes', {}).get('encrypted_records') or []
-        if result.get('full_snapshot_required'):
-            incoming = (result.get('data') or {}).get('encrypted_records') or incoming
-        for record in incoming:
-            self.accept(record)
-        self.library.db.commit()
-        if not result.get('changes_complete', True):
-            raise ValueError('Node returned incomplete metadata; the sync cursor was retained')
-        self.library.set_setting('server_version', result['server_version'])
-        return result
+        uploaded = None
+        while True:
+            since = self.library.setting('server_version', 0)
+            cursor = self.library.setting('record_cursor', None)
+            request = dict(protocol_version=6, app_id=APP, user_id_hash=self.account, client_id=self.client_id,
+                           client_clock=since, since_server_version=since,
+                           encrypted_records_only=True, record_limit=RECORD_PAGE, encrypted_records=records or [])
+            if cursor:
+                request['record_cursor'] = cursor
+            result = self.request('/api/v1/sync', 'POST', packed(request).encode())
+            if result.get('encrypted_records_only') is not True or result.get('status') != 'ok' or result.get('full_snapshot_required'):
+                raise ValueError('ThinkPad node needs paged encrypted sync; changes remain queued')
+            version = result.get('server_version')
+            if type(version) is not int or version < since:
+                raise ValueError('Node returned an invalid metadata version; the cursor was retained')
+            incoming = result.get('changes', {}).get('encrypted_records') or []
+            if not isinstance(incoming, list) or len(incoming) > RECORD_PAGE:
+                raise ValueError('Node returned an invalid metadata page')
+            complete = result.get('changes_complete')
+            following = result.get('record_cursor')
+            if complete is not True:
+                valid = (complete is False and isinstance(following, dict) and
+                         type(following.get('version')) is int and since < following['version'] <= version and
+                         isinstance(following.get('collection'), str) and isinstance(following.get('id'), str) and
+                         bool(incoming))
+                previous_key = (cursor['version'], cursor['collection'], cursor['id']) if cursor else (since, '', '')
+                next_key = (following['version'], following['collection'], following['id']) if valid else previous_key
+                if not valid or next_key <= previous_key:
+                    raise ValueError('Node returned a stalled metadata page; the cursor was retained')
+                last = incoming[-1]
+                if (following['collection'], following['id']) != (last.get('collection'), last.get('id')):
+                    raise ValueError('Node returned an invalid page boundary; the cursor was retained')
+            elif following is not None:
+                raise ValueError('Node returned a conflicting metadata cursor')
+            # Keep decrypted records and their checkpoint in one transaction.
+            # A failed decrypt or write must never acknowledge a partial page.
+            try:
+                self.library.db.execute('BEGIN IMMEDIATE')
+                for record in incoming:
+                    if not isinstance(record, dict) or record.get('collection') != COLLECTION or not HASH.fullmatch(record.get('id', '')):
+                        raise ValueError('Node returned an unsupported photo record; the cursor was retained')
+                    self.accept(record)
+                for key, value in [('server_version', version if complete else since),
+                                   ('record_cursor', None if complete else following)]:
+                    self.library.db.execute('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)', (key, packed(value)))
+                self.library.db.commit()
+            except Exception:
+                self.library.db.rollback()
+                raise
+            uploaded = uploaded or result
+            records = None
+            if complete:
+                return uploaded
 
     def sync(self, maximum=50):
         self.check_node()
