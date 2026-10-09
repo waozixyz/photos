@@ -1,0 +1,81 @@
+// Stream an immutable original into the private content-addressed store.
+// Never follow a source symlink or replace an existing destination.
+using Files :: #import "std/file_linux";
+#import "std/byte_text_linux"
+#import "std/c_string"
+#import "std/text_buffer"
+c :: #system_library "c";
+glib :: #system_library "glib-2.0";
+Open :: (path: *u8, flags: s32) -> s32 #foreign c "open";
+ChecksumNew :: (kind: s32) -> *void #foreign glib "g_checksum_new";
+ChecksumUpdate :: (checksum: *void, bytes: *u8, count: isize) #foreign glib "g_checksum_update";
+ChecksumText :: (checksum: *void) -> *u8 #foreign glib "g_checksum_get_string";
+ChecksumFree :: (checksum: *void) #foreign glib "g_checksum_free";
+Failure :: (message: string) -> s32 { print("{\"error\":\"%\"}\n",message); return 1 }
+Identity :: (text: string) -> bool {
+    if text.count != 64 { return false }
+    for byte: text { if !((byte >= 48 && byte <= 57) || (byte >= 97 && byte <= 102)) { return false } }
+    return true
+}
+Verify :: (path: string, identity: string, expected: s64) -> bool {
+    name: [4096]u8; if !CopyCString(path,name[:]) { return false }
+    descriptor := Open(*name[0],0xA0000); if descriptor < 0 { return false }
+    file: FileHandle = .{descriptor,true}; defer { unused CloseFile(file) }
+    if FileSize(file) != expected { return false }
+    checksum := ChecksumNew(2); if checksum == null { return false }; defer { ChecksumFree(checksum) }
+    chunk: [65536]u8; offset: s64
+    while true {
+        count := ReadAt(file,chunk[:],offset); if count < 0 { return false }; if count == 0 { break }; offset += count
+        ChecksumUpdate(checksum,*chunk[0],cast(isize)count)
+    }
+    return offset == expected && TextFromCString(ChecksumText(checksum)) == identity
+}
+main :: (argc: s32, argv: **u8) -> s32 {
+    if argc != 6 { return Failure("Supply a source, destination, original identity, private temporary copy and byte size") }
+    source := TextFromCString(argv[1]); destination := TextFromCString(argv[2]); identity := TextFromCString(argv[3])
+    if !Identity(identity) || source == destination || source.count == 0 || destination.count == 0 || destination[0] != 47 { return Failure("Choose a valid original import") }
+    sizeText := TextFromCString(argv[5]); expected: s64
+    if sizeText.count < 1 || sizeText.count > 19 { return Failure("Choose a valid original byte size") }
+    for byte: sizeText {
+        if byte < 48 || byte > 57 { return Failure("Choose a valid original byte size") }
+        digit := cast(s64)byte-48
+        if expected > (9223372036854775807-digit)/10 { return Failure("Choose a valid original byte size") }
+        expected = expected*10+digit
+    }
+    if PathIsLink(source) || PathIsLink(destination) { return Failure("Original import refuses symbolic links") }
+    if PathExists(destination) {
+        if !Verify(destination,identity,expected) { return Failure("Existing original does not match its identity; it was preserved") }
+        print("{\"stored\":1}\n"); return 0
+    }
+    sourceName: [4096]u8; if !CopyCString(source,sourceName[:]) { return Failure("Original source path is too long") }
+    descriptor := Open(*sourceName[0],0xA0000); if descriptor < 0 { return Failure("Cannot open the original source") }
+    original: FileHandle = .{descriptor,true}; defer { unused CloseFile(original) }
+    temporaryPath := TextFromCString(argv[4]); prefix: Vec(u8); BuilderPrint(*prefix,"%.import-",destination); expectedPrefix := BuilderFinish(prefix)
+    if temporaryPath == source || temporaryPath.count <= expectedPrefix.count || temporaryPath[:expectedPrefix.count] != expectedPrefix { return Failure("Choose the private import temporary copy") }
+    temporaryName: [4096]u8; if !CopyCString(temporaryPath,temporaryName[:]) { return Failure("Original destination path is too long") }
+    outputDescriptor := Open(*temporaryName[0],0xA0001); if outputDescriptor < 0 { return Failure("Cannot open the private original copy") }
+    output: FileHandle = .{outputDescriptor,true}; defer { unused CloseFile(output) }
+    if FileSize(output) != 0 { return Failure("The temporary original copy must be empty") }
+    checksum := ChecksumNew(2); if checksum == null { return Failure("Cannot check the original identity") }; defer { ChecksumFree(checksum) }
+    chunk: [65536]u8; total: s64
+    while true {
+        count := Read(original,chunk[:]); if count < 0 { return Failure("Cannot read the original; retry the import") }; if count == 0 { break }
+        if count > expected-total { return Failure("Source changed while importing; retry later") }; total += count
+        ChecksumUpdate(checksum,*chunk[0],cast(isize)count)
+        written: s64
+        while written < count {
+            amount := Write(output,chunk[written:count]); if amount <= 0 { return Failure("Cannot write the original copy") }; written += amount
+        }
+    }
+    if total != expected || TextFromCString(ChecksumText(checksum)) != identity { return Failure("Source changed while importing; retry later") }
+    if !SyncFile(output) { return Failure("Cannot save the original copy") }
+    if !RenameNoReplace(temporaryPath,destination) && !Verify(destination,identity,expected) { return Failure("Cannot publish the original copy; existing files were preserved") }
+    slash: s32 = -1; for i: 0..cast(s32)destination.count-1 { if destination[i] == 47 { slash = i } }
+    if slash < 1 { return Failure("Use an absolute private original destination") }
+    directoryName: [4096]u8; if !CopyCString(destination[:slash],directoryName[:]) { return Failure("Original directory path is too long") }
+    directoryDescriptor := Open(*directoryName[0],0x90000)
+    if directoryDescriptor < 0 { return Failure("Cannot confirm the saved original directory") }
+    directory: FileHandle = .{directoryDescriptor,true}; defer { unused CloseFile(directory) }
+    if !SyncFile(directory) { return Failure("Cannot confirm the saved original directory") }
+    print("{\"stored\":1}\n"); return 0
+}

@@ -286,11 +286,16 @@ class Library:
             taken = stat.st_mtime
         relative = path.relative_to(source_root)
         album = self.import_album_names.get(str(path.parent), str(relative.parent) if relative.parent != Path('.') else source_root.name)
-        if existing:
-            # An edit may have completed while EXIF/sidecars were being read.
-            # Re-read its markers under the writer lock before merging.
-            self.db.execute('BEGIN IMMEDIATE')
-            existing = self.db.execute('SELECT * FROM photos WHERE id=?', (photo_id,)).fetchone()
+        if not existing:
+            photo = dict(id=photo_id, extension=path.suffix.lower(), kind='video' if path.suffix.lower() in VIDEOS else 'photo')
+            destination = self.original(photo)
+            destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            from . import importing
+            importing.copy(path, destination, photo_id, stat.st_size)
+        # Copying keeps the database available. Another import or edit may have
+        # completed during file/sidecar reads: merge from a fresh writer snapshot.
+        self.db.execute('BEGIN IMMEDIATE')
+        existing = self.db.execute('SELECT * FROM photos WHERE id=?', (photo_id,)).fetchone()
         edits = json.loads(existing['edits']) if existing else {}
         exported_albums = metadata.get('albums', [])
         if not isinstance(exported_albums, list):
@@ -317,23 +322,6 @@ class Library:
                 self.db.execute('UPDATE photos SET albums=?,metadata=?,taken=?,updated=?,dirty=1 WHERE id=?',
                                 (packed(albums), packed(combined), corrected, time.time(), photo_id))
         else:
-            photo = dict(id=photo_id, extension=path.suffix.lower(), kind='video' if path.suffix.lower() in VIDEOS else 'photo')
-            destination = self.original(photo)
-            destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            fd, temporary = tempfile.mkstemp(prefix='.import-', dir=destination.parent)
-            try:
-                with path.open('rb') as source, os.fdopen(fd, 'wb') as output:
-                    value = hashlib.sha256()
-                    for block in iter(lambda: source.read(4 * 1024 * 1024), b''):
-                        value.update(block)
-                        output.write(block)
-                    output.flush()
-                    os.fsync(output.fileno())
-                if value.hexdigest() != photo_id:
-                    raise ValueError('Source changed while importing; retry later')
-                os.replace(temporary, destination)
-            finally:
-                Path(temporary).unlink(missing_ok=True)
             caption = str(metadata.get('description', ''))
             self.db.execute('''INSERT INTO photos(id,name,extension,kind,size,taken,width,height,metadata,albums,favorite,caption,tags,updated,archived)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',

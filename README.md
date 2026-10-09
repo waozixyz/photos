@@ -7,6 +7,12 @@ local folders and Ente exports without changing their files. Identical originals
 are stored once while every album membership is retained. Ente Desktop
 `metadata/`, CLI `.meta/`, and adjacent Google Takeout JSON sidecars are supported.
 Corrected dates, captions, original metadata and locations survive import.
+Original copying runs in a headless Ziran importer: it streams and verifies the
+complete SHA-256 before atomically publishing a private copy, rejects symbolic
+links, and preserves an existing destination if its bytes differ. Interrupted
+copies are cleaned up by the local import adapter. Folder traversal, sidecar
+metadata, source indexing and derived indexes still use the compatibility service;
+the complete importer port remains in progress.
 
 The owner's merged desktop library is `/mnt/storage/Photos`, imported from
 `/mnt/storage/adel` and `/mnt/storage/Album`. Private data never belongs in this

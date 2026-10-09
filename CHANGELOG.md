@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.29
+
+- Import originals through a streaming, verified copy and publish them atomically without replacing an existing stored original.
+- Preserve both source files and existing library files when an import changes, fails or is interrupted; reject symbolic links and retain private copy permissions.
+- Keep the library available for edits while originals copy, and merge concurrent imports without losing metadata corrections or duplicating stored originals.
+
 ## 0.1.28
 
 - Keep album membership, corrected dates, locations and file names atomic across selections and paired Live Photos, preserving originals during invalid edits or expired Hidden access.

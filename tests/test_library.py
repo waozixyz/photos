@@ -385,6 +385,32 @@ class LibraryTest(unittest.TestCase):
         self.assertEqual(self.library.query(album='Holiday')['count'], 0)
         self.assertEqual(self.library.details(photo_id)['taken'], '2024-06-15T00:00:00+00:00')
 
+    def test_original_copy_keeps_writer_available_and_merges_a_concurrent_import(self):
+        from photos import importing
+        first=self.export('desktop','Holiday')
+        self.library.import_folders([first.parents[1]])
+        second=self.export('desktop','New album','blue')
+        old_id,new_id=digest_file(first),digest_file(second)
+        other=Library(self.library.root);self.addCleanup(other.db.close)
+        actual_copy=importing.copy;entered=False
+        def during_copy(*args,**kwargs):
+            nonlocal entered
+            result=actual_copy(*args,**kwargs)
+            if not entered:
+                entered=True
+                other.edit(old_id,'favorite_set','1')
+                self.assertEqual(other.import_file(second,second.parents[1]),'added')
+                other.edit(new_id,'taken','2024-06-15')
+                other.edit(new_id,'album_remove','New album')
+            return result
+        with patch('photos.importing.copy',side_effect=during_copy):
+            self.assertEqual(self.library.import_file(second,second.parents[1]),'merged')
+        self.assertEqual(self.library.query()['total'],2)
+        self.assertEqual(self.library.photo(old_id)['favorite'],1)
+        self.assertEqual(self.library.details(new_id)['taken'],'2024-06-15T00:00:00+00:00')
+        self.assertNotIn('New album',json.loads(self.library.photo(new_id)['albums']))
+        self.assertEqual(self.library.original(self.library.photo(new_id)).read_bytes(),second.read_bytes())
+
     def test_exported_tags_favorites_and_album_metadata_round_trip(self):
         path = self.export('desktop', 'Holiday')
         self.library.import_folders([path.parents[1]])

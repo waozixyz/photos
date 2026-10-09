@@ -45,6 +45,12 @@ def main():
             parser.error('Install the signed Photos bundle through Harmony before registering its catalog entry')
     installed = args.prefix/'lib/photos'
     installed.mkdir(parents=True,exist_ok=True,mode=0o700)
+    importer = repo/'build/import-original/import_original'
+    if not importer.is_file():
+        parser.error('Build the Photos original importer before installing')
+    shutil.copyfile(importer,installed/'import_original.next')
+    os.chmod(installed/'import_original.next',0o755)
+    os.replace(installed/'import_original.next',installed/'import_original')
     for name in ['face-infer','face-pixels','face-match']:
         target = name.replace('-','_'); source = repo/'build'/name/target
         if not source.is_file(): parser.error('Build the local face recognition engine before installing')

@@ -1,4 +1,7 @@
 .DEFAULT_GOAL := build
+.PHONY: original-importer
+original-importer:
+	LDLIBS='-lglib-2.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry import_original:main --exe -o build/import-original src/import_original.zi
 .PHONY: library-editor
 library-editor:
 	LDLIBS='-l:libsqlite3.so.0 -lglib-2.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry library_edit:main --exe -o build/library-editor src/library_edit.zi
@@ -69,13 +72,13 @@ vault-auth:
 	LDLIBS='-l:libsodium.so.23' "$$ziran_source/build/bin/ziran" build --root src --target=c --entry vault_auth:main --exe -o build/vault-auth src/vault_auth.zi
 library-query:
 	LDLIBS='-l:libsqlite3.so.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry library_query:main --exe -o build/library-query src/library_query.zi
-build: library-editor image-editor video-editor vault-auth library-query photo-decoder semantic-engine text-engine face-engine qr-engine motion-engine
+build: original-importer library-editor image-editor video-editor vault-auth library-query photo-decoder semantic-engine text-engine face-engine qr-engine motion-engine
 	$(ZIRAN) build $(PACKAGE_FLAGS)
 	cp scripts/worker.py build/
 	cp -r photos build/
-bundle: library-editor image-editor video-editor vault-auth library-query photo-decoder semantic-engine text-engine face-engine qr-engine motion-engine
+bundle: original-importer library-editor image-editor video-editor vault-auth library-query photo-decoder semantic-engine text-engine face-engine qr-engine motion-engine
 	$(ZIRAN) tool kryon build portable $(PACKAGE_FLAGS)
-test: library-editor image-editor video-editor vault-auth library-query photo-decoder semantic-engine text-engine face-engine qr-engine motion-engine
+test: original-importer library-editor image-editor video-editor vault-auth library-query photo-decoder semantic-engine text-engine face-engine qr-engine motion-engine
 	$(PYTHON) -m unittest discover -s tests -v
 sync-test:
 	$(PYTHON) tests/sync_node.py
