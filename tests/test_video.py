@@ -157,3 +157,12 @@ class VideoTest(unittest.TestCase):
             self.assertIn('cancelled',response['status'])
         self.assertEqual(self.library.query()['total'],1)
         self.assertEqual(self.source.read_bytes(),self.original)
+
+    def test_service_restart_clears_the_ui_processing_session(self):
+        # The worker's in-memory registry disappears when the service restarts.
+        # A stale UI token must stop polling and allow another editing session.
+        response=process(dict(action='video_status',video_job='a'*32),self.config)
+        self.assertEqual(response['video_job'],'')
+        self.assertEqual(response['video_working'],0)
+        self.assertIn('session ended',response['error'])
+        self.assertEqual(self.library.query()['total'],1)

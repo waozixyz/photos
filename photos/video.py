@@ -64,7 +64,8 @@ def state(library, token, vault_token='', cancel=False):
     with guard:
         job = jobs.get(token)
         if job is None or job['root'] != str(library.root):
-            raise LibraryError('Video session ended; check the library before retrying')
+            return dict(video_job='', video_working=0,
+                        error='Video session ended; check the library before retrying')
         hidden = library.photo(job['id'])['hidden'] or (job['saved_copy'] and library.photo(job['saved_copy'])['hidden'])
         if hidden and (vault_token != job['vault'] or not vault.unlocked(library, vault_token)):
             if not job['done']:
