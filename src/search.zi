@@ -54,7 +54,8 @@ ApplyTerm :: (query: *Predicate, key: string, value: string) {
     if value.count == 0 { query.error = "A search filter needs a value"; return }
     if key == "" { TextMatch(query, value) }
     else if key == "type" {
-        if value != "photo" && value != "image" && value != "video" { query.error = "Choose type:photo or type:video"; return }
+        if value == "live" { AddSQL(query, "json_extract(metadata,'$.photosLive.video') IS NOT NULL"); return }
+        if value != "photo" && value != "image" && value != "video" { query.error = "Choose type:photo, type:video or type:live"; return }
         AddSQL(query, "kind=?"); Bind(query, ifx value == "image" then "photo" else value)
     } else if key == "favorite" || key == "archived" {
         enabled := Boolean(value)

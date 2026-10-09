@@ -224,6 +224,8 @@ def save(library, photo_id, value, authorize=None, job=None):
             if library.db.execute('SELECT id FROM photos WHERE id=?', (new_id,)).fetchone():
                 return new_id
             metadata = json.loads(photo['metadata'])
+            if metadata.pop('photosLive', None):
+                metadata['photosLiveSeparated'] = True
             metadata['photosVideoEdit'] = dict(parent=photo_id, adjustments=adjustments)
             name = Path(photo['name']).stem.encode()[:480].decode('utf-8', 'ignore')+'-edited.mp4'
             destination = library.original(dict(id=new_id, extension='.mp4'))

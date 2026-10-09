@@ -144,6 +144,8 @@ class Export:
     def run(self):
         # Copy metadata rows before writing files; each pass mirrors one snapshot.
         rows = [dict(p) for p in self.library.db.execute('SELECT * FROM photos WHERE hidden=0 AND trashed=0 ORDER BY id')]
+        from . import live
+        rows = [p for p in rows if all(not c['hidden'] and not c['trashed'] for c in live.components(self.library, p))]
         albums = {a['name']: a for a in self.library.album_list('all')}
         desired = set()
         written = 0

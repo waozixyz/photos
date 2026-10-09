@@ -1,0 +1,94 @@
+// Headless HEIF and camera RAW decoding into a disposable PNG display asset.
+// Originals and embedded metadata are never rewritten. Public C codec APIs
+// supply pixels; buffer validation, copying, sizing and output are Ziran.
+#import "std/byte_text_linux"
+heif :: #system_library "heif";
+raw :: #system_library "raw";
+pixbuf :: #system_library "gdk_pixbuf-2.0";
+object :: #system_library "gobject-2.0";
+Error :: struct { code: s32; subcode: s32; message: *u8 }
+Context :: () -> *void #foreign heif "heif_context_alloc";
+FreeContext :: (context: *void) #foreign heif "heif_context_free";
+Read :: (context: *void, path: *u8, options: *void) -> Error #foreign heif "heif_context_read_from_file";
+Primary :: (context: *void, handle: **void) -> Error #foreign heif "heif_context_get_primary_image_handle";
+HandleWidth :: (handle: *void) -> s32 #foreign heif "heif_image_handle_get_width";
+HandleHeight :: (handle: *void) -> s32 #foreign heif "heif_image_handle_get_height";
+ReleaseHandle :: (handle: *void) #foreign heif "heif_image_handle_release";
+Decode :: (handle: *void, image: **void, space: s32, chroma: s32, options: *void) -> Error #foreign heif "heif_decode_image";
+ImageWidth :: (image: *void, channel: s32) -> s32 #foreign heif "heif_image_get_width";
+ImageHeight :: (image: *void, channel: s32) -> s32 #foreign heif "heif_image_get_height";
+Plane :: (image: *void, channel: s32, stride: *s32) -> *u8 #foreign heif "heif_image_get_plane_readonly";
+ReleaseImage :: (image: *void) #foreign heif "heif_image_release";
+RawInit :: (flags: u32) -> *void #foreign raw "libraw_init";
+RawOpen :: (decoder: *void, path: *u8) -> s32 #foreign raw "libraw_open_file";
+RawClose :: (decoder: *void) #foreign raw "libraw_close";
+RawWidth :: (decoder: *void) -> s32 #foreign raw "libraw_get_iwidth";
+RawHeight :: (decoder: *void) -> s32 #foreign raw "libraw_get_iheight";
+RawUnpack :: (decoder: *void) -> s32 #foreign raw "libraw_unpack";
+RawProcess :: (decoder: *void) -> s32 #foreign raw "libraw_dcraw_process";
+RawBits :: (decoder: *void, bits: s32) #foreign raw "libraw_set_output_bps";
+RawColor :: (decoder: *void, color: s32) #foreign raw "libraw_set_output_color";
+RawMemory :: struct { kind: s32; height: u16; width: u16; colors: u16; bits: u16; size: u32; data: [1]u8 }
+RawImage :: (decoder: *void, error: *s32) -> *RawMemory #foreign raw "libraw_dcraw_make_mem_image";
+RawFree :: (image: *RawMemory) #foreign raw "libraw_dcraw_clear_mem";
+New :: (space: s32, alpha: s32, bits: s32, width: s32, height: s32) -> *void #foreign pixbuf "gdk_pixbuf_new";
+Pixels :: (image: *void) -> *u8 #foreign pixbuf "gdk_pixbuf_get_pixels";
+Stride :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_rowstride";
+Width :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_width";
+Height :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_height";
+Scale :: (image: *void, width: s32, height: s32, interpolation: s32) -> *void #foreign pixbuf "gdk_pixbuf_scale_simple";
+Save :: (image: *void, path: *u8, format: *u8, names: **u8, values: **u8, error: **void) -> s32 #foreign pixbuf "gdk_pixbuf_savev";
+Unref :: (image: *void) #foreign object "g_object_unref";
+
+Valid :: (width: s32, height: s32) -> bool {
+    return width > 0 && height > 0 && width <= 100000 && height <= 100000 && cast(s64)width * cast(s64)height <= 100000000
+}
+Copy :: (source: *u8, width: s32, height: s32, channels: s32, stride: s32) -> *void {
+    if source == null || !Valid(width, height) || (channels != 3 && channels != 4) || stride < width * channels { return null }
+    output := New(0, ifx channels == 4 then 1 else 0, 8, width, height)
+    if output == null { return null }
+    pixels := Pixels(output); target_stride := Stride(output)
+    for y: 0..height - 1 { for x: 0..width * channels - 1 { pixels[y * target_stride + x] = source[y * stride + x] } }
+    return output
+}
+HEIF :: (path: *u8) -> *void {
+    context := Context(); if context == null { return null }; defer { FreeContext(context) }
+    error := Read(context, path, null); if error.code != 0 { return null }
+    handle: *void; error = Primary(context, *handle)
+    if error.code != 0 || handle == null { return null }; defer { ReleaseHandle(handle) }
+    if !Valid(HandleWidth(handle), HandleHeight(handle)) { return null }
+    image: *void; error = Decode(handle, *image, 1, 11, null)
+    if error.code != 0 || image == null { return null }; defer { ReleaseImage(image) }
+    stride: s32; plane := Plane(image, 10, *stride)
+    return Copy(plane, ImageWidth(image, 10), ImageHeight(image, 10), 4, stride)
+}
+RAW :: (path: *u8) -> *void {
+    decoder := RawInit(0); if decoder == null { return null }; defer { RawClose(decoder) }
+    if RawOpen(decoder, path) != 0 || !Valid(RawWidth(decoder), RawHeight(decoder)) { return null }
+    RawBits(decoder, 8); RawColor(decoder, 1)
+    if RawUnpack(decoder) != 0 || RawProcess(decoder) != 0 { return null }
+    error: s32; image := RawImage(decoder, *error)
+    if image == null { return null }; defer { RawFree(image) }
+    width := cast(s32)image.width; height := cast(s32)image.height; channels := cast(s32)image.colors
+    if error != 0 || image.kind != 2 || image.bits != 8 || !Valid(width, height) || channels != 3 ||
+        cast(s64)image.size != cast(s64)width * cast(s64)height * cast(s64)channels { return null }
+    return Copy(*image.data[0], width, height, channels, width * channels)
+}
+main :: (argc: s32, argv: **u8) -> s32 {
+    if argc != 5 { print("Expected codec, source, PNG output and size limit\n"); return 2 }
+    codec := TextFromCString(argv[1]); size := TextFromCString(argv[4])
+    if (codec != "heif" && codec != "raw") || (size != "0" && size != "640") { print("Invalid decoder options\n"); return 2 }
+    image := ifx codec == "heif" then HEIF(argv[2]) else RAW(argv[2])
+    if image == null { print("This image cannot be decoded within the installed codec limits\n"); return 3 }
+    defer { Unref(image) }; width := Width(image); height := Height(image)
+    output := image; small: *void; defer { if small != null { Unref(small) } }
+    if size == "640" && (width > 640 || height > 640) {
+        factor := 640.0 / cast(float64)(ifx width > height then width else height)
+        w := cast(s32)(cast(float64)width * factor); h := cast(s32)(cast(float64)height * factor)
+        if w < 1 { w = 1 }; if h < 1 { h = 1 }
+        small = Scale(image, w, h, 2); if small == null { return 3 }; output = small
+    }
+    format: [4]u8 = .{112, 110, 103, 0}; keys: [1]*u8; values: [1]*u8
+    if Save(output, argv[3], *format[0], *keys[0], *values[0], null) == 0 { print("Cannot save decoded display asset\n"); return 3 }
+    print("{\"width\":%,\"height\":%}\n", width, height); return 0
+}

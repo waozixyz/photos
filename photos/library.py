@@ -14,7 +14,9 @@ from datetime import datetime, timezone
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 IMAGES = {'.jpg', '.jpeg', '.jpe', '.png', '.webp', '.gif', '.heic', '.heif',
-          '.tif', '.tiff', '.bmp', '.avif', '.dng', '.cr2', '.nef', '.arw'}
+          '.tif', '.tiff', '.bmp', '.avif', '.hif', '.dng', '.cr2', '.cr3', '.nef', '.nrw', '.arw',
+          '.sr2', '.srf', '.raf', '.rw2', '.rwl', '.orf', '.pef', '.ptx', '.srw', '.3fr', '.fff',
+          '.iiq', '.kdc', '.dcr', '.erf', '.mrw', '.mos', '.mef'}
 VIDEOS = {'.mp4', '.mov', '.m4v', '.3gp', '.avi', '.webm', '.mpg', '.mpeg', '.mod', '.flv', '.mkv', '.wmv'}
 
 
@@ -147,9 +149,25 @@ class Library:
         image = None
         try:
             if photo['kind'] == 'photo':
-                with Image.open(source) as opened:
-                    image = ImageOps.exif_transpose(opened).convert('RGB')
-                    image.thumbnail((640, 640))
+                from . import decoding
+                if decoding.supported(photo['extension']):
+                    # Generate only the small gallery asset during import.
+                    # Full display pixels are decoded on explicit opening.
+                    fd, name = tempfile.mkstemp(suffix='.png')
+                    os.close(fd)
+                    temporary = Path(name)
+                    try:
+                        dimensions = decoding.decode(source, photo['extension'], temporary, thumbnail=True)
+                        with Image.open(temporary) as opened:
+                            image = opened.convert('RGB')
+                        self.db.execute('UPDATE photos SET width=?,height=?,updated=?,dirty=1 WHERE id=? AND (width<>? OR height<>?)',
+                                        (dimensions['width'], dimensions['height'], time.time(), photo['id'], dimensions['width'], dimensions['height']))
+                    finally:
+                        temporary.unlink(missing_ok=True)
+                else:
+                    with Image.open(source) as opened:
+                        image = ImageOps.exif_transpose(opened).convert('RGB')
+                        image.thumbnail((640, 640))
             elif shutil.which('ffmpeg'):
                 target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 temporary = target.with_suffix('.next.jpg')
@@ -167,7 +185,7 @@ class Library:
                 image.save(output, 'JPEG', quality=85)
                 atomic(target, output.getvalue())
         except (OSError, ValueError, UnidentifiedImageError, subprocess.TimeoutExpired):
-            # Unsupported RAW/HEIC files remain in the library without previews.
+            # Failed codecs never prevent retaining and backing up an original.
             return
 
     def sidecar(self, path):
@@ -199,6 +217,11 @@ class Library:
             warning = True
         cached = self.db.execute('SELECT * FROM sources WHERE path=?', (str(path),)).fetchone()
         if cached and cached['size'] == stat.st_size and cached['mtime'] == stat.st_mtime_ns and cached['meta_stamp'] == stamp:
+            from . import decoding
+            if decoding.supported(path.suffix.lower()) and not self.thumbnail(cached['photo_id']).is_file():
+                photo = self.photo(cached['photo_id'])
+                self.preview(photo, self.original(photo))
+                self.db.commit()
             return 'unchanged'
         photo_id = digest_file(path)
         existing = self.db.execute('SELECT * FROM photos WHERE id=?', (photo_id,)).fetchone()
@@ -240,6 +263,9 @@ class Library:
             self._ensure_album(name)
         combined = json.loads(existing['metadata']) if existing else {}
         combined.update(metadata)
+        if edits.get('live_separated'):
+            combined.pop('photosLive', None)
+            combined['photosLiveSeparated'] = True
         if 'location' in edits:
             combined.pop('geoData', None)
             combined.pop('geoDataExif', None)
@@ -331,6 +357,8 @@ class Library:
                         self.set_setting('import', result)
         self.set_setting('import', result)
         self.set_setting('import_failures', failures)
+        from . import live
+        live.detect(self)
         return result
 
     def edit(self, photo_id, action, value=None, authorize=None):
@@ -343,10 +371,20 @@ class Library:
         # if one item or value is invalid. Sync must see one complete edit.
         with self.db:
             self.db.execute('BEGIN IMMEDIATE')
+            from . import live
+            expanded = {}
             for photo_id in dict.fromkeys(photo_ids):
-                if authorize is not None and not authorize(self.photo(photo_id)):
+                for component in live.components(self, self.photo(photo_id)):
+                    expanded[component['id']] = component
+            for photo_id, photo in expanded.items():
+                if authorize is not None and not authorize(photo):
                     raise LibraryError('Hidden is locked; authenticate before changing hidden photos')
-                self._edit(photo_id, action, value)
+                component_value = value
+                if action == 'rename' and photo['kind'] == 'video' and json.loads(photo['metadata']).get('photosLive'):
+                    if not isinstance(value, str) or any(c in value for c in '/\\'):
+                        raise LibraryError('Enter a file name without a folder path')
+                    component_value = Path(value).stem + photo['extension']
+                self._edit(photo_id, action, component_value)
 
     @staticmethod
     def album_name(value):
@@ -517,7 +555,13 @@ class Library:
             raise LibraryError('Choose a valid album filter and ordering')
         members = {}
         for row in self.db.execute('''SELECT p.id,p.taken,j.value FROM photos p,json_each(p.albums) j
-                                      WHERE p.trashed=0 AND p.hidden=0 ORDER BY p.taken DESC,p.id'''):
+                                      WHERE p.trashed=0 AND p.hidden=0
+                                      AND coalesce(json_extract(p.metadata,'$.photosLive.photo'),'')=''
+                                      AND (json_extract(p.metadata,'$.photosLive.video') IS NULL OR EXISTS(
+                                        SELECT 1 FROM photos m WHERE m.id=json_extract(p.metadata,'$.photosLive.video')
+                                        AND m.kind='video' AND m.hidden=0 AND m.trashed=0
+                                        AND json_extract(m.metadata,'$.photosLive.photo')=p.id))
+                                      ORDER BY p.taken DESC,p.id'''):
             members.setdefault(row['value'], []).append(row['id'])
         result = []
         for row in self.db.execute('SELECT * FROM albums WHERE deleted=0'):
@@ -548,12 +592,14 @@ class Library:
         photo = self.photo(photo_id)
         metadata = json.loads(photo['metadata'])
         geo = metadata.get('geoData') or metadata.get('geoDataExif') or {}
-        return dict(id=photo_id, name=photo['name'],
+        from . import live
+        parts = live.components(self, photo)
+        return dict(id=photo_id, name=photo['name'], live=int(len(parts) == 2),
                     caption=photo['caption'].encode()[:8192].decode('utf-8', 'ignore'),
                     tags=photo['tags'].encode()[:8192].decode('utf-8', 'ignore'),
                     caption_editable=int(len(photo['caption'].encode()) <= 8192),
                     tags_editable=int(len(photo['tags'].encode()) <= 8192),
-                    albums=' · '.join(json.loads(photo['albums'])), size=photo['size'],
+                    albums=' · '.join(json.loads(photo['albums'])), size=sum(p['size'] for p in parts),
                     width=photo['width'], height=photo['height'],
                     taken=datetime.fromtimestamp(photo['taken'], timezone.utc).isoformat(),
                     location=f"{geo.get('latitude', '')}, {geo.get('longitude', '')}" if isinstance(geo, dict) and 'latitude' in geo else '')
@@ -589,9 +635,22 @@ class Library:
             # hidden by another request in between must not expose its paths.
             if (photo['hidden'] and (not hidden_access or view == 'map')) or (view == 'map' and photo['trashed']):
                 continue
+            from . import live
+            try:
+                parts = live.components(self, photo)
+            except LibraryError:
+                continue
+            if any(p['hidden'] and (not hidden_access or view == 'map') for p in parts):
+                continue
+            if any(bool(p['trashed']) != bool(photo['trashed']) for p in parts):
+                continue
             photo['thumbnail'] = str(self.thumbnail(photo['id'])) if self.thumbnail(photo['id']).exists() else ''
             photo['date'] = datetime.fromtimestamp(photo['taken'], timezone.utc).strftime('%Y-%m-%d')
             photo['original'] = str(self.original(photo)) if self.original(photo).exists() else ''
+            from . import decoding
+            asset = decoding.display_path(self, photo) if decoding.supported(photo['extension']) else self.original(photo)
+            photo['display'] = str(asset) if asset.is_file() else ''
+            photo['live'] = int(bool(json.loads(photo['metadata']).get('photosLive', {}).get('video')))
             photo['albums'] = json.loads(photo['albums'])
             photos.append(photo)
         albums = self.album_list(album_mode, album_sort, search if view == 'albums' else '')
@@ -610,8 +669,16 @@ class Library:
                 result['album_detail'] = dict(row)
         return result
 
-    def export(self, photo_id, folder):
+    def export(self, photo_id, folder, _component=False):
         photo = self.photo(photo_id)
+        if not _component:
+            from . import live
+            parts = live.components(self, photo)
+            if len(parts) == 2:
+                if any(p['hidden'] or p['trashed'] for p in parts):
+                    raise LibraryError('Restore and unhide the Live Photo before exporting')
+                exported = [self.export(p['id'], folder, _component=True) for p in parts]
+                return exported[0]
         source = self.original(photo)
         if not source.exists():
             raise ValueError('Download the original before exporting')

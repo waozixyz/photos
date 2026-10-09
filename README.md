@@ -147,11 +147,32 @@ Stop export leaves the folder copy intact. Never use the export destination as
 an import source. Export is opt-in and is not automatically enabled on the owner's
 library.
 
-JPEG, PNG, WebP, GIF and common video containers import directly. RAW/HEIC files
-are retained even when the local image decoder cannot preview them. Video
+JPEG, PNG, WebP, GIF and common video containers import directly. HEIC/HEIF and
+AVIF use libheif; camera RAW formats including DNG, CR2/CR3, NEF, ARW, RAF, RW2,
+ORF and PEF use LibRaw. A headless Ziran decoder generates oriented gallery
+thumbnails and PNG display assets on opening, with alpha retained for HEIC.
+The original files and embedded metadata remain unchanged. Viewing uses an
+8-bit display rendering; HDR display and RAW development controls remain unfinished.
+Decoder support depends on the host's installed codec plugins and camera support.
+Decoding is limited to 100 megapixels and bounded memory/time; an unsupported or
+damaged original stays stored and can still be backed up and exported. Existing
+imports gain missing thumbnails during source rescans or when opened. Video
 thumbnails need ffmpeg. Videos can be stored, synced, previewed and exported;
 in-app playback is available on Linux with GStreamer and its installed codecs. Facial recognition, semantic image
 search, public links and phone camera backup are not implemented.
+Exported Live Photos with an image and a MOV/MP4 motion file appear as one item.
+Automatic pairing requires the same folder and base name, unambiguous components,
+capture dates or source file times within one day, and a motion file of one to ten
+seconds. HEIC/HEIF and JPEG stills are supported. The pair shows a Live Photo label;
+Play Live Photo uses the normal offline player, including audio and playback
+controls. `type:live` finds paired photos. Favorites, Hidden, Archive, Trash,
+captions, tags, albums and corrected dates apply to both components. Export and
+encrypted ThinkPad backup retain both original files and their pairing metadata.
+Separate files restores independent gallery items and survives rescans and sync.
+Incomplete pairs and inconsistent privacy updates stay out of galleries until
+both records agree. Embedded Android motion-photo extraction and native phone
+Live Photo capture remain unfinished.
+
 This version is a local photo library with sync, not complete Ente feature parity.
 Hidden requires a separate local password, with confirmation when first created.
 The native Ziran helper uses libsodium's Argon2id verifier; passwords never enter
@@ -177,7 +198,7 @@ The remaining replacement work includes:
 
 - Mobile clients, permission-aware background camera backup and device space recovery.
 - On-device face grouping, semantic search, detailed maps and radius-based location tags, curated memories and automatically curated trip/people albums.
-- Advanced photo editing, encrypted video streaming, animated editing previews, Live Photo pairing and broader HEIC/RAW previews.
+- Advanced photo editing, encrypted video streaming, animated editing previews, embedded Android motion photos, HDR display and broader codec/camera coverage.
 - Private sharing, collaboration, public links, comments and account recovery.
   Any sharing design needs to honor the owner's ThinkPad-only sync restriction.
 - System authentication, Hidden password recovery and a deliberate deletion/retention policy.
@@ -200,6 +221,8 @@ produce a useful message while the rest of the library remains usable.
 
 The native image processor needs GdkPixbuf and GObject on the Linux desktop host;
 Hidden authentication also needs libsodium.
+The HEIC/RAW decoder needs libheif, LibRaw and `prlimit` from util-linux. Its
+display assets use the same Kryon ImageProps viewer as other image formats.
 Video editing and video thumbnails need FFmpeg (including FFprobe and H.264/AAC codecs).
 Unit and synthetic round-trip checks validate tested flows; an independent
 cryptographic audit remains outside their scope. Full-original restore verification belongs
@@ -216,6 +239,7 @@ make video-window-test video-portable-test
 make crop-window-test crop-portable-test
 make viewer-window-test viewer-portable-test
 make map-window-test map-portable-test
+make codec-window-test codec-portable-test
 make playback-window-test playback-portable-test
 PHOTOS_DAOCHI=/path/to/daochi make sync-test
 ```

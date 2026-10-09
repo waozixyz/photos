@@ -28,13 +28,14 @@ Photo :: struct {
     id: [65]u8
     name: [513]u8
     thumbnail: [4097]u8
-    original: [4097]u8
+    display: [4097]u8
     date: [32]u8
     kind: [16]u8
     favorite: bool
     hidden: bool
     trashed: bool
     archived: bool
+    live: bool
     width: s32
     height: s32
 }
@@ -155,7 +156,7 @@ SendRequest :: (action: string, id: string, value: string) {
     playback_request = action == "playback_check"
     if action != "query" { offset = ifx selected >= 0 then (selected + feed_base) / 60 * 60 else feed_base; appending = false }
     out: Vec(u8)
-    BuilderPrint(*out, "{\"action\":"); Quoted(*out, action)
+    BuilderPrint(*out, "{\"gallery_format\":2,\"action\":"); Quoted(*out, action)
     Property(*out, "view", view); Property(*out, "search", TextUntilNul(search[:]))
     Property(*out, "album", TextUntilNul(album[:])); Property(*out, "id", id); Property(*out, "value", value)
     Property(*out, "sort", sort)
@@ -189,6 +190,38 @@ Decode :: (json: string, at: s32, key: string, out: []u8) {
 Number :: (json: string, at: s32, key: string) -> s32 {
     value := ReadNumber(json, FieldAt(json, at, key))
     return ifx value.valid then cast(s32)value.value else 0
+}
+PhotoString :: (json: string, at: s32, out: []u8) { if ReadStringText(json, at, out) < 0 { out[0] = 0 } }
+ReadPhoto :: (json: string, start: s32, photo: *Photo) -> s32 {
+    // Each gallery field is scanned once. Repeated object lookups multiplied
+    // path parsing by every field and exhausted the portable frame budget.
+    at := Space(json, start)
+    if at < 0 || at >= cast(s32)json.count || json[at] != 123 { return -1 }
+    at = Space(json, at + 1); fields: s32
+    while at >= 0 && at < cast(s32)json.count && json[at] != 125 && fields < 20 {
+        key := ReadString(json, at); if !key.valid { return -1 }
+        name := json[key.start:key.end]; at = Space(json, key.after)
+        if at < 0 || at >= cast(s32)json.count || json[at] != 58 { return -1 }; at = Space(json, at + 1)
+        if name == "id" { PhotoString(json, at, photo.id[:]) }
+        else if name == "name" { PhotoString(json, at, photo.name[:]) }
+        else if name == "thumbnail" { PhotoString(json, at, photo.thumbnail[:]) }
+        else if name == "display" { PhotoString(json, at, photo.display[:]) }
+        else if name == "original" && photo.display[0] == 0 { PhotoString(json, at, photo.display[:]) }
+        else if name == "date" { PhotoString(json, at, photo.date[:]) }
+        else if name == "kind" { PhotoString(json, at, photo.kind[:]); photo.live = TextUntilNul(photo.kind[:]) == "live"; if photo.live { Set(photo.kind[:], "photo") } }
+        else {
+            value := ReadNumber(json, at); number := ifx value.valid then cast(s32)value.value else 0
+            if name == "favorite" { photo.favorite = number > 0 }
+            else if name == "hidden" { photo.hidden = number > 0 }
+            else if name == "trashed" { photo.trashed = number > 0 }
+            else if name == "archived" { photo.archived = number > 0 }
+            else if name == "width" { photo.width = number }
+            else if name == "height" { photo.height = number }
+        }
+        at = Space(json, ValueEnd(json, at, 0)); fields += 1
+        if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json, at + 1) }
+    }
+    return ifx at >= 0 && at < cast(s32)json.count && json[at] == 125 then at + 1 else -1
 }
 Tick :: () {
     ticks += 1;
@@ -278,15 +311,10 @@ Tick :: () {
         while at >= 0 && at < cast(s32)json.count && json[at] != 93 && page_count < 60 {
             empty: Photo; if !VecPush(photos, empty) { Set(message[:], "Unable to load more photos"); break }
             photo := *photos[count]
-            Decode(json, at, "id", photo.id[:]); Decode(json, at, "name", photo.name[:])
-            Decode(json, at, "thumbnail", photo.thumbnail[:]); Decode(json, at, "original", photo.original[:])
-            Decode(json, at, "date", photo.date[:]); Decode(json, at, "kind", photo.kind[:])
-            photo.favorite = Number(json, at, "favorite") > 0
-            photo.hidden = Number(json, at, "hidden") > 0; photo.trashed = Number(json, at, "trashed") > 0
-            photo.archived = Number(json, at, "archived") > 0
-            photo.width = Number(json, at, "width"); photo.height = Number(json, at, "height")
+            at = ReadPhoto(json, at, photo)
+            if at < 0 { unused VecPop(photos); Set(message[:], "Cannot read the gallery page"); break }
             if TextUntilNul(photo.id[:]) == TextUntilNul(previous[:]) && previous[0] != 0 { selected = count }
-            count += 1; page_count += 1; at = Space(json, ValueEnd(json, at, 0)); if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json, at + 1) }
+            count += 1; page_count += 1; at = Space(json, at); if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json, at + 1) }
         }
         appending = false
         array = FieldAt(json, 0, "albums"); at = Space(json, array + 1); album_count = 0; VecClear(catalog)
@@ -341,7 +369,7 @@ StopPlayback :: () {
 BeginPlayback :: () {
     if loading || selected < 0 || selected >= count { return }
     photo := *photos[selected]
-    if TextUntilNul(photo.kind[:]) != "video" || photo.trashed || TextUntilNul(detail_id[:]) != TextUntilNul(photo.id[:]) { return }
+    if (TextUntilNul(photo.kind[:]) != "video" && !photo.live) || photo.trashed || TextUntilNul(detail_id[:]) != TextUntilNul(photo.id[:]) { return }
     StopPlayback(); Set(playback_id[:], TextUntilNul(photo.id[:]))
     editor = "playback"; focused = false; search_focused = false
     Request("playback_check", TextUntilNul(playback_id[:]))

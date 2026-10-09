@@ -273,7 +273,7 @@ OfflineMap :: (session: Session, body: Rectangle) {
 }
 ExpandedPhoto :: (session: Session, bounds: Rectangle) {
     photo := *Model.photos[Model.selected]
-    image := ifx photo.original[0] != 0 then TextUntilNul(photo.original[:]) else TextUntilNul(photo.thumbnail[:])
+    image := ifx photo.display[0] != 0 then TextUntilNul(photo.display[:]) else TextUntilNul(photo.thumbnail[:])
     x := bounds.x; y := bounds.y; width := bounds.width
     if Action(session, 385, "Back", .{x, y, 82.0, 36.0}) { Viewer.expanded = false }
     if Action(session, 386, "Previous", .{x + 92.0, y, 96.0, 36.0}, Model.selected > 0) { Model.Choose(Model.selected - 1) }
@@ -322,7 +322,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
     background: BoxProps; background.key = 1; background.bounds = viewport; background.fill = BackgroundColor(); Box(session, background)
     key := KeyboardTake(session); modifiers := KeyboardModifiers(session); typed_bytes: [256]u8; typed := TypedTextTake(session, typed_bytes[:])
     if Model.editor == "playback" {
-        if key == Input.KeyEscape { if Model.playback_expanded { Model.playback_expanded = false } else { Model.StopPlayback() } }
+        if key == Input.KeyEscape { if Model.playback_expanded { Model.playback_expanded = false } else { Model.StopPlayback() }; key = 0 }
         if key == 32 && Model.playback_started { Playback.Pause() }
         if key == Input.KeyLeft { Model.PlaybackSeek(Playback.Position() - 5000) }
         if key == Input.KeyRight { Model.PlaybackSeek(Playback.Position() + 5000) }
@@ -371,7 +371,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
     } else if Model.editor == "search_help" {
         Label(session, 310, "Find photos with filters", .{x + 12.0, body.y + 12.0, width - 24.0, 34.0}, 22)
         tips: [8]string = .{"Combine filters to narrow your results. Dates use capture time in UTC.",
-            "type:photo or type:video   ·   is:favorite or is:archived",
+            "type:photo, type:video or type:live   ·   is:favorite or is:archived",
             "album:\"Summer trip\"   ·   tag:family   ·   name:IMG",
             "caption:\"birthday cake\"   ·   has:location   ·   has:tags",
             "year:2024   ·   on:2024-06-15",
@@ -417,8 +417,12 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, 52, "Next", .{x + 180.0, body.y, 68.0, 36.0}, Model.selected + 1 < Model.count) { Model.Choose(Model.selected + 1) }
         if Action(session, 53, ifx photo.favorite then "Unfavorite" else "Favorite", .{x + 258.0, body.y, 106.0, 36.0}, !Model.loading) { SelectedAction("favorite") }
         if Action(session, 54, ifx photo.trashed then "Restore" else "Trash", .{x + 374.0, body.y, 76.0, 36.0}, !Model.loading) { SelectedAction(ifx photo.trashed then "restore" else "trash") }
-        image := ifx photo.original[0] != 0 && TextUntilNul(photo.kind[:]) == "photo" then TextUntilNul(photo.original[:]) else TextUntilNul(photo.thumbnail[:])
+        image := ifx photo.display[0] != 0 && TextUntilNul(photo.kind[:]) == "photo" then TextUntilNul(photo.display[:]) else TextUntilNul(photo.thumbnail[:])
         ready := !Model.loading && TextUntilNul(Model.detail_id[:]) == TextUntilNul(photo.id[:])
+        if photo.live {
+            if Action(session, 370, "Play Live Photo", .{x + 460.0, body.y, 144.0, 36.0}, ready && !photo.trashed) { Model.BeginPlayback() }
+            if Action(session, 371, "Separate files", .{x + 614.0, body.y, 138.0, 36.0}, ready) { Model.Apply("live_separate") }
+        }
         if Action(session, 215, "Edit image", .{x, body.y + 44.0, 126.0, 36.0}, ready && TextUntilNul(photo.kind[:]) == "photo" && !photo.trashed) { Model.BeginImageEdit() }
         if TextUntilNul(photo.kind[:]) == "video" {
             if Action(session, 330, "Edit video", .{x, body.y + 44.0, 126.0, 36.0}, ready && !photo.trashed) { Model.BeginVideoEdit() }
@@ -549,6 +553,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                 clicked := PhotoAction(session, cast(s32)(100 + i), TextUntilNul(photo.name[:]), .{bx, by, cell, cell})
                 ImageAt(session, cast(u64)(1000000 + i), TextUntilNul(photo.thumbnail[:]), TextUntilNul(photo.name[:]), .{bx + 3.0, by + 3.0, cell - 6.0, cell - 6.0}, true)
                 if TextUntilNul(photo.kind[:]) == "video" { Label(session, cast(u64)(2100000 + i), "Video", .{bx + 8.0, by + cell - 30.0, cell - 16.0, 22.0}, 12) }
+                if photo.live { Label(session, cast(u64)(2200000 + i), "Live Photo", .{bx + 8.0, by + cell - 30.0, cell - 16.0, 22.0}, 12) }
                 if Model.IsPicked(TextUntilNul(photo.id[:])) {
                     badge: BoxProps; badge.key = cast(u64)(2300000 + i); badge.bounds = .{bx + 6.0, by + 6.0, 82.0, 28.0}; badge.fill = BackgroundColor(); Box(session, badge)
                     Label(session, cast(u64)(2200000 + i), "Selected", .{bx + 12.0, by + 8.0, 72.0, 24.0}, 14)

@@ -57,6 +57,9 @@ def main():
     video = repo/'build/video-editor/video_edit'
     if not video.is_file():
         parser.error('Build the Photos video editor before installing')
+    decoder = repo/'build/photo-decoder/photo_decode'
+    if not decoder.is_file():
+        parser.error('Build the Photos HEIC/RAW decoder before installing')
     shutil.copyfile(binary,installed/'photos-desktop.next')
     os.chmod(installed/'photos-desktop.next',0o755)
     os.replace(installed/'photos-desktop.next',installed/'photos-desktop')
@@ -72,6 +75,9 @@ def main():
     shutil.copyfile(video,installed/'video_edit.next')
     os.chmod(installed/'video_edit.next',0o755)
     os.replace(installed/'video_edit.next',installed/'video_edit')
+    shutil.copyfile(decoder,installed/'photo_decode.next')
+    os.chmod(installed/'photo_decode.next',0o755)
+    os.replace(installed/'photo_decode.next',installed/'photo_decode')
     shutil.copyfile(repo/'scripts/worker.py',installed/'worker.py')
     shutil.copyfile(repo/'scripts/service.py',installed/'service.py')
     shutil.copytree(repo/'photos',installed/'photos',dirs_exist_ok=True,ignore=shutil.ignore_patterns('__pycache__'))

@@ -163,7 +163,29 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         assert first.photo(edited_id)['albums']==second.photo(edited_id)['albums']
         assert json.loads(first.photo(edited_id)['metadata'])['photosVideoEdit']['parent']==movie_id
         assert json.loads(first.photo(edited_id)['metadata'])['photosVideoEdit']['adjustments']==[1000,3000,90,6,2500,2500,5000,5000]
-        print('Isolated Daochi v6: signed photo/album/Trash/editor/smart-search baseline plus custom-cropped video/audio, metadata and full original restore round trip passed')
+        from codec_fixtures import heic, dng
+        from test_live import movie as live_movie
+        from photos import live, decoding
+        camera = folder/'new-camera/Camera';camera.mkdir(parents=True)
+        heic(camera/'Moment.heic',6); live_movie(camera/'Moment.mov'); dng(camera/'Camera.dng')
+        second.import_folders([camera.parent])
+        still_id=digest_file(camera/'Moment.heic'); motion_id=digest_file(camera/'Moment.mov');raw_id=digest_file(camera/'Camera.dng')
+        assert second.query(search='type:live')['count']==1
+        assert peer.sync()==0 and client.sync()==0
+        assert first.query(search='type:live')['count']==1
+        assert [p['id'] for p in live.components(first, first.photo(still_id))]==[still_id,motion_id]
+        for media_id in [still_id,motion_id,raw_id]:
+            original=Path(client.materialize(media_id))
+            assert digest_file(original)==media_id and original.read_bytes()==second.original(second.photo(media_id)).read_bytes()
+        with Image.open(decoding.display(first, first.photo(still_id))) as decoded:
+            assert decoded.size==(64,96)
+        with Image.open(decoding.display(first, first.photo(raw_id))) as decoded:
+            assert decoded.size==(96,64)
+        second.edit(still_id,'hidden_set','1');peer.sync();client.sync()
+        assert first.photo(motion_id)['hidden']==1 and first.query(search='type:live')['count']==0
+        second.edit(still_id,'hidden_set','0');live.separate(second,still_id,lambda p:True);peer.sync();client.sync()
+        assert first.query(search='type:live')['count']==0 and len(live.components(first,first.photo(still_id)))==1
+        print('Isolated Daochi v6: signed baseline/editor sync plus HEIC/RAW/full motion originals, pairing, privacy and separation round trip passed')
     finally:
         process.terminate()
         process.wait(timeout=10)

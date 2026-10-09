@@ -42,7 +42,15 @@ def ui_query(library, request):
             result['count'] = 0
     # The gallery needs only these fields. Full metadata and encrypted sync
     # manifests stay in the store rather than being decoded on every UI poll.
-    fields = ('id', 'name', 'thumbnail', 'original', 'date', 'kind', 'favorite',
+    modern = request.get('gallery_format') == 2
+    for photo in result['photos']:
+        if modern and photo['live']:
+            photo['kind'] = 'live'
+        if not modern:
+            # Already open older clients use this field as their image asset.
+            # Keep them usable while the signed bundle/service is upgraded.
+            photo['original'] = photo['display']
+    fields = ('id', 'name', 'thumbnail', 'display' if modern else 'original', 'date', 'kind', 'favorite',
               'hidden', 'trashed', 'archived', 'width', 'height')
     result['photos'] = [{key: photo[key] for key in fields} for photo in result['photos']]
     fields = ('name', 'count', 'thumbnail', 'pinned', 'archived', 'smart')
@@ -84,22 +92,27 @@ def library_request(library, request, config):
         return result
     if action == 'playback_check':
         photo = library.photo(request.get('id'))
-        require_access(photo['id'])
-        if photo['kind'] != 'video' or photo['trashed']:
+        from . import live
+        parts = live.components(library, photo)
+        for part in parts:
+            require_access(part['id'])
+        motion = parts[-1]
+        if motion['kind'] != 'video' or any(p['trashed'] for p in parts):
             raise LibraryError('Choose a video outside Trash to play')
-        if not library.original(photo).is_file():
+        if not library.original(motion).is_file():
             if not config.get('node'):
                 raise LibraryError('Download the original before playing')
-            Client(library, config).materialize(photo['id'])
+            Client(library, config).materialize(motion['id'])
         # Materialization can outlast authentication or a concurrent privacy edit.
-        photo = library.photo(photo['id'])
-        require_access(photo['id'])
-        if photo['trashed']:
+        parts = live.components(library, library.photo(photo['id']))
+        for part in parts:
+            require_access(part['id'])
+        if any(p['trashed'] for p in parts):
             raise LibraryError('Restore the video before playing')
         result = vault.state(library, request.get('vault_token', ''))
-        if library.photo(photo['id'])['hidden'] and not result['vault_unlocked']:
+        if any(library.photo(p['id'])['hidden'] for p in parts) and not result['vault_unlocked']:
             raise LibraryError('Hidden is locked; authenticate before playing hidden videos')
-        result.update(playback_id=photo['id'], playback_path=str(library.original(photo)))
+        result.update(playback_id=photo['id'], playback_path=str(library.original(parts[-1])))
         return result
     if action == 'memory_date':
         request = {**request, 'view': 'memories', 'memory_date': request.get('value', ''), 'offset': 0}
@@ -208,13 +221,29 @@ def library_request(library, request, config):
         library.set_setting('export', state)
     elif action == 'open':
         photo = library.photo(request['id'])
+        from . import live
+        for part in live.components(library, photo):
+            require_access(part['id'])
         if not library.original(photo).exists():
             Client(library, config).materialize(photo['id'])
         require_access(photo['id'])
+        for part in live.components(library, library.photo(photo['id'])):
+            require_access(part['id'])
+        from . import decoding
+        if photo['kind'] == 'photo' and decoding.supported(photo['extension']):
+            # Older imports without codec thumbnails become viewable on open.
+            library.preview(photo, library.original(photo))
+            decoding.display(library, photo)
+            require_access(photo['id'])
+        for part in live.components(library, library.photo(photo['id'])):
+            require_access(part['id'])
         result = ui_query(library, request)
         result['opened'] = request['id']
         result['detail'] = library.details(request['id'])
         return result
+    elif action == 'live_separate':
+        from . import live
+        live.separate(library, request.get('id'), authorize)
     elif action == 'album_rename':
         library.rename_album(request.get('album'), request.get('value'))
         request = {**request, 'album': request['value'].strip(), 'offset': 0}
@@ -231,10 +260,12 @@ def library_request(library, request, config):
         if not isinstance(ids, list) or not 0 < len(ids) <= 1000 or any(not isinstance(i, str) for i in ids):
             raise ValueError('Select between 1 and 1000 photos')
         for photo_id in dict.fromkeys(ids):
-            photo = library.photo(photo_id)
-            if not library.original(photo).exists():
-                Client(library, config).materialize(photo['id'])
-            require_access(photo['id'])
+            from . import live
+            for photo in live.components(library, library.photo(photo_id)):
+                require_access(photo['id'])
+                if not library.original(photo).exists():
+                    Client(library, config).materialize(photo['id'])
+                require_access(photo['id'])
             exported = library.export(photo_id, request.get('value') or str(Path.home() / 'Pictures/Photos Export'))
         library.set_setting('status', 'Original and metadata exported to ' + str(Path(exported).parent))
     else:

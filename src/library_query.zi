@@ -64,6 +64,9 @@ main :: (argc: s32, argv: **u8) -> s32 {
     // A saved search never turns into a Hidden or Trash album, even when
     // callers combine it with another gallery view or an unlocked vault.
     if filter[0] != 0 { Search.AddSQL(*query," AND trashed=0 AND hidden=0") }
+    // Motion originals remain separate encrypted records, but only their still
+    // is a gallery item. Incomplete or mismatched privacy updates fail closed.
+    Search.AddSQL(*query, " AND coalesce(json_extract(metadata,'$.photosLive.photo'),'')='' AND (json_extract(metadata,'$.photosLive.video') IS NULL OR EXISTS(SELECT 1 FROM photos motion WHERE motion.id=json_extract(photos.metadata,'$.photosLive.video') AND motion.kind='video' AND json_extract(motion.metadata,'$.photosLive.photo')=photos.id AND motion.hidden=photos.hidden AND (motion.trashed>0)=(photos.trashed>0)))")
     if album[0] != 0 && filter[0] == 0 { Search.AddSQL(*query," AND EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=?)"); Search.Bind(*query,TextUntilNul(album[:])) }
     if name == "memories" {
         if memory[0] == 0 { unused WriteIsoDay(Clock.UnixNow(),memory[:]) }

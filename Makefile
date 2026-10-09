@@ -3,7 +3,10 @@ ZIRAN ?= ziran
 PYTHON ?= build/venv/bin/python
 PREFIX ?= $(HOME)/.local
 PACKAGE_FLAGS := $(if $(wildcard ziran.local.toml),,--locked)
-.PHONY: build bundle image-editor video-editor vault-auth library-query test sync-test window-test video-window-test video-portable-test playback-window-test playback-portable-test portable-test hosted-test install
+.PHONY: build bundle image-editor video-editor vault-auth library-query photo-decoder test sync-test window-test video-window-test video-portable-test playback-window-test playback-portable-test portable-test hosted-test install
+photo-decoder:
+	@set -e; ziran_source=$$($(ZIRAN) pkg path ziran $(PACKAGE_FLAGS)); \
+	LDLIBS='-l:libheif.so.1 -l:libraw.so.23 -lgdk_pixbuf-2.0 -lgobject-2.0' "$$ziran_source/build/bin/ziran" build --root src --target=c --entry photo_decode:main --exe -o build/photo-decoder src/photo_decode.zi
 video-editor:
 	$(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry video_edit:main --exe -o build/video-editor src/video_edit.zi
 image-editor:
@@ -14,13 +17,13 @@ vault-auth:
 	LDLIBS='-l:libsodium.so.23' "$$ziran_source/build/bin/ziran" build --root src --target=c --entry vault_auth:main --exe -o build/vault-auth src/vault_auth.zi
 library-query:
 	LDLIBS='-l:libsqlite3.so.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry library_query:main --exe -o build/library-query src/library_query.zi
-build: image-editor video-editor vault-auth library-query
+build: image-editor video-editor vault-auth library-query photo-decoder
 	$(ZIRAN) build $(PACKAGE_FLAGS)
 	cp scripts/worker.py build/
 	cp -r photos build/
-bundle: image-editor video-editor vault-auth library-query
+bundle: image-editor video-editor vault-auth library-query photo-decoder
 	$(ZIRAN) tool kryon build portable $(PACKAGE_FLAGS)
-test: image-editor video-editor vault-auth library-query
+test: image-editor video-editor vault-auth library-query photo-decoder
 	$(PYTHON) -m unittest discover -s tests -v
 sync-test:
 	$(PYTHON) tests/sync_node.py
@@ -58,3 +61,9 @@ map-window-test: build
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/map_window.py
 map-portable-test: bundle
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_MAP_PORTABLE=1 $(PYTHON) tests/map_window.py
+
+.PHONY: codec-window-test codec-portable-test
+codec-window-test: build
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/codec_window.py
+codec-portable-test: bundle
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_CODEC_PORTABLE=1 $(PYTHON) tests/codec_window.py

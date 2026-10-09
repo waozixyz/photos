@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.14
+
+- View HEIC/HEIF and supported camera RAW photos with oriented thumbnails and full-size viewing, retaining unchanged originals for export and encrypted backup.
+- Browse exported Live Photos as one item, play their motion and audio, and keep both originals in backup and export.
+- Apply favorites, privacy, Trash, captions, albums and date corrections to both Live Photo components; separate the files when wanted without losing originals.
+- Return from video playback to its photo details with Escape.
+
 ## 0.1.13
 
 - Magnify photos with zoom controls or the mouse wheel, drag to pan, fit the image or inspect it at its original pixel size.

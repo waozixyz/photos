@@ -140,6 +140,8 @@ def save(library, photo_id, value, authorize=None):
             # privacy state, album membership or recoverable Trash state.
             return new_id
         metadata = json.loads(photo['metadata'])
+        if metadata.pop('photosLive', None):
+            metadata['photosLiveSeparated'] = True
         metadata['photosEdit'] = dict(parent=photo_id, adjustments=adjustments)
         name = Path(photo['name']).stem.encode()[:480].decode('utf-8', 'ignore') + '-edited.png'
         destination = library.original(dict(id=new_id, extension='.png'))
