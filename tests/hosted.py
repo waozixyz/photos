@@ -76,7 +76,7 @@ with tempfile.TemporaryDirectory() as directory:
         palette(0x141e28ff, 0xe8eef4ff)
         log_path = ROOT / 'build/screenshots/hosted.log'; log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open('w') as log:
-            child = subprocess.Popen([str(player), str(ROOT / 'build/photos-portable.zib')], env=env, stdout=log, stderr=log)
+            child = subprocess.Popen([str(player), os.environ.get('PHOTOS_BUNDLE', str(ROOT / 'build/photos-portable.zib'))], env=env, stdout=log, stderr=log)
             def xdo(*args):
                 return subprocess.check_output(['xdotool', *map(str, args)], text=True).strip()
             try:

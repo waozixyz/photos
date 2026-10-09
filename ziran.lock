@@ -3,7 +3,7 @@
   "packages": [
     {
       "commit": "f01be2f1d5acf2a570e351013221238b7c543760",
-      "dependencies": {"kryon": "p63cba7933429fe02"},
+      "dependencies": {"kryon": "pa3afb72d3368da28"},
       "id": "p03de317562242e4f",
       "name": "Kss",
       "ref": "master",
@@ -35,9 +35,9 @@
       "url": "https://github.com/raysan5/raylib.git"
     },
     {
-      "commit": "70520d3b8310e34806657ebfb28789863213b541",
+      "commit": "1311f75a0a511d9848bba52e340147775ded27db",
       "dependencies": {"raylib": "p5a77c9c35110e925"},
-      "id": "p63cba7933429fe02",
+      "id": "pa3afb72d3368da28",
       "name": "kryon",
       "ref": "master",
       "url": "https://github.com/kryonlabs/kryon.git"
@@ -62,11 +62,11 @@
     }
   ],
   "root": {
-    "dependencies": {"kryon": "p63cba7933429fe02", "kss": "p03de317562242e4f", "oqs": "p55635fc8976895a9", "sqlite": "p450e8db63484350c"},
+    "dependencies": {"kryon": "pa3afb72d3368da28", "kss": "p03de317562242e4f", "oqs": "p55635fc8976895a9", "sqlite": "p450e8db63484350c"},
     "name": "photos"
   },
   "toolchain": {
-    "commit": "fe793fa3c013aa781f5a38a93af7f5bf74bd8a5d",
+    "commit": "33e086b5873ff1b6fc1e0ca196b865bc2fd2efc9",
     "ref": "master",
     "url": "https://github.com/ziranlang/ziran.git"
   }
