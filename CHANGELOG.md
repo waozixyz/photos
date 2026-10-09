@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.11
+
+- Watch local videos inside Photos with synchronized audio, pause/resume, seeking, playback speed and volume controls.
+- Expand the video view, use Space to pause or resume and the arrow keys to seek five seconds at a time.
+- Stop playback when access expires, the library becomes unavailable, a video is hidden or trashed, or you leave the viewer; keep original files intact.
+
 ## 0.1.10
 
 - Trim videos to a start/end range, rotate them and apply centered square, portrait or landscape crops with a frame preview.

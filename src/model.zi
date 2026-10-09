@@ -1,4 +1,13 @@
 Transport :: #import "transport";
+Playback :: #import "playback";
+playback_id: [65]u8;
+playback_path: [4097]u8;
+playback_started: bool;
+playback_request: bool;
+playback_poll: s64;
+playback_speed: s32 = 100;
+playback_volume: s32 = 100;
+playback_expanded: bool;
 #import "std/json_scan"
 #import "std/text"
 #import "std/text_buffer"
@@ -131,6 +140,7 @@ Request :: (action: string = "query", id: string = "", value: string = "") {
     SendRequest(action, id, value)
 }
 SendRequest :: (action: string, id: string, value: string) {
+    playback_request = action == "playback_check"
     if action != "query" { offset = ifx selected >= 0 then (selected + feed_base) / 60 * 60 else feed_base; appending = false }
     out: Vec(u8)
     BuilderPrint(*out, "{\"action\":"); Quoted(*out, action)
@@ -142,7 +152,7 @@ SendRequest :: (action: string, id: string, value: string) {
     Property(*out, "edit_session", TextUntilNul(edit_session[:]))
     Property(*out, "vault_token", TextUntilNul(vault_token[:]))
     Property(*out, "video_job", TextUntilNul(video_job[:]))
-    mutation = action != "query" && action != "open" && action != "sync" && action != "import" && action != "image_preview" && action != "video_preview" && action != "video_begin" && action != "video_save" && action != "video_status" && action != "video_cancel"
+    mutation = action != "query" && action != "open" && action != "sync" && action != "import" && action != "image_preview" && action != "video_preview" && action != "video_begin" && action != "video_save" && action != "video_status" && action != "video_cancel" && action != "playback_check"
     if mutation && picked_count > 0 && (action == "album_add" || action == "album_remove" || !StartsWithFoldASCII(action, "album_")) {
         BuilderPrint(*out, ",\"ids\":[")
         for i: 0..picked_count - 1 { if i > 0 { BuilderPrint(*out, ",") }; Quoted(*out, TextUntilNul(picked[i].id[:])) }
@@ -153,7 +163,7 @@ SendRequest :: (action: string, id: string, value: string) {
     loading = Transport.Start(request)
     Release(request)
     if !loading { Set(message[:], Transport.error); if appending { more_due = ticks + 300; appending = false } }
-    busy = loading && action != "query"; next_refresh = ticks + 300
+    busy = loading && action != "query" && action != "playback_check"; next_refresh = ticks + 300
 }
 Decode :: (json: string, at: s32, key: string, out: []u8) {
     size := ReadStringText(json, FieldAt(json, at, key), out)
@@ -166,21 +176,46 @@ Number :: (json: string, at: s32, key: string) -> s32 {
 }
 Tick :: () {
     ticks += 1;
+    if playback_id[0] != 0 {
+        valid := editor == "playback" && selected >= 0 && selected < count
+        if valid { valid = TextUntilNul(photos[selected].id[:]) == TextUntilNul(playback_id[:]) && !photos[selected].trashed && (!photos[selected].hidden || vault_unlocked) }
+        if !valid { StopPlayback() }
+        else if playback_started {
+            state := Playback.State()
+            if state <= 0 { error := Playback.Message(); Set(message[:], error); StopPlayback() }
+        }
+    }
     if !initialized { initialized = true; Request() }
     if Transport.Poll() {
         loading = false; busy = false
-        if Transport.error != "" { Set(message[:], Transport.error); if appending { more_due = ticks + 300; appending = false }; return }
+        if Transport.error != "" { Set(message[:], Transport.error); if playback_id[0] != 0 { StopPlayback() }; if appending { more_due = ticks + 300; appending = false }; return }
         json := Transport.Value()
         if FieldAt(json, 0, "vault_configured") >= 0 { vault_configured = Number(json, 0, "vault_configured") > 0; vault_unlocked = Number(json, 0, "vault_unlocked") > 0 }
         if FieldAt(json, 0, "vault_token") >= 0 { Decode(json, 0, "vault_token", vault_token[:]) }
+        if view == "hidden" && !vault_unlocked {
+            StopPlayback(); selected = -1; VecClear(photos); count = 0; ClearSelection(); appending = false; Wipe(edit_preview[:])
+            if !Secret() { CancelEditor() }
+        }
+        if playback_request {
+            playback_request = false
+            Decode(json, 0, "error", message[:])
+            fresh_id: [65]u8; path: [4097]u8
+            Decode(json, 0, "playback_id", fresh_id[:]); Decode(json, 0, "playback_path", path[:])
+            if editor != "playback" || playback_id[0] == 0 { return }
+            if message[0] != 0 || TextUntilNul(fresh_id[:]) != TextUntilNul(playback_id[:]) || path[0] == 0 || (playback_started && TextUntilNul(path[:]) != TextUntilNul(playback_path[:])) {
+                StopPlayback(); if message[0] == 0 { Set(message[:], "Video access ended") }; return
+            }
+            if !playback_started {
+                if !Playback.Open(TextUntilNul(path[:])) { Set(message[:], Playback.Message()); StopPlayback(); return }
+                playback_started = true; Set(playback_path[:], TextUntilNul(path[:])); playback_speed = 100; playback_volume = 100
+            }
+            Playback.Lease(2500); playback_poll = ticks + 30
+            return
+        }
         if FieldAt(json, 0, "video_job") >= 0 { Decode(json, 0, "video_job", video_job[:]); video_poll = ticks + 30 }
         if FieldAt(json, 0, "saved_copy") >= 0 {
             saved: [65]u8; Decode(json, 0, "saved_copy", saved[:])
             if saved[0] != 0 && (editor == "video" || editor == "video_trim") { editor = ""; edit_preview[0] = 0; edit_session[0] = 0 }
-        }
-        if view == "hidden" && !vault_unlocked {
-            selected = -1; VecClear(photos); count = 0; ClearSelection(); appending = false; Wipe(edit_preview[:])
-            if !Secret() { CancelEditor() }
         }
         Decode(json, 0, "error", message[:]); if message[0] != 0 { if appending { more_due = ticks + 300; appending = false }; return }
         total = Number(json, 0, "total"); matches = Number(json, 0, "count"); pending = Number(json, 0, "pending")
@@ -249,10 +284,12 @@ Tick :: () {
     if !loading && queued_request {
         queued_request = false; SendRequest(TextUntilNul(queued_action[:]), TextUntilNul(queued_id[:]), TextUntilNul(queued_value[:])); return
     }
+    if !loading && playback_id[0] != 0 && ticks >= playback_poll { playback_poll = ticks + 30; Request("playback_check", TextUntilNul(playback_id[:])); return }
     if !loading && video_job[0] != 0 && ticks >= video_poll { video_poll = ticks + 60; Request("video_status"); return }
     if !loading && ticks > next_refresh && ((scroll == 0 && selected < 0) || (view == "hidden" && vault_unlocked)) { if selected < 0 { offset = 0 }; Request() }
 }
 Navigate :: (target: string) {
+    StopPlayback()
     queued_request = false
     if loading { for i: 0..cast(s32)9 { if View(i) == target { queued_view = i } }; return }
     if view == "hidden" && target != "hidden" && vault_token[0] != 0 {
@@ -265,12 +302,36 @@ Navigate :: (target: string) {
 }
 Choose :: (index: s32) {
     if busy || index < 0 || index >= count { return }
+    StopPlayback()
     selected = index
     detail_id[0] = 0
     detail_caption[0] = 0; detail_tags[0] = 0; detail_albums[0] = 0; detail_taken[0] = 0; detail_location[0] = 0; detail_size = 0
     Request("open", TextUntilNul(photos[index].id[:]))
 }
 ClearSelection :: () { VecClear(picked); picked_count = 0; last_pick = -1; selecting = false }
+StopPlayback :: () {
+    if playback_started { Playback.Stop() }
+    playback_started = false; Wipe(playback_id[:]); Wipe(playback_path[:]); playback_expanded = false
+    if editor == "playback" { editor = "" }
+}
+BeginPlayback :: () {
+    if loading || selected < 0 || selected >= count { return }
+    photo := *photos[selected]
+    if TextUntilNul(photo.kind[:]) != "video" || photo.trashed || TextUntilNul(detail_id[:]) != TextUntilNul(photo.id[:]) { return }
+    StopPlayback(); Set(playback_id[:], TextUntilNul(photo.id[:]))
+    editor = "playback"; focused = false; search_focused = false
+    Request("playback_check", TextUntilNul(playback_id[:]))
+}
+PlaybackSeek :: (position: s64) {
+    duration := Playback.Duration()
+    if duration <= 0 { return }
+    if position < 0 { position = 0 }; if position >= duration { position = duration - 1 }
+    unused Playback.Seek(position)
+}
+PlaybackSpeed :: () {
+    target: s32 = ifx playback_speed == 25 then 50 else (ifx playback_speed == 50 then 100 else (ifx playback_speed == 100 then 150 else (ifx playback_speed == 150 then 200 else 25)))
+    if Playback.Speed(target) { playback_speed = target }
+}
 IsPicked :: (id: string) -> bool {
     for i: 0..picked_count - 1 { if TextUntilNul(picked[i].id[:]) == id { return true } }; return false
 }
@@ -296,6 +357,7 @@ SelectLoaded :: () {
     for i: 0..count - 1 { if picked_count >= 1000 { break }; if !IsPicked(TextUntilNul(photos[i].id[:])) { Pick(i, true) } }
 }
 BeginEdit :: (action: string, title: string, value: string, hint: string) {
+    StopPlayback()
     editor = action; editor_title = title; editor_hint = hint; Set(edit_value[:], value)
     cursor = cast(s32)value.count; anchor = cursor; focused = false; search_focused = false
 }
@@ -330,6 +392,9 @@ SaveEditor :: () {
     Apply(editor, TextUntilNul(edit_value[:]))
 }
 Wipe :: (bytes: []u8) { for i: 0..cast(s32)bytes.count - 1 { bytes[i] = 0 } }
+PlaybackState :: () -> s32 { return Playback.State() }
+PlaybackPosition :: () -> s64 { return Playback.Position() }
+PlaybackDuration :: () -> s64 { return Playback.Duration() }
 Secret :: () -> bool { return StartsWithFoldASCII(editor, "vault_") }
 CancelEditor :: () { editor = ""; focused = false; Wipe(edit_value[:]); Wipe(vault_first[:]) }
 ImageValue :: () -> string {

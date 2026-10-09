@@ -3,7 +3,7 @@ ZIRAN ?= ziran
 PYTHON ?= build/venv/bin/python
 PREFIX ?= $(HOME)/.local
 PACKAGE_FLAGS := $(if $(wildcard ziran.local.toml),,--locked)
-.PHONY: build bundle image-editor video-editor vault-auth library-query test sync-test window-test video-window-test video-portable-test portable-test hosted-test install
+.PHONY: build bundle image-editor video-editor vault-auth library-query test sync-test window-test video-window-test video-portable-test playback-window-test playback-portable-test portable-test hosted-test install
 video-editor:
 	$(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry video_edit:main --exe -o build/video-editor src/video_edit.zi
 image-editor:
@@ -34,5 +34,9 @@ video-window-test: build
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/video_window.py
 video-portable-test: bundle
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_VIDEO_PORTABLE=1 $(PYTHON) tests/video_window.py
+playback-window-test: build
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/playback_window.py
+playback-portable-test: bundle
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_PLAYBACK_PORTABLE=1 $(PYTHON) tests/playback_window.py
 install: build
 	python3 scripts/install.py --prefix "$(PREFIX)"

@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from PIL import Image
-from photos import editing, video
+from photos import editing, video, vault
 from photos.library import Library, LibraryError, digest_file
 from photos.worker import process
 
@@ -36,6 +36,49 @@ class VideoTest(unittest.TestCase):
     def tearDown(self):
         self.library.db.close()
         self.temp.cleanup()
+
+    def test_playback_authorization_is_small_read_only_and_refuses_trash_and_missing_media(self):
+        before = self.library.photo(self.photo_id)
+        result = process(dict(action='playback_check',id=self.photo_id),self.config)
+        self.assertEqual(result['playback_id'],self.photo_id)
+        self.assertEqual(result['playback_path'],str(self.library.original(before)))
+        self.assertNotIn('photos',result)
+        self.assertEqual(self.library.photo(self.photo_id),before)
+        self.library.edit(self.photo_id,'trash')
+        with self.assertRaisesRegex(LibraryError,'outside Trash'):
+            process(dict(action='playback_check',id=self.photo_id),self.config)
+        self.library.edit(self.photo_id,'restore')
+        self.library.original(before).unlink()
+        with self.assertRaisesRegex(LibraryError,'Download'):
+            process(dict(action='playback_check',id=self.photo_id),self.config)
+        self.assertEqual(self.source.read_bytes(),self.original)
+
+    def test_playback_hidden_lock_expiry_and_expiry_at_publication_never_expose_a_path(self):
+        self.library.edit(self.photo_id,'hidden')
+        token = vault.authenticate(self.library,'Synthetic video password',setup=True)
+        request = dict(action='playback_check',id=self.photo_id,view='hidden',vault_token=token)
+        self.assertIn('playback_path',process(request,self.config))
+        with patch('photos.vault.time.monotonic',return_value=time.monotonic()+601):
+            result = process(request,self.config)
+        self.assertIn('error',result)
+        self.assertNotIn('playback_path',result)
+        token = vault.authenticate(self.library,'Synthetic video password')
+        with patch('photos.vault.state',return_value=dict(vault_configured=1,vault_unlocked=0)):
+            with self.assertRaisesRegex(LibraryError,'Hidden is locked'):
+                process({**request,'vault_token':token},self.config)
+        vault.lock(self.library,token)
+        self.assertNotIn('playback_path',process({**request,'vault_token':token},self.config))
+
+    def test_playback_rechecks_access_after_downloading_the_original(self):
+        stored = self.library.original(self.library.photo(self.photo_id))
+        stored.unlink()
+        def download(client,photo_id):
+            stored.write_bytes(self.original)
+            self.library.edit(photo_id,'hidden')
+        with patch('photos.sync.Client.materialize',download):
+            with self.assertRaisesRegex(LibraryError,'Hidden is locked'):
+                process(dict(action='playback_check',id=self.photo_id),{**self.config,'node':'http://127.0.0.1:18080','node_id':'ab'*32})
+        self.assertEqual(stored.read_bytes(),self.original)
 
     def test_trim_rotate_crop_copy_keeps_audio_metadata_source_and_export(self):
         self.library.edit(self.photo_id, 'caption', 'A video caption')

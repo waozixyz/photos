@@ -35,6 +35,7 @@ Publish :: () {
     Model.Property(*out,"editor",Model.editor)
     Model.Property(*out,"sort",Model.sort)
     BuilderPrint(*out,",\"vault_unlocked\":%",Model.vault_unlocked)
+    BuilderPrint(*out,",\"playback_state\":%,\"playback_position\":%,\"playback_duration\":%,\"playback_speed\":%,\"playback_volume\":%",Model.PlaybackState(),Model.PlaybackPosition(),Model.PlaybackDuration(),Model.playback_speed,Model.playback_volume)
     BuilderPrint(*out,",\"scroll\":%,\"nodes\":%,\"selection_count\":%,\"selected\":%,\"controls\":[",Model.scroll,Model.count,Model.picked_count,Model.selected)
     for i: 0..control_count-1 {
         BuilderPrint(*out,"%{\"control\":\"%\",\"role\":1,\"enabled\":%,\"x\":%,\"y\":%,\"width\":%,\"height\":%,\"label\":",ifx i==0 then "" else ",",control_ids[i],control_enabled[i],control_bounds[i][0],control_bounds[i][1],control_bounds[i][2],control_bounds[i][3])

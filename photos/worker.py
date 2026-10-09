@@ -81,6 +81,25 @@ def library_request(library, request, config):
         result = ui_query(library, {**request, 'vault_token': ''})
         result.update(error='Hidden is locked; authenticate before opening or changing hidden photos', vault_unlocked=0)
         return result
+    if action == 'playback_check':
+        photo = library.photo(request.get('id'))
+        require_access(photo['id'])
+        if photo['kind'] != 'video' or photo['trashed']:
+            raise LibraryError('Choose a video outside Trash to play')
+        if not library.original(photo).is_file():
+            if not config.get('node'):
+                raise LibraryError('Download the original before playing')
+            Client(library, config).materialize(photo['id'])
+        # Materialization can outlast authentication or a concurrent privacy edit.
+        photo = library.photo(photo['id'])
+        require_access(photo['id'])
+        if photo['trashed']:
+            raise LibraryError('Restore the video before playing')
+        result = vault.state(library, request.get('vault_token', ''))
+        if library.photo(photo['id'])['hidden'] and not result['vault_unlocked']:
+            raise LibraryError('Hidden is locked; authenticate before playing hidden videos')
+        result.update(playback_id=photo['id'], playback_path=str(library.original(photo)))
+        return result
     if action == 'memory_date':
         request = {**request, 'view': 'memories', 'memory_date': request.get('value', ''), 'offset': 0}
         result = ui_query(library, request)

@@ -1,0 +1,30 @@
+// The app chooses controls and authorization; Kryon owns decoding and audio.
+#if #defined(POSIX_THREADS) {
+    Video :: #import "kryon/VideoLinux";
+    Open :: (path: string) -> bool { return Video.VideoOpenHost(path) }
+    Stop :: () { Video.VideoStopHost() }
+    Pause :: () { Video.VideoPauseHost() }
+    State :: () -> s32 { return Video.VideoStateHost() }
+    Position :: () -> s64 { return Video.VideoPositionHost() }
+    Duration :: () -> s64 { return Video.VideoDurationHost() }
+    Seek :: (position: s64) -> bool { return Video.VideoSeekHost(position) }
+    Speed :: (percent: s32) -> bool { return Video.VideoSpeedHost(percent) }
+    Volume :: (percent: s32) { Video.VideoVolumeHost(percent) }
+    Lease :: (milliseconds: s32) { Video.VideoLeaseHost(milliseconds) }
+    Frame :: () -> string { return Video.VideoFrameHost() }
+    Message :: () -> string { return Video.VideoMessageHost() }
+} else {
+    Video :: #import "kryon/Video";
+    Open :: (path: string) -> bool { return Video.VideoOpen(path) }
+    Stop :: () { Video.VideoStop() }
+    Pause :: () { Video.VideoPause() }
+    State :: () -> s32 { return Video.VideoState() }
+    Position :: () -> s64 { return Video.VideoPosition() }
+    Duration :: () -> s64 { return Video.VideoDuration() }
+    Seek :: (position: s64) -> bool { return Video.VideoSeek(position) }
+    Speed :: (percent: s32) -> bool { return Video.VideoSpeed(percent) }
+    Volume :: (percent: s32) { Video.VideoVolume(percent) }
+    Lease :: (milliseconds: s32) { Video.VideoLease(milliseconds) }
+    Frame :: () -> string { return Video.VideoFrame() }
+    Message :: () -> string { return Video.VideoMessage() }
+}

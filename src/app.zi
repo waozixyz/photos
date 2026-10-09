@@ -1,5 +1,6 @@
 using UI :: #import "kryon/Widgets";
 using Model :: #import "model";
+Playback :: #import "playback";
 #if #defined(POSIX_THREADS) {
     Window :: #import "desktop";
     HostTheme :: #import "kryon/SystemThemeHostLinux";
@@ -178,12 +179,55 @@ VideoEditor :: (session: Session, body: Rectangle) {
     }
 }
 
+PlaybackTime :: (value: s64) -> string {
+    seconds := value / 1000; out: Vec(u8); BuilderPrint(*out, "%:", seconds / 60)
+    if seconds % 60 < 10 { BuilderPrint(*out, "0") }; BuilderPrint(*out, "%", seconds % 60); return BuilderFinish(out)
+}
+PlaybackViewer :: (session: Session, body: Rectangle) {
+    x := body.x; y := body.y; width := body.width
+    state := Playback.State(); ready := Model.playback_started && state >= 2
+    if Action(session, 351, "Back", .{x, y, 86.0, 36.0}) { Model.StopPlayback(); return }
+    if Action(session, 352, ifx Model.playback_expanded then "Fit in Photos" else "Expand", .{x + width - 150.0, y, 150.0, 36.0}) { Model.playback_expanded = !Model.playback_expanded }
+    image := Playback.Frame()
+    if image != "" { ImageAt(session, 3500, image, "Playing video", .{x, y + 48.0, width, body.height - 238.0}) }
+    else { Label(session, 353, ifx Model.playback_started then "Opening video…" else "Checking video access…", .{x + 12.0, y + 64.0, width - 24.0, 36.0}, 18) }
+    position := Playback.Position(); duration := Playback.Duration()
+    value := PlaybackTime(position); total_time := PlaybackTime(duration)
+    text: Vec(u8); BuilderPrint(*text, "% / %", value, total_time)
+    time_text := BuilderFinish(text)
+    slider: SliderProps; slider.key = 354; slider.id = 354; slider.semantic_label = "Position"
+    slider.bounds = .{x, y + body.height - 180.0, width, 48.0}; slider.value = cast(float32)position / 1000.0; slider.min = 0.0; slider.max = cast(float32)duration / 1000.0; slider.disabled = !ready || duration <= 0
+    result := Slider(session, slider); if result.changed { Model.PlaybackSeek(cast(s64)(result.value * 1000.0)) }
+    Label(session, 361, "Position", .{x + 4.0, slider.bounds.y, width - 180.0, 24.0}, 14)
+    Label(session, 362, time_text, .{x + width - 174.0, slider.bounds.y, 174.0, 24.0}, 14)
+    Record(354, "Position", slider.bounds, !slider.disabled)
+    Model.Release(value); Model.Release(total_time); Model.Release(time_text)
+    step := (width - 24.0) / 4.0; by := y + body.height - 120.0
+    if Action(session, 355, ifx state == 3 then "Resume" else (ifx state == 4 then "Replay" else "Pause"), .{x, by, step, 36.0}, ready) { Playback.Pause() }
+    if Action(session, 356, "Back 5s", .{x + step + 8.0, by, step, 36.0}, ready) { Model.PlaybackSeek(position - 5000) }
+    if Action(session, 357, "Forward 5s", .{x + 2.0 * (step + 8.0), by, step, 36.0}, ready) { Model.PlaybackSeek(position + 5000) }
+    speed_label := ifx Model.playback_speed == 25 then "Speed 0.25x" else (ifx Model.playback_speed == 50 then "Speed 0.5x" else (ifx Model.playback_speed == 100 then "Speed 1x" else (ifx Model.playback_speed == 150 then "Speed 1.5x" else "Speed 2x")))
+    if Action(session, 358, speed_label, .{x + 3.0 * (step + 8.0), by, step, 36.0}, ready) { Model.PlaybackSpeed() }
+    if Action(session, 359, ifx Model.playback_volume == 0 then "Unmute" else "Mute", .{x, by + 48.0, step, 36.0}, ready) { Model.playback_volume = ifx Model.playback_volume == 0 then 100 else 0; Playback.Volume(Model.playback_volume) }
+    volume: SliderProps; volume.key = 360; volume.id = 360; volume.semantic_label = "Volume"; volume.bounds = .{x + step + 8.0, by + 44.0, width - step - 8.0, 48.0}; volume.value = cast(float32)Model.playback_volume; volume.max = 100.0; volume.disabled = !ready
+    changed := Slider(session, volume); if changed.changed { Model.playback_volume = cast(s32)changed.value / 10 * 10; Playback.Volume(Model.playback_volume) }
+    Label(session, 363, "Volume", .{volume.bounds.x + 4.0, volume.bounds.y, volume.bounds.width - 8.0, 24.0}, 14)
+    Record(360, "Volume", volume.bounds, ready)
+}
+
 #program_export
 Frame :: (session: Session, viewport: Rectangle) -> s32 {
     Prepare(); defer { Publish() }
     Model.Tick()
     background: BoxProps; background.key = 1; background.bounds = viewport; background.fill = BackgroundColor(); Box(session, background)
     key := KeyboardTake(session); modifiers := KeyboardModifiers(session); typed_bytes: [256]u8; typed := TypedTextTake(session, typed_bytes[:])
+    if Model.editor == "playback" {
+        if key == Input.KeyEscape { if Model.playback_expanded { Model.playback_expanded = false } else { Model.StopPlayback() } }
+        if key == 32 && Model.playback_started { Playback.Pause() }
+        if key == Input.KeyLeft { Model.PlaybackSeek(Playback.Position() - 5000) }
+        if key == Input.KeyRight { Model.PlaybackSeek(Playback.Position() + 5000) }
+        if Model.playback_expanded { PlaybackViewer(session, .{viewport.x + 12.0, viewport.y + 12.0, viewport.width - 24.0, viewport.height - 24.0}); return 0 }
+    }
     if !Model.focused && !Model.search_focused && Model.editor == "" {
         if key == Input.KeyEscape { if Model.selected >= 0 { Model.selected = -1 } else { Model.ClearSelection() } }
         if Model.selected >= 0 && !Model.loading {
@@ -212,7 +256,9 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, 44, "Sync", .{x + width - 78.0, y, 78.0, 39.0}) { Model.Request("sync") }
     }
     body := Rectangle.{x, y + 52.0, width, viewport.height - 216.0}
-    if Model.editor == "video" {
+    if Model.editor == "playback" {
+        PlaybackViewer(session, body)
+    } else if Model.editor == "video" {
         VideoEditor(session, body)
     } else if Model.editor == "image" {
         ImageEditor(session, body)
@@ -270,6 +316,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, 215, "Edit image", .{x, body.y + 44.0, 126.0, 36.0}, ready && TextUntilNul(photo.kind[:]) == "photo" && !photo.trashed) { Model.BeginImageEdit() }
         if TextUntilNul(photo.kind[:]) == "video" {
             if Action(session, 330, "Edit video", .{x, body.y + 44.0, 126.0, 36.0}, ready && !photo.trashed) { Model.BeginVideoEdit() }
+            if Action(session, 350, "Play video", .{x + 288.0, body.y + 44.0, 126.0, 36.0}, ready && !photo.trashed) { Model.BeginPlayback() }
         }
         if Action(session, 216, "Edit location", .{x + 138.0, body.y + 44.0, 138.0, 36.0}, ready) { Model.BeginEdit("location", "Edit photo location", TextUntilNul(Model.detail_location[:]), "Latitude, longitude; leave empty to remove location") }
         ImageAt(session, 3000, image, TextUntilNul(photo.name[:]), .{x, body.y + 92.0, width, body.height - 364.0})
@@ -401,7 +448,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
     Label(session, 6, TextUntilNul(Model.message[:]), .{x, footer, width - (ifx Model.view == "hidden" && Model.vault_unlocked then 342.0 else 182.0), 28.0}, 12)
     if Model.view == "hidden" && Model.vault_unlocked {
         if Action(session, 296, "Change password", .{x + width - 330.0, footer - 2.0, 176.0, 34.0}, !Model.loading && Model.editor == "") { Model.BeginEdit("vault_change", "Change Hidden password", "", "Choose at least 8 characters; changing it locks Hidden on this desktop") }
-        if Action(session, 295, "Lock Hidden", .{x + width - 142.0, footer - 2.0, 142.0, 34.0}, !Model.loading) { Model.Apply("vault_lock"); Model.vault_unlocked = false; Model.Wipe(Model.vault_token[:]); Model.selected = -1; Model.CancelEditor() }
+        if Action(session, 295, "Lock Hidden", .{x + width - 142.0, footer - 2.0, 142.0, 34.0}, !Model.loading) { Model.StopPlayback(); Model.Apply("vault_lock"); Model.vault_unlocked = false; Model.Wipe(Model.vault_token[:]); Model.selected = -1; Model.CancelEditor() }
     }
     return 0
 }

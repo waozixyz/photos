@@ -65,7 +65,7 @@ audio, capture dates, captions, tags, locations, albums and privacy settings and
 are included in encrypted ThinkPad backup and export. The Ziran helper composes
 codec commands without a shell; FFmpeg/FFprobe must be installed. Video copies are
 re-encoded and may trim a one-pixel edge to keep even dimensions. HDR editing,
-freeform cropping, animated previews and in-app video playback remain unfinished.
+freeform cropping and animated editing previews remain unfinished.
 Hidden must remain unlocked through completion to save a hidden video. Stopping
 the library service stops its codec process; originals stay intact.
 
@@ -123,7 +123,7 @@ library.
 JPEG, PNG, WebP, GIF and common video containers import directly. RAW/HEIC files
 are retained even when the local image decoder cannot preview them. Video
 thumbnails need ffmpeg. Videos can be stored, synced, previewed and exported;
-in-app video playback is not implemented. Facial recognition, semantic image
+in-app playback is available on Linux with GStreamer and its installed codecs. Facial recognition, semantic image
 search, public links and phone camera backup are not implemented.
 This version is a local photo library with sync, not complete Ente feature parity.
 Hidden requires a separate local password, with confirmation when first created.
@@ -150,13 +150,26 @@ The remaining replacement work includes:
 
 - Mobile clients, permission-aware background camera backup and device space recovery.
 - On-device face grouping, semantic search, maps, curated memories and automatically curated trip/people albums.
-- Advanced photo editing, video playback, animated editing previews, freeform video crops, Live Photo pairing and broader HEIC/RAW previews.
+- Advanced photo editing, encrypted video streaming, animated editing previews, freeform video crops, Live Photo pairing and broader HEIC/RAW previews.
 - Private sharing, collaboration, public links, comments and account recovery.
   Any sharing design needs to honor the owner's ThinkPad-only sync restriction.
 - System authentication, Hidden password recovery and a deliberate deletion/retention policy.
 - A complete Ziran library/sync service. The native UI, portable app, gallery/search
   engine, image processor and password verifier are Ziran/Kryon; the SQLite importer,
   metadata mutation service and encrypted sync worker remain Python.
+
+Choose Play video to watch a video in the Photos window. Pause/resume, Replay,
+the position slider, five-second seek buttons, volume and Mute work offline.
+Space pauses or resumes; Left/Right seek five seconds. Speed cycles through
+0.25x, 0.5x, 1x, 1.5x and 2x. Expand fills the app window; Escape returns to
+the normal view, then exits playback. Audio and frames share the decoder clock.
+The local library rechecks access while playing, and an expiring decoder lease
+stops playback if those checks stall. Leaving the viewer stops audio and wipes
+the decoded frame. Encrypted HLS streaming and phone playback remain unfinished;
+remote originals are fully restored from the pinned ThinkPad before playback.
+GStreamer playback, base/good and FFmpeg codec plugins must be installed on the
+Linux host. The decoder loads these libraries when needed, so missing codecs
+produce a useful message while the rest of the library remains usable.
 
 The native image processor needs GdkPixbuf and GObject on the Linux desktop host;
 Hidden authentication also needs libsodium.
@@ -173,6 +186,7 @@ build/venv/bin/pip install -r requirements.txt
 ziran lock
 make build test window-test
 make video-window-test video-portable-test
+make playback-window-test playback-portable-test
 PHOTOS_DAOCHI=/path/to/daochi make sync-test
 ```
 
