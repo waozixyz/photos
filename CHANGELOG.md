@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.5
+
+- Restore retained empty originals from their encrypted backup without treating them as unfinished uploads.
+
 ## 0.1.4
 
 - Archive photos individually or in bulk while keeping them searchable and available in their albums.

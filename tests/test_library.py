@@ -103,6 +103,27 @@ class LibraryTest(unittest.TestCase):
         self.library.edit(photo_id, 'album_add', 'New album')
         self.assertEqual(self.library.query('uncategorized')['count'], 0)
 
+    def test_empty_original_restores_from_its_verified_empty_manifest(self):
+        source = self.root / 'Camera'
+        source.mkdir()
+        path = source / 'empty.jpg'
+        path.write_bytes(b'')
+        self.library.import_folders([source])
+        photo_id = digest_file(path)
+        photo = self.library.photo(photo_id)
+        client = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a' * 64))
+        client.save_manifest(photo, client.prepare_original(photo))
+        self.library.original(photo).unlink()
+        client.fetch_blob = Mock(side_effect=AssertionError('An empty original needs no blob'))
+        restored = Path(client.materialize(photo_id))
+        self.assertEqual(restored.read_bytes(), b'')
+        self.assertEqual(digest_file(restored), photo_id)
+        restored.unlink()
+        self.library.db.execute('UPDATE photos SET size=1 WHERE id=?', (photo_id,))
+        with self.assertRaises(ValueError):
+            client.materialize(photo_id)
+        self.assertFalse(restored.exists())
+
     def test_sorting_pages_are_consistent_in_both_directions(self):
         from photos.worker import library_request
         first = self.export('desktop', 'Old', 'red')

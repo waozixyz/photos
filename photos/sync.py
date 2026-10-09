@@ -354,7 +354,8 @@ class Client:
         destination = self.library.original(photo)
         if destination.exists():
             return str(destination)
-        if not manifest.get('chunks'):
+        chunks = manifest.get('chunks')
+        if not isinstance(chunks, list) or (not chunks and photo['size'] != 0):
             raise ValueError('This original has not finished syncing yet')
         destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd, temporary = tempfile.mkstemp(prefix='.download-', dir=destination.parent)
@@ -362,7 +363,7 @@ class Client:
             value = hashlib.sha256()
             size = 0
             with os.fdopen(fd, 'wb') as output:
-                for index, digest in enumerate(manifest['chunks']):
+                for index, digest in enumerate(chunks):
                     block = self.fetch_blob(digest, photo_id, f'chunk:{index}')
                     value.update(block)
                     size += len(block)

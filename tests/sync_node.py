@@ -97,7 +97,12 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         assert first.query('trash')['count'] == 1
         second.edit(photo_id,'restore'); peer.sync(); client.sync()
         assert first.query()['count'] == 2
-        print('Isolated Daochi v6: login, signatures, encrypted originals, verified download, batch dates, album rename and edit markers, archive/unarchive, favorites, Trash and restore round-trip passed')
+        empty = source / 'empty.jpg'
+        empty.write_bytes(b'')
+        first.import_folders([source.parent]); client.sync(); peer.sync()
+        empty_id = digest_file(empty)
+        assert Path(peer.materialize(empty_id)).read_bytes() == b''
+        print('Isolated Daochi v6: login, signatures, encrypted originals, verified download including empty originals, batch dates, album rename and edit markers, archive/unarchive, favorites, Trash and restore round-trip passed')
     finally:
         process.terminate()
         process.wait(timeout=10)
