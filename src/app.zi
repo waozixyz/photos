@@ -121,6 +121,7 @@ BulkBar :: (session: Session, bounds: Rectangle) {
     if Action(session, 66, "Edit date", BulkBounds(bounds, 5), ready) { Model.BeginEdit("taken", "Set date for selection", "", "2024-06-15 14:30:00+00:00 (UTC if no offset)") }
     if Action(session, 67, "Export selection", BulkBounds(bounds, 6), ready) { Model.BeginEdit("export", "Export selected originals", "", "Destination folder; empty uses Pictures/Photos Export") }
     if Action(session, 68, "Remove from album", BulkBounds(bounds, 7), ready && Model.album[0] != 0) { Model.Apply("album_remove", TextUntilNul(Model.album[:])) }
+    if Action(session, 69, ifx Model.view == "archive" then "Unarchive" else "Archive", BulkBounds(bounds, 8), ready) { Model.Apply("archived_set", ifx Model.view == "archive" then "0" else "1") }
 }
 
 #program_export
@@ -140,9 +141,9 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
     sidebar: float32 = ifx viewport.width < 800.0 then 126.0 else 166.0
     x := left + sidebar + 14.0; width := viewport.width - sidebar - 38.0
     Label(session, 2, "Photos", .{left, top + 2.0, sidebar, 36.0}, 28)
-    labels: [7]string = .{"Photos", "Albums", "Favorites", "Videos", "Hidden", "Trash", "Local sync"}
-    views: [7]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync"}
-    for i: 0..6 {
+    labels: [9]string = .{"Photos", "Albums", "Favorites", "Videos", "Hidden", "Trash", "Local sync", "Archive", "Uncategorized"}
+    views: [9]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized"}
+    for i: 0..8 {
         if Action(session, cast(s32)(10 + i), labels[i], .{left, top + 58.0 + cast(float32)i * 47.0, sidebar, 39.0}) { Model.Navigate(views[i]) }
     }
     Label(session, 3, "ThinkPad only", .{left, viewport.y + viewport.height - 76.0, sidebar, 22.0}, 13)
@@ -197,6 +198,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, 97, "Edit date", .{x, bottom, step, 36.0}, ready) { Model.BeginEdit("taken", "Edit photo date", TextUntilNul(Model.detail_taken[:]), "Date and time; include an offset, or use UTC") }
         if Action(session, 98, "Rename", .{x + step + 8.0, bottom, step, 36.0}, ready) { Model.BeginEdit("rename", "Rename photo", TextUntilNul(photo.name[:]), "File name; the original bytes stay intact") }
         if Action(session, 99, "Remove from album", .{x + 2.0 * (step + 8.0), bottom, step * 2.0 + 8.0, 36.0}, ready) { Model.BeginEdit("album_remove", "Remove photo from album", TextUntilNul(Model.album[:]), "Album name; removing membership keeps the photo") }
+        if Action(session, 95, ifx photo.archived then "Unarchive" else "Archive", .{x + 4.0 * (step + 8.0), bottom, step, 36.0}, ready) { SelectedAction("archived") }
     } else {
         if Model.view != "albums" {
             if Action(session, 45, ifx Model.selecting then "Done" else "Select", .{x, body.y, 78.0, 36.0}) { if Model.selecting { Model.ClearSelection() } else { Model.selecting = true } }
@@ -206,8 +208,11 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                 text: Vec(u8); BuilderPrint(*text, "% selected", Model.picked_count); value := BuilderFinish(text)
                 Label(session, 48, value, .{x + 304.0, body.y + 7.0, width - 304.0, 26.0}); Model.Release(value)
             } else if Model.album[0] != 0 {
-                Label(session, 48, TextUntilNul(Model.album[:]), .{x + 88.0, body.y + 7.0, width - 236.0, 26.0})
-                if Action(session, 49, "Rename album", .{x + width - 138.0, body.y, 138.0, 36.0}, !Model.loading) { Model.BeginEdit("album_rename", "Rename album", TextUntilNul(Model.album[:]), "New album name; originals and other albums stay intact") }
+                Label(session, 48, TextUntilNul(Model.album[:]), .{x + 88.0, body.y + 7.0, width - 376.0, 26.0})
+                if Action(session, 49, "Rename album", .{x + width - 278.0, body.y, 138.0, 36.0}, !Model.loading) { Model.BeginEdit("album_rename", "Rename album", TextUntilNul(Model.album[:]), "New album name; originals and other albums stay intact") }
+            }
+            if !Model.selecting {
+                if Action(session, 60, ifx Model.sort == "newest" then "Newest first" else "Oldest first", .{x + width - 132.0, body.y, 132.0, 36.0}, !Model.loading) { Model.ToggleSort() }
             }
             body.y += 44.0; body.height -= 44.0
             if Model.selecting { BulkBar(session, .{x, body.y, width, 80.0}); height: float32 = ifx width < 720.0 then 132.0 else 88.0; body.y += height; body.height -= height }

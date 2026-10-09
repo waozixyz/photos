@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.4
+
+- Archive photos individually or in bulk while keeping them searchable and available in their albums.
+- Browse archived photos and bring them back to the main timeline with Unarchive.
+- Find photos without an album in Uncategorized; removing the last membership keeps the original safe.
+- Choose oldest-first or newest-first browsing in the gallery and albums.
+
 ## 0.1.3
 
 - Keep large ThinkPad backups moving with small encrypted metadata pages.

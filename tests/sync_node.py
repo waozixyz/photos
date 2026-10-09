@@ -87,11 +87,17 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         assert first.details(photo_id)['taken'] == '2024-06-15T12:30:00+00:00'
         assert 'Renamed fixture' in json.loads(first.photo(photo_id)['albums'])
         assert json.loads(first.photo(photo_id)['edits'])['removed_albums'] == ['Fixture']
+        second.edit(photo_id, 'archived_set', '1'); peer.sync(); client.sync()
+        assert first.query('archive')['count'] == 1
+        assert first.query()['count'] == 1
+        assert first.query(search='fixture')['count'] == 2
+        assert first.query(album='Renamed fixture')['count'] == 2
+        second.edit(photo_id, 'archived_set', '0'); peer.sync(); client.sync()
         second.edit(photo_id,'trash'); peer.sync(); client.sync()
         assert first.query('trash')['count'] == 1
         second.edit(photo_id,'restore'); peer.sync(); client.sync()
         assert first.query()['count'] == 2
-        print('Isolated Daochi v6: login, signatures, encrypted originals, verified download, batch dates, album rename and edit markers, favorites, Trash and restore round-trip passed')
+        print('Isolated Daochi v6: login, signatures, encrypted originals, verified download, batch dates, album rename and edit markers, archive/unarchive, favorites, Trash and restore round-trip passed')
     finally:
         process.terminate()
         process.wait(timeout=10)

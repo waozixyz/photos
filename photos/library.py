@@ -61,6 +61,7 @@ class Library:
                 width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0,
                 metadata TEXT NOT NULL, albums TEXT NOT NULL,
                 favorite INTEGER NOT NULL DEFAULT 0, hidden INTEGER NOT NULL DEFAULT 0,
+                archived INTEGER NOT NULL DEFAULT 0,
                 trashed INTEGER NOT NULL DEFAULT 0, caption TEXT NOT NULL DEFAULT '',
                 tags TEXT NOT NULL DEFAULT '', updated REAL NOT NULL,
                 dirty INTEGER NOT NULL DEFAULT 1, manifest TEXT NOT NULL DEFAULT '{}');
@@ -70,11 +71,14 @@ class Library:
                 meta_stamp TEXT, photo_id TEXT REFERENCES photos(id));
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         ''')
-        if 'edits' not in {row[1] for row in self.db.execute('PRAGMA table_info(photos)')}:
+        for column, declaration in [('edits', "TEXT NOT NULL DEFAULT '{}'"),
+                                    ('archived', 'INTEGER NOT NULL DEFAULT 0')]:
+            if column in {row[1] for row in self.db.execute('PRAGMA table_info(photos)')}:
+                continue
             with self.db:
                 self.db.execute('BEGIN IMMEDIATE')
-                if 'edits' not in {row[1] for row in self.db.execute('PRAGMA table_info(photos)')}:
-                    self.db.execute("ALTER TABLE photos ADD COLUMN edits TEXT NOT NULL DEFAULT '{}'")
+                if column not in {row[1] for row in self.db.execute('PRAGMA table_info(photos)')}:
+                    self.db.execute(f'ALTER TABLE photos ADD COLUMN {column} {declaration}')
         self.db.commit()
 
     def setting(self, key, default=None):
@@ -216,12 +220,13 @@ class Library:
             finally:
                 Path(temporary).unlink(missing_ok=True)
             caption = str(metadata.get('description', ''))
-            self.db.execute('''INSERT INTO photos(id,name,extension,kind,size,taken,width,height,metadata,albums,favorite,caption,tags,updated)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+            self.db.execute('''INSERT INTO photos(id,name,extension,kind,size,taken,width,height,metadata,albums,favorite,caption,tags,updated,archived)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                 (photo_id, path.name, photo['extension'], photo['kind'], stat.st_size, taken,
                  width, height, packed(combined), packed(albums),
                  int(album.casefold() in {'favorites', 'favourites'} or metadata.get('favorite') is True), caption,
-                 metadata.get('tags', '') if isinstance(metadata.get('tags', ''), str) else '', time.time()))
+                 metadata.get('tags', '') if isinstance(metadata.get('tags', ''), str) else '', time.time(),
+                 int(metadata.get('archived') is True)))
             self.preview(photo, destination)
         self.db.execute('INSERT OR REPLACE INTO sources VALUES(?,?,?,?,?)',
                         (str(path), stat.st_size, stat.st_mtime_ns, stamp, photo_id))
@@ -272,7 +277,7 @@ class Library:
     def _edit(self, photo_id, action, value=None):
         photo = self.photo(photo_id)
         edits = json.loads(photo['edits'])
-        if action in {'favorite', 'hidden', 'favorite_set', 'hidden_set'}:
+        if action in {'favorite', 'hidden', 'archived', 'favorite_set', 'hidden_set', 'archived_set'}:
             field = action.removesuffix('_set')
             if action.endswith('_set') and str(value) not in {'0', '1'}:
                 raise LibraryError('Choose whether to enable this property')
@@ -344,7 +349,9 @@ class Library:
                     taken=datetime.fromtimestamp(photo['taken'], timezone.utc).isoformat(),
                     location=f"{geo.get('latitude', '')}, {geo.get('longitude', '')}" if isinstance(geo, dict) and 'latitude' in geo else '')
 
-    def query(self, view='photos', search='', album='', offset=0, limit=60):
+    def query(self, view='photos', search='', album='', offset=0, limit=60, sort='newest'):
+        if sort not in {'newest', 'oldest'}:
+            raise LibraryError('Choose newest first or oldest first')
         where, args = ['trashed=0', 'hidden=0'], []
         if view == 'trash':
             where = ['trashed>0']
@@ -354,6 +361,14 @@ class Library:
             where.append('favorite=1')
         elif view == 'videos':
             where.append("kind='video'")
+        elif view == 'archive':
+            where.append('archived=1')
+        elif view == 'uncategorized':
+            where.append('json_array_length(albums)=0')
+        elif view == 'photos' and not album and not search:
+            # Archive removes items only from the home timeline. Albums and
+            # search retain them, unlike Hidden and Trash.
+            where.append('archived=0')
         if album:
             where.append('EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=?)')
             args.append(album)
@@ -362,7 +377,8 @@ class Library:
             args.extend(['%' + search + '%'] * 5)
         clause = ' AND '.join(where)
         count = self.db.execute('SELECT COUNT(*) FROM photos WHERE ' + clause, args).fetchone()[0]
-        rows = self.db.execute('SELECT * FROM photos WHERE ' + clause + ' ORDER BY taken DESC,id LIMIT ? OFFSET ?',
+        direction = 'DESC' if sort == 'newest' else 'ASC'
+        rows = self.db.execute('SELECT * FROM photos WHERE ' + clause + f' ORDER BY taken {direction},id LIMIT ? OFFSET ?',
                                [*args, max(1, min(100, int(limit))), max(0, int(offset))]).fetchall()
         photos = []
         for row in rows:
@@ -396,6 +412,6 @@ class Library:
             shutil.copyfileobj(incoming, output, 4 * 1024 * 1024)
         metadata = json.loads(photo['metadata'])
         metadata.update(description=photo['caption'], photoTakenTime={'timestamp': str(int(photo['taken']))}, albums=json.loads(photo['albums']))
-        metadata.update(tags=photo['tags'], favorite=bool(photo['favorite']))
+        metadata.update(tags=photo['tags'], favorite=bool(photo['favorite']), archived=bool(photo['archived']))
         atomic(folder / 'metadata' / (destination.name + '.json'), packed(metadata).encode())
         return str(destination)

@@ -63,6 +63,89 @@ class LibraryTest(unittest.TestCase):
         self.library.import_folders([first.parents[1], second.parents[1]])
         self.assertEqual(self.library.query()['total'], 2)
 
+    def test_archive_keeps_search_albums_and_originals_and_batch_changes_atomic(self):
+        first = self.export('desktop', 'Holiday', 'red')
+        second = self.export('desktop', 'Family', 'blue')
+        self.library.import_folders([first.parents[1]])
+        ids = [digest_file(first), digest_file(second)]
+        self.library.edit_many(ids, 'archived_set', '1')
+        self.assertEqual(self.library.query()['count'], 0)
+        self.assertEqual(self.library.query('archive')['count'], 2)
+        self.assertEqual(self.library.query(search='same')['count'], 2)
+        self.assertEqual(self.library.query(album='Holiday')['count'], 1)
+        with self.assertRaises(ValueError):
+            self.library.edit_many([ids[0], 'missing'], 'archived_set', '0')
+        self.assertEqual(self.library.query('archive')['count'], 2)
+        self.library.edit(ids[0], 'hidden_set', '1')
+        self.assertEqual(self.library.query(search='same')['count'], 1)
+        self.assertEqual(self.library.query('archive')['count'], 1)
+        self.library.edit(ids[0], 'hidden_set', '0')
+        self.library.edit(ids[1], 'trash')
+        self.assertEqual(self.library.query('archive')['count'], 1)
+        self.library.edit(ids[1], 'restore')
+        self.library.import_folders([first.parents[1]])
+        self.assertEqual(self.library.query('archive')['count'], 2)
+        self.library.edit_many(ids, 'archived_set', '0')
+        self.assertEqual(self.library.query()['count'], 2)
+        for path, photo_id in zip([first, second], ids):
+            self.assertEqual(self.library.original(self.library.photo(photo_id)).read_bytes(), path.read_bytes())
+
+    def test_uncategorized_retains_photo_removed_from_last_album(self):
+        path = self.export('desktop', 'Holiday')
+        self.library.import_folders([path.parents[1]])
+        photo_id = digest_file(path)
+        self.assertEqual(self.library.query('uncategorized')['count'], 0)
+        self.library.edit(photo_id, 'album_remove', 'Holiday')
+        self.assertEqual(self.library.query('uncategorized')['count'], 1)
+        self.assertEqual(self.library.query('trash')['count'], 0)
+        self.library.edit(photo_id, 'archived')
+        self.assertEqual(self.library.query('uncategorized')['count'], 1)
+        self.library.edit(photo_id, 'album_add', 'New album')
+        self.assertEqual(self.library.query('uncategorized')['count'], 0)
+
+    def test_sorting_pages_are_consistent_in_both_directions(self):
+        from photos.worker import library_request
+        first = self.export('desktop', 'Old', 'red')
+        second = self.export('desktop', 'New', 'blue')
+        self.library.import_folders([first.parents[1]])
+        ids = [digest_file(first), digest_file(second)]
+        self.library.db.execute('UPDATE photos SET taken=? WHERE id=?', (1700000000, ids[1]))
+        self.library.db.commit()
+        self.assertEqual([p['id'] for p in self.library.query()['photos']], ids[::-1])
+        self.assertEqual([p['id'] for p in library_request(self.library, dict(sort='oldest'), {})['photos']], ids)
+        for sort, order in [('oldest', ids), ('newest', ids[::-1])]:
+            pages = [self.library.query(offset=i, limit=1, sort=sort)['photos'][0]['id'] for i in range(2)]
+            self.assertEqual(pages, order)
+        with self.assertRaises(ValueError):
+            self.library.query(sort='unexpected')
+
+    def test_legacy_store_and_legacy_encrypted_records_default_to_unarchived(self):
+        import sqlite3
+        path = self.export('desktop', 'Holiday')
+        self.library.import_folders([path.parents[1]])
+        photo_id = digest_file(path)
+        legacy = self.root / 'legacy'
+        legacy.mkdir()
+        photo = self.library.photo(photo_id)
+        photo.pop('archived')
+        schema = self.library.db.execute("SELECT sql FROM sqlite_master WHERE name='photos'").fetchone()[0]
+        schema = schema.replace('archived INTEGER NOT NULL DEFAULT 0,', '')
+        with sqlite3.connect(legacy / 'library.sqlite') as db:
+            db.execute(schema)
+            db.execute('INSERT INTO photos(' + ','.join(photo) + ') VALUES(' + ','.join('?' for _ in photo) + ')', list(photo.values()))
+        migrated = Library(legacy)
+        self.addCleanup(migrated.db.close)
+        self.assertEqual(migrated.photo(photo_id)['archived'], 0)
+        self.assertEqual(migrated.query()['count'], 1)
+        client = Client(migrated, dict(node='http://127.0.0.1:18080', node_id='a' * 64))
+        record = client.record(photo, dict(chunks=[]))
+        migrated.db.execute('DELETE FROM photos')
+        client.accept(record)
+        self.assertEqual(migrated.photo(photo_id)['archived'], 0)
+        photo['archived'] = 2
+        with self.assertRaises(ValueError):
+            client.accept(client.record(photo, dict(chunks=[])))
+
     def test_export_corrects_the_date_of_an_existing_phone_copy(self):
         phone = self.export('phone', 'Camera', metadata=False)
         exported = self.export('desktop', 'Holiday')
@@ -199,6 +282,7 @@ class LibraryTest(unittest.TestCase):
         photo_id = digest_file(path)
         self.library.edit(photo_id, 'taken', '2024-06-15')
         self.library.edit(photo_id, 'album_remove', 'Holiday')
+        self.library.edit(photo_id, 'archived_set', '1')
         client = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a' * 64))
         record = client.record(self.library.photo(photo_id), dict(chunks=[]))
         self.assertNotIn('removed_albums', json.dumps(record))
@@ -207,6 +291,7 @@ class LibraryTest(unittest.TestCase):
         photo = self.library.photo(photo_id)
         self.assertEqual(json.loads(photo['edits']), dict(taken=True, removed_albums=['Holiday']))
         self.assertEqual(photo['dirty'], 0)
+        self.assertEqual(photo['archived'], 1)
 
     def test_edits_during_import_metadata_read_are_preserved(self):
         path = self.export('desktop', 'Holiday')
@@ -233,6 +318,7 @@ class LibraryTest(unittest.TestCase):
         self.library.edit(photo_id, 'tags', 'forest hiking')
         self.library.edit(photo_id, 'favorite_set', '1')
         self.library.edit(photo_id, 'album_add', 'Family')
+        self.library.edit(photo_id, 'archived_set', '1')
         self.library.export(photo_id, self.root / 'exported')
         other = Library(self.root / 'second')
         self.addCleanup(other.db.close)
@@ -240,6 +326,8 @@ class LibraryTest(unittest.TestCase):
         self.assertEqual(other.query('favorites', search='hiking')['count'], 1)
         self.assertEqual(other.query(album='Family')['count'], 1)
         self.assertEqual(other.query(album='Holiday')['count'], 1)
+        self.assertEqual(other.query('archive')['count'], 1)
+        self.assertEqual(other.query()['count'], 0)
 
     def test_large_imported_caption_cannot_be_silently_truncated_by_editor(self):
         path = self.export('desktop', 'Holiday')

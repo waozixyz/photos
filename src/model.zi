@@ -22,6 +22,7 @@ Photo :: struct {
     favorite: bool
     hidden: bool
     trashed: bool
+    archived: bool
     width: s32
     height: s32
 }
@@ -53,6 +54,7 @@ albums: [256][513]u8;
 album_counts: [256]s32;
 album_count: s32;
 view: string = "photos";
+sort: string = "newest";
 album: [513]u8;
 search: [513]u8;
 input: [4097]u8;
@@ -114,6 +116,7 @@ SendRequest :: (action: string, id: string, value: string) {
     BuilderPrint(*out, "{\"action\":"); Quoted(*out, action)
     Property(*out, "view", view); Property(*out, "search", TextUntilNul(search[:]))
     Property(*out, "album", TextUntilNul(album[:])); Property(*out, "id", id); Property(*out, "value", value)
+    Property(*out, "sort", sort)
     mutation = action != "query" && action != "open" && action != "sync" && action != "import"
     if mutation && picked_count > 0 && action != "album_rename" {
         BuilderPrint(*out, ",\"ids\":[")
@@ -169,6 +172,7 @@ Tick :: () {
             Decode(json, at, "date", photo.date[:]); Decode(json, at, "kind", photo.kind[:])
             photo.favorite = Number(json, at, "favorite") > 0
             photo.hidden = Number(json, at, "hidden") > 0; photo.trashed = Number(json, at, "trashed") > 0
+            photo.archived = Number(json, at, "archived") > 0
             photo.width = Number(json, at, "width"); photo.height = Number(json, at, "height")
             if TextUntilNul(photo.id[:]) == TextUntilNul(previous[:]) && previous[0] != 0 { selected = count }
             count += 1; page_count += 1; at = Space(json, ValueEnd(json, at, 0)); if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json, at + 1) }
@@ -190,7 +194,7 @@ Tick :: () {
 }
 Navigate :: (target: string) {
     queued_request = false
-    if loading { for i: 0..cast(s32)6 { if View(i) == target { queued_view = i } }; return }
+    if loading { for i: 0..cast(s32)8 { if View(i) == target { queued_view = i } }; return }
     ClearSelection(); editor = ""; view = target; appending = false; feed_base = 0; album[0] = 0; selected = -1; offset = 0; scroll = 0; Request()
 }
 Choose :: (index: s32) {
@@ -235,6 +239,7 @@ Apply :: (action: string, value: string = "") {
     Request(action, id, value)
 }
 Find :: () { ClearSelection(); editor = ""; offset = 0; scroll = 0; selected = -1; Request() }
+ToggleSort :: () { if loading { return }; sort = ifx sort == "newest" then "oldest" else "newest"; Find() }
 Edit :: (out: []u8, start: s32, end: s32, replacement: string) {
     copied: [8193]u8; Set(copied[:], replacement)
     length := cast(s32)TextUntilNul(out).count; inserted := cast(s32)replacement.count
@@ -251,4 +256,4 @@ More :: () {
     offset = count + feed_base; appending = true; Request()
 }
 
-View :: (index: s32) -> string { names: [7]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync"}; return names[index] }
+View :: (index: s32) -> string { names: [9]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized"}; return names[index] }

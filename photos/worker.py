@@ -28,11 +28,11 @@ def process(request, config):
 
 def ui_query(library, request):
     result = library.query(request.get('view', 'photos'), request.get('search', ''),
-                           request.get('album', ''), request.get('offset', 0))
+                           request.get('album', ''), request.get('offset', 0), sort=request.get('sort', 'newest'))
     # The gallery needs only these fields. Full metadata and encrypted sync
     # manifests stay in the store rather than being decoded on every UI poll.
     fields = ('id', 'name', 'thumbnail', 'original', 'date', 'kind', 'favorite',
-              'hidden', 'trashed', 'width', 'height')
+              'hidden', 'trashed', 'archived', 'width', 'height')
     result['photos'] = [{key: photo[key] for key in fields} for photo in result['photos']]
     return result
 

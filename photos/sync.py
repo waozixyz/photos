@@ -246,13 +246,16 @@ class Client:
         if not isinstance(photo['albums'], list) or not isinstance(photo['manifest'], dict) or not (0 < photo['taken'] < 32503680000):
             raise ValueError('Invalid photo metadata')
         photo.setdefault('edits', {})
+        photo.setdefault('archived', 0)
+        if type(photo['archived']) not in {int, bool} or photo['archived'] not in (0, 1):
+            raise ValueError('Invalid photo archive state')
         if not isinstance(photo['edits'], dict):
             raise ValueError('Invalid photo edits')
         existing = self.library.db.execute('SELECT * FROM photos WHERE id=?', (photo['id'],)).fetchone()
         if existing and existing['updated'] >= photo['updated']:
             return
         columns = ['id', 'name', 'extension', 'kind', 'size', 'taken', 'width', 'height', 'metadata', 'albums',
-                   'favorite', 'hidden', 'trashed', 'caption', 'tags', 'updated', 'manifest', 'edits']
+                   'favorite', 'hidden', 'trashed', 'archived', 'caption', 'tags', 'updated', 'manifest', 'edits']
         for key in ['metadata', 'albums', 'manifest', 'edits']:
             photo[key] = packed(photo[key])
         self.library.db.execute('INSERT OR REPLACE INTO photos(' + ','.join(columns) + ',dirty) VALUES(' + ','.join('?' for _ in columns) + ',0)',

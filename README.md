@@ -27,7 +27,10 @@ Photos opens to a newest-first feed grouped by day. Older photos load as you
 scroll, with only visible thumbnails drawn. The app follows Harmony’s colors
 when hosted, including changes while it is open. Background library updates
 keep browsing controls available. Browse albums, favorites, videos, hidden items and recoverable
-Trash. Search names, dates, captions, tags and albums. Open a photo to view its
+Trash. Archive photos individually or in bulk to remove them from the home feed;
+they stay in albums and search results. Browse Archive to unarchive them.
+Uncategorized shows photos without album memberships. Choose Newest first or
+Oldest first in galleries and albums. Search names, dates, captions, tags and albums. Open a photo to view its
 original, capture time, dimensions, file size, caption, tags, albums and location.
 Use the dedicated editors to change captions, tags, file names and capture dates.
 Dates without an explicit time-zone offset use UTC. Left/right arrows browse
@@ -55,6 +58,7 @@ Trash retains originals indefinitely, without automatic expiry or permanent dele
 
 The Ente comparison uses its [feature overview](https://ente.com/features/),
 [album behavior](https://ente.com/help/photos/features/albums-and-organization/albums),
+[archive behavior](https://ente.com/help/photos/features/albums-and-organization/archive),
 [metadata and editing reference](https://github.com/ente/ente/blob/main/docs/docs/photos/faq/metadata-and-editing.md)
 and [export behavior](https://ente.com/help/photos/features/backup-and-sync/export).
 The remaining replacement work includes:
@@ -64,8 +68,8 @@ The remaining replacement work includes:
 - Photo editing, video playback, Live Photo pairing and broader HEIC/RAW previews.
 - Private sharing, collaboration, public links, comments and account recovery.
   Any sharing design needs to honor the owner's ThinkPad-only sync restriction.
-- Empty albums, album covers/descriptions/pinning, archive, album sorting,
-  and full-library continuous export with album folders.
+- Empty albums, album covers/descriptions/pinning, album list ordering,
+  album archiving, and full-library continuous export with album folders.
 - An authenticated hidden vault and a deliberate deletion/retention policy.
 - A Ziran library/sync service. The native UI and portable app are Ziran/Kryon;
   the SQLite importer, metadata service and encrypted sync worker remain Python.

@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from photos.library import Library
 from photos.service import Server
+import photos.service as service_module
 
 assert os.environ.get('PHOTOS_PRIVATE_XVFB') == '1'
 with tempfile.TemporaryDirectory() as folder:
@@ -23,6 +24,12 @@ with tempfile.TemporaryDirectory() as folder:
     Image.new('RGB', (700, 501), '#438e7c').save(album / 'Second.jpg')
     library = Library(folder / 'library')
     library.import_folders([album.parent])
+    calls = []
+    original_process = service_module.process
+    def record_request(request, config):
+        calls.append(dict(request))
+        return original_process(request, config)
+    service_module.process = record_request
     env = {**os.environ, 'KRYON_SERVICE_ROOT': str(folder)}
     with Server(dict(root=str(library.root)), folder / 'kryon/services/photos.sock') as service:
         threading.Thread(target=service.serve_forever, daemon=True).start()
@@ -91,7 +98,32 @@ with tempfile.TemporaryDirectory() as folder:
                 time.sleep(.1)
             else:
                 raise AssertionError('Portable album editor did not persist the selection')
-            print('Portable Photos: private service, thumbnails, favorite, bulk selection and album editor verified')
+            click(230, 166); click(343, 166)
+            click(602, 254)  # Archive selection
+            for _ in range(50):
+                if library.query('archive')['count'] == 2:
+                    break
+                time.sleep(.1)
+            else:
+                raise AssertionError('Portable archive did not persist the selection')
+            click(65, 418)  # Archive view
+            click(230, 166); click(343, 166)
+            click(602, 254)  # Unarchive selection
+            for _ in range(50):
+                if library.query('archive')['count'] == 0:
+                    break
+                time.sleep(.1)
+            else:
+                raise AssertionError('Portable unarchive did not restore the selection')
+            click(65, 90)  # Home timeline
+            click(1100, 166)  # Oldest first
+            for _ in range(50):
+                if any(r.get('sort') == 'oldest' for r in calls):
+                    break
+                time.sleep(.1)
+            else:
+                raise AssertionError('Portable sort did not reach the library service')
+            print('Portable Photos: private service, thumbnails, favorite, bulk selection, album editor, archive/unarchive and sorting verified')
         finally:
             process.terminate()
             try:

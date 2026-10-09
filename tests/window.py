@@ -91,13 +91,27 @@ with tempfile.TemporaryDirectory() as folder:
         enter('2024-06-15 14:30:00+02:00');action('Save')
         assert library.db.execute('SELECT COUNT(*) FROM photos WHERE strftime(\'%Y-%m-%d\',taken,\'unixepoch\')=?',('2024-06-15',)).fetchone()[0]==1
         subprocess.run(['import','-window',window,str(output/'details.png')],check=True)
+        action('Photos'); state('photos',4)
+        action('Newest first'); assert state()['sort']=='oldest'
+        action('Oldest first'); assert state()['sort']=='newest'
+        action('Select'); action('Select loaded'); action(control=69)
+        state('photos',0)
+        action(control=17); state('archive',4)
+        subprocess.run(['import','-window',window,str(output/'archive.png')],check=True)
+        action(control=100); action('Unarchive'); state('archive',3)
+        action('Albums'); action('Weekend'); state('photos',4)
+        action('Select'); action('Select loaded'); action('Remove from album')
+        state('photos',0)
+        action('Uncategorized'); state('uncategorized',2)
+        assert library.query('trash')['count']==0
+        subprocess.run(['import','-window',window,str(output/'uncategorized.png')],check=True)
         action('Local sync');state('sync')
         subprocess.run(['import','-window',window,str(output/'sync.png')],check=True)
         xdo('windowsize',window,720,880);action('Photos');state('photos')
         subprocess.run(['import','-window',window,str(output/'narrow.png')],check=True)
         action('Select');action('Select loaded')
         subprocess.run(['import','-window',window,str(output/'selection-narrow.png')],check=True)
-        print('Private Xvfb: gallery, batch selection and favorite, album add/rename/remove, caption editor, date validation and correction, details, local sync and narrow layout verified')
+        print('Private Xvfb: gallery, sorting, batch favorite and archive, album add/rename/remove, caption and date editors, archive/unarchive, uncategorized, local sync and narrow layout verified')
     finally:
         service.shutdown();service.server_close()
         process.terminate()

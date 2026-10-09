@@ -33,6 +33,7 @@ Publish :: () {
     out: Vec(u8); BuilderPrint(*out,"{\"interface\":\"harmony.app-state.v1\",\"app\":\"photos\",\"loading\":%",Model.loading)
     Model.Property(*out,"view",Model.view); Model.Property(*out,"status",TextFromCString(*Model.message[0]))
     Model.Property(*out,"editor",Model.editor)
+    Model.Property(*out,"sort",Model.sort)
     BuilderPrint(*out,",\"scroll\":%,\"nodes\":%,\"selection_count\":%,\"selected\":%,\"controls\":[",Model.scroll,Model.count,Model.picked_count,Model.selected)
     for i: 0..control_count-1 {
         BuilderPrint(*out,"%{\"control\":\"%\",\"role\":1,\"enabled\":%,\"x\":%,\"y\":%,\"width\":%,\"height\":%,\"label\":",ifx i==0 then "" else ",",control_ids[i],control_enabled[i],control_bounds[i][0],control_bounds[i][1],control_bounds[i][2],control_bounds[i][3])
