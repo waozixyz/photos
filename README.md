@@ -468,7 +468,12 @@ Install them with `scripts/install.py --semantic-models build/models`. No photo,
 query or index is sent to a model service. The CLIP model is primarily English;
 results are approximate and exclude similarities below 0.20. Indexing covers
 still images whose originals are present locally, including the still component
-of Live Photos. Failed files remain stored and can be retried. Video-content search,
+of visible Live Photos. Native selection excludes private or incomplete pairs.
+Local index publication and retry writes also run in Ziran: one writer snapshot
+checks processing settings, paired privacy, the exact pre-scan photo revision and
+existing restored indexes. A late scan retains newer edits and indexes; failed or
+interrupted publication rolls back its index and backup stamp together. Failed
+files remain stored and can be retried. Video-content search,
 automatic curation and a Ziran tokenizer/indexing service
 remain unfinished. CLIP's MIT attribution is in `assets/CLIP-LICENSE.txt`.
 

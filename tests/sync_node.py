@@ -98,13 +98,13 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         assert first.query('large',large_type='videos')['count'] == 0
         assert existing_identity.read_bytes() == existing_bytes
         photo_id = digest_file(source/'fixture.jpg')
-        from photos import semantic
+        from photos import semantic, native_edit
         import struct
         embedding = struct.pack('<512f', 1.0, *([0.0] * 511))
-        first.db.execute('INSERT INTO semantic_embeddings VALUES(?,?,?,?)', (photo_id, semantic.MODEL, embedding, ''))
-        first.db.execute('INSERT INTO semantic_embeddings VALUES(?,?,?,?)', (large_id, semantic.MODEL, embedding, ''))
-        first.db.commit()
         first.set_setting('semantic_enabled',True)
+        first.set_setting('semantic_processing',True)
+        assert native_edit.semantic_index(first,'publish',dict(first.photo(photo_id)),embedding)
+        assert native_edit.semantic_index(first,'publish',dict(first.photo(large_id)),embedding)
         first.set_setting('semantic_processing',False)
         assert [p['id'] for p in first.query('similar',similar_id=photo_id)['photos']] == [large_id]
         first.edit(photo_id, 'favorite_set', '0')

@@ -133,10 +133,12 @@ class SemanticTest(unittest.TestCase):
         red=Image.new('RGB',(300,200),(255,0,0));blue=Image.new('RGB',(300,200),(0,0,255))
         source=self.root/'real';source.mkdir();red.save(source/'red.png');blue.save(source/'blue.png')
         red.save(source/'red-twin.png',compress_level=0);self.library.import_folders([source])
+        from photos import native_edit
+        self.library.set_setting('semantic_processing',True)
         for path in [source/'red.png',source/'blue.png',source/'red-twin.png']:
             photo=self.library.photo(digest_file(path));blob=semantic.infer(self.library,'image',semantic.image_tensor(self.library,photo))
-            self.library.db.execute('INSERT OR REPLACE INTO semantic_embeddings VALUES(?,?,?,?)',(photo['id'],semantic.MODEL,blob,''))
-        self.library.db.commit()
+            self.assertTrue(native_edit.semantic_index(self.library,'publish',dict(photo),blob))
+        self.library.set_setting('semantic_processing',False)
         text=semantic.infer(self.library,'text',semantic.text_tensor('a completely red image'))
         values=struct.unpack('<512f',text)
         def dot(path):return sum(a*b for a,b in zip(values,struct.unpack('<512f',self.library.db.execute('SELECT embedding FROM semantic_embeddings WHERE photo_id=?',(digest_file(path),)).fetchone()[0])))

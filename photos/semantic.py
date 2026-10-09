@@ -11,7 +11,6 @@ import struct
 import subprocess
 import tempfile
 import threading
-import time
 
 from PIL import Image, ImageOps
 
@@ -176,8 +175,8 @@ def enable(library, enabled):
 
 
 def retry(library):
-    with library.db:
-        library.db.execute('DELETE FROM semantic_embeddings WHERE error<>?', ('',))
+    from . import native_edit
+    native_edit.semantic_index(library, 'retry')
     enable(library, True)
 
 
@@ -206,12 +205,13 @@ def _run(root):
             return
         prepare()
         while library.setting('semantic_enabled', False) and library.setting('semantic_processing', True):
-            photo = library.db.execute('''SELECT p.* FROM photos p WHERE p.kind='photo'
-                AND p.hidden=0 AND p.trashed=0 AND NOT EXISTS(SELECT 1 FROM semantic_embeddings s
-                WHERE s.photo_id=p.id AND s.model=?) ORDER BY taken DESC,id LIMIT 1''', (MODEL,)).fetchone()
-            if photo is None:
+            from . import native_edit
+            identity = native_edit.semantic_index(library, 'next')
+            if identity is None:
                 break
-            photo = dict(photo)
+            photo = dict(library.photo(identity))
+            if photo['hidden'] or photo['trashed']:
+                continue
             library.set_setting('semantic_status', 'Indexing local photos; you can keep browsing')
             blob, error = None, ''
             try:
@@ -220,14 +220,7 @@ def _run(root):
                 blob = infer(library, 'image', image_tensor(library, photo))
             except Exception:
                 error = 'Local original could not be indexed'
-            with library.db:
-                library.db.execute('BEGIN IMMEDIATE')
-                current = library.photo(photo['id'])
-                if not library.setting('semantic_enabled', False) or not library.setting('semantic_processing', True) or current['hidden'] or current['trashed']:
-                    continue
-                library.db.execute('INSERT OR REPLACE INTO semantic_embeddings VALUES(?,?,?,?)', (photo['id'], MODEL, blob, error))
-                if blob:
-                    library.db.execute('UPDATE photos SET updated=?,dirty=1 WHERE id=?', (time.time(), photo['id']))
+            native_edit.semantic_index(library, 'failure' if error else 'publish', photo, blob)
         library.set_setting('semantic_status', 'Local semantic indexing complete')
     except Exception:
         if library is not None:

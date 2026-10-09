@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.54
+
+- Retain newer restored search indexes and photo edits when an older local scan finishes.
+- Keep paused processing and private Live Photo components out of new search indexing, including during concurrent changes.
+- Preserve existing search results and backup progress when an index write or retry is interrupted.
+
 ## 0.1.53
 
 - Discover similar sets across your locally indexed photo library and open a reference to review its matches.

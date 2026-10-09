@@ -5,6 +5,7 @@ Album :: #import "album_edit";
 AlbumDetails :: #import "album_details";
 Metadata :: #import "metadata_input";
 Cleanup :: #import "similar_cleanup";
+SemanticIndex :: #import "semantic_index";
 #import "std/byte_text_linux"
 #import "std/json_scan"
 #import "std/text_buffer"
@@ -116,6 +117,23 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if ReadStringText(json,FieldAt(json,0,"action"),actionBytes[:]) < 0 { return Failure("Choose a photo action") }
     action := TextFromCString(*actionBytes[0]); valueLength := ReadStringText(json,FieldAt(json,0,"value"),valueBytes[:])
     if action == "album_definition" { return EditAlbum(TextFromCString(argv[1]),json) }
+    if action == "semantic_index" {
+        database: *void
+        if SqliteOpenText(TextFromCString(argv[1]),*database,SQLITE_OPEN_READWRITE) != SQLITE_OK { if database != null { unused SqliteClose(database) }; return Failure("Cannot open the private library database") }
+        defer { unused SqliteClose(database) }
+        unused SqliteBusyTimeout(database,5000)
+        if SqliteExecText(database,"BEGIN IMMEDIATE") != SQLITE_OK { return Failure("The library is busy; try indexing again") }
+        defer { unused SqliteExecText(database,"ROLLBACK") }
+        time: Timespec; if GetTime(0,*time) != 0 { return Failure("Cannot read the index time") }
+        now := cast(float64)time.seconds+cast(float64)time.nanoseconds/1000000000.0
+        operation: [16]u8; selected: [65]u8
+        operationLength := ReadStringText(json,FieldAt(json,0,"operation"),operation[:])
+        if operationLength < 1 { return Failure("Choose a local image index operation") }
+        saved := ifx TextFromBytes(operation[:operationLength]) == "next" then SemanticIndex.Next(database,selected[:]) else SemanticIndex.Mutate(database,json,now)
+        if saved < 0 { return Failure("Cannot save the local image index") }
+        if SqliteExecText(database,"COMMIT") != SQLITE_OK { return Failure("Cannot save the local image index") }
+        response: Vec(u8); BuilderPrint(*response,"{\"saved\":%,\"id\":\"%\"}",saved,TextFromCString(*selected[0])); unused Send(BuilderFinish(response)); return 0
+    }
     property: string
     if action == "favorite" || action == "favorite_set" { property = "favorite" }
     if action == "hidden" || action == "hidden_set" { property = "hidden" }

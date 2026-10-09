@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import struct
 import threading
 import time
 
@@ -23,6 +24,31 @@ def program():
     if result is None:
         raise LibraryError('Build or install the Photos property editor before changing photos')
     return result
+
+
+def semantic_index(library, operation, photo=None, blob=None):
+    if library.db.in_transaction:
+        raise LibraryError('Finish the current operation before saving a local image index')
+    request = dict(action='semantic_index', operation=operation)
+    if operation in {'publish', 'failure'}:
+        request.update(photo_id=photo['id'], expected=struct.pack('<d',photo['updated']).hex(), value=blob.hex() if blob is not None else '')
+    environment = {key: value for key, value in os.environ.items() if key not in {
+        'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS', 'SESSION_MANAGER'}}
+    try:
+        result = subprocess.run(['prlimit', '--as=268435456', '--cpu=10', '--', str(program()),
+                                 str(library.root/'library.sqlite')], input=packed(request).encode()+b'\n',
+                                env=environment, capture_output=True, timeout=15)
+        response = json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        raise LibraryError('Local image index could not finish; retry indexing') from None
+    if result.returncode or not isinstance(response, dict) or response.get('saved') not in (0, 1):
+        raise LibraryError('Local image index could not finish; retry indexing')
+    if operation == 'next':
+        identity = response.get('id')
+        if response['saved'] and (not isinstance(identity, str) or not HASH.fullmatch(identity)):
+            raise LibraryError('Local image indexing returned an invalid selection')
+        return identity if response['saved'] else None
+    return bool(response['saved'])
 
 
 def album_change(library, name, action, value=None, search='', source=''):

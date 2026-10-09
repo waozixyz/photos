@@ -1,0 +1,81 @@
+// Publish local inference only against the original writer revision. A late
+// scan cannot overwrite restored indexes, privacy changes or paused processing.
+using SQLite :: #import "sqlite/SQLite";
+LivePhoto :: #import "live_photo";
+Semantic :: #import "semantic";
+#import "std/byte_text_linux"
+#import "std/json_scan"
+#import "std/text_buffer"
+c :: #system_library "c";
+Copy :: (out: *void, bytes: *void, count: usize) -> *void #foreign c "memcpy";
+Next :: (database: *void, identity: []u8) -> s32 {
+    sql: Vec(u8)
+    BuilderPrint(*sql,"SELECT id FROM photos WHERE kind='photo' AND hidden=0 AND trashed=0 AND % AND (SELECT value FROM settings WHERE key='semantic_enabled')='true' AND coalesce((SELECT value FROM settings WHERE key='semantic_processing'),'true')='true' AND NOT EXISTS(SELECT 1 FROM semantic_embeddings e WHERE e.photo_id=photos.id AND e.model=?) ORDER BY taken DESC,id LIMIT 1",LivePhoto.GallerySQL)
+    statement: *void
+    if SqlitePrepareText(database,BuilderFinish(sql),-1,*statement,null) != SQLITE_OK { return -1 }
+    defer { unused SqliteFinalize(statement) }
+    if SqliteBindTextString(statement,1,Semantic.Model,-1) != SQLITE_OK { return -1 }
+    status := SqliteStep(statement); if status == SQLITE_DONE { return 0 }; if status != SQLITE_ROW { return -1 }
+    value := TextFromCString(SqliteColumnText(statement,0)); if value.count != 64 || identity.count < 65 { return -1 }
+    for i: 0..63 { if Nibble(value[i]) < 0 { return -1 }; identity[i] = value[i] }; identity[64] = 0
+    return 1
+}
+Nibble :: (byte: u8) -> s32 {
+    if byte >= 48 && byte <= 57 { return cast(s32)byte-48 }
+    if byte >= 97 && byte <= 102 { return cast(s32)byte-87 }
+    return -1
+}
+Mutate :: (database: *void, json: string, now: float64) -> s32 {
+    operation: [16]u8; identity: [65]u8; encoded: [4097]u8
+    size := ReadStringText(json,FieldAt(json,0,"operation"),operation[:])
+    if size < 1 { return -1 }
+    mode := TextFromBytes(operation[:size])
+    if mode == "retry" {
+        return ifx SqliteExecText(database,"DELETE FROM semantic_embeddings WHERE error<>''") == SQLITE_OK then 1 else -1
+    }
+    if mode != "publish" && mode != "failure" { return -1 }
+    if ReadStringText(json,FieldAt(json,0,"photo_id"),identity[:]) != 64 { return -1 }
+    for i: 0..63 { if Nibble(identity[i]) < 0 { return -1 } }
+    expectedText: [17]u8; stamp: [8]u8; expected: float64
+    if ReadStringText(json,FieldAt(json,0,"expected"),expectedText[:]) != 16 { return -1 }
+    for i: 0..7 {
+        high := Nibble(expectedText[2*i]); low := Nibble(expectedText[2*i+1]); if high < 0 || low < 0 { return -1 }
+        stamp[i] = cast(u8)(high*16+low)
+    }
+    unused Copy(cast(*void)*expected,cast(*void)*stamp[0],8)
+    if expected != expected || expected < 0.0 || expected > 32503680000.0 { return -1 }
+    bytes: [2048]u8; values: [512]float32
+    if mode == "publish" {
+        if ReadStringText(json,FieldAt(json,0,"value"),encoded[:]) != 4096 { return -1 }
+        for i: 0..2047 {
+            high := Nibble(encoded[2*i]); low := Nibble(encoded[2*i+1]); if high < 0 || low < 0 { return -1 }
+            bytes[i] = cast(u8)(high*16+low)
+        }
+        // The binary representation is the same little-endian float32 format
+        // used by inference, encrypted records and the gallery ranker.
+        unused Copy(cast(*void)*values[0],cast(*void)*bytes[0],2048)
+        norm: float64
+        for value: values { number := cast(float64)value; if number != number || number < -1.001 || number > 1.001 { return -1 }; norm += number*number }
+        if norm < 0.99 || norm > 1.01 { return -1 }
+    }
+    sql: Vec(u8)
+    BuilderPrint(*sql,"SELECT 1 FROM photos WHERE id=?1 AND updated=?2 AND kind='photo' AND hidden=0 AND trashed=0 AND % AND (SELECT value FROM settings WHERE key='semantic_enabled')='true' AND coalesce((SELECT value FROM settings WHERE key='semantic_processing'),'true')='true' AND NOT EXISTS(SELECT 1 FROM semantic_embeddings e WHERE e.photo_id=photos.id AND e.model=?3)",LivePhoto.GallerySQL)
+    statement: *void
+    if SqlitePrepareText(database,BuilderFinish(sql),-1,*statement,null) != SQLITE_OK { return -1 }
+    if SqliteBindTextString(statement,1,TextFromCString(*identity[0]),64) != SQLITE_OK || SqliteBindDouble(statement,2,expected) != SQLITE_OK || SqliteBindTextString(statement,3,Semantic.Model,-1) != SQLITE_OK { unused SqliteFinalize(statement); return -1 }
+    status := SqliteStep(statement); unused SqliteFinalize(statement)
+    if status == SQLITE_DONE { return 0 }; if status != SQLITE_ROW { return -1 }
+    if SqlitePrepareText(database,"INSERT OR REPLACE INTO semantic_embeddings VALUES(?,?,?,?)",-1,*statement,null) != SQLITE_OK { return -1 }
+    bound := SqliteBindTextString(statement,1,TextFromCString(*identity[0]),64) == SQLITE_OK && SqliteBindTextString(statement,2,Semantic.Model,-1) == SQLITE_OK
+    if mode == "publish" { bound = bound && SqliteBindBlob(statement,3,bytes[:]) == SQLITE_OK }
+    else { bound = bound && SqliteBindNull(statement,3) == SQLITE_OK }
+    error := ifx mode == "publish" then "" else "Local original could not be indexed"
+    bound = bound && SqliteBindTextString(statement,4,error,-1) == SQLITE_OK
+    status = ifx bound then SqliteStep(statement) else -1; unused SqliteFinalize(statement)
+    if status != SQLITE_DONE { return -1 }
+    if mode == "failure" { return 1 }
+    if SqlitePrepareText(database,"UPDATE photos SET updated=max(updated+0.00001,?),dirty=1 WHERE id=?",-1,*statement,null) != SQLITE_OK { return -1 }
+    bound = SqliteBindDouble(statement,1,now) == SQLITE_OK && SqliteBindTextString(statement,2,TextFromCString(*identity[0]),64) == SQLITE_OK
+    status = ifx bound then SqliteStep(statement) else -1; unused SqliteFinalize(statement)
+    return ifx status == SQLITE_DONE && SqliteChanges(database) == 1 then 1 else -1
+}
