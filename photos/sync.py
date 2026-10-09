@@ -298,7 +298,7 @@ class Client:
         photo = json.loads(decrypt(decode(envelope['ciphertext']), packed(aad).encode(), decode(envelope['nonce']), self.key))
         if photo.get('id') != record['id'] or photo.get('extension') not in __import__('photos.library', fromlist=['IMAGES']).IMAGES | __import__('photos.library', fromlist=['VIDEOS']).VIDEOS:
             raise ValueError('Invalid photo record')
-        if not isinstance(photo['albums'], list) or not isinstance(photo['manifest'], dict) or not (0 < photo['taken'] < 32503680000):
+        if not isinstance(photo['albums'], list) or not isinstance(photo['manifest'], dict) or type(photo['taken']) not in {int, float} or not (-62135596800 <= photo['taken'] < 253402300800):
             raise ValueError('Invalid photo metadata')
         photo.setdefault('edits', {})
         photo.setdefault('archived', 0)

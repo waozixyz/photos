@@ -19,8 +19,20 @@ metadata updates retain a newer backup stamp. Folder discovery also runs in a
 headless Ziran helper, streaming sorted entries without following folder links.
 It excludes provider metadata and Git folders, reports unreadable folders and
 stops its own walker if the import consumer closes. Nonregular media files such
-as named pipes are skipped. EXIF/sidecar extraction and imports carrying private face or automatic-album indexes still
-use the compatibility service; the complete importer port remains in progress.
+as named pipes are skipped. A persistent headless Ziran reader extracts
+camera dates, dimensions and valid GPS from JPEG, PNG, WebP, TIFF/BigTIFF and
+HEIC containers. EXIF original dates take precedence over modified dates;
+fractional seconds and explicit time-zone offsets are retained, with UTC used
+when an offset is absent or malformed. Historic camera dates survive export
+and encrypted restore, including dates before 1970. Provider and album sidecars
+are read there too, with UTF-8, UTF-16 and UTF-32 supported and unknown JSON values
+preserved. Unreadable, linked, oversized or malformed sidecars produce import
+warnings while originals remain intact. One reader serves an import batch;
+failed codecs are bounded and the next request can restart the reader.
+Imports carrying private face or automatic-album indexes and album-definition
+publication still use the compatibility service; the complete importer port
+remains in progress. Some non-TIFF RAW camera formats still lack capture-field
+extraction even when their pixels can be viewed.
 
 The owner's merged desktop library is `/mnt/storage/Photos`, imported from
 `/mnt/storage/adel` and `/mnt/storage/Album`. Private data never belongs in this
@@ -420,8 +432,9 @@ The remaining replacement work includes:
 - System authentication, Hidden password recovery and a deliberate deletion/retention policy.
 - A complete Ziran library/sync service. The native UI, portable app, gallery/search
   engine, image processor, password verifier, photo/album-property writers,
-  original copying, folder discovery and ordinary import metadata/source-cache writes are Ziran/Kryon.
-  EXIF/sidecar extraction, private derived-index import writes,
+  original copying, folder discovery, camera/provider/album-sidecar reading
+  and ordinary import metadata/source-cache writes are Ziran/Kryon.
+  Private derived-index import writes, album-definition import publication,
   authorization adapter and encrypted sync worker remain Python.
 
 Choose Play video to watch a video in the Photos window. Pause/resume, Replay,

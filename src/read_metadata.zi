@@ -1,0 +1,228 @@
+// Persistent headless provider-sidecar and camera reader. Every request owns
+// its descriptors and buffers; no pixels, originals or library keys are changed.
+using SQLite :: #import "sqlite/SQLite";
+Camera :: #import "camera_metadata";
+Metadata :: #import "metadata_input";
+Json :: #import "import_folders";
+#import "std/byte_text_linux"
+#import "std/c_string"
+#import "std/json_scan"
+#import "std/text_buffer"
+c :: #system_library "c";
+OpenFD :: (path: *u8, flags: s32, mode: s32) -> s32 #foreign c "open";
+CloseFD :: (fd: s32) -> s32 #foreign c "close";
+ReadFD :: (fd: s32, data: *u8, count: usize) -> s64 #foreign c "read";
+Output :: (fd: s32, data: *u8, count: usize) -> s64 #foreign c "write";
+Allocate :: (count: usize) -> *void #foreign c "malloc";
+Release :: (data: *void) #foreign c "free";
+Errno :: () -> *s32 #foreign c "__errno_location";
+// The fixed 256-byte Linux statx UAPI, independent of the libc stat layout.
+Timestamp :: struct { seconds: s64; nanos: u32; reserved: s32 }
+StatData :: struct {
+    mask: u32; blockSize: u32; attributes: u64; links: u32; uid: u32; gid: u32; mode: u16; pad: u16;
+    inode: u64; size: u64; blocks: u64; attributesMask: u64;
+    access: Timestamp; birth: Timestamp; change: Timestamp; modified: Timestamp; tail: [16]u64
+}
+Stat :: (fd: s32, path: *u8, flags: s32, mask: u32, data: *StatData) -> s32 #foreign c "statx";
+glib :: #system_library "glib-2.0";
+Convert :: (text: *u8, length: s64, target: *u8, source: *u8, read: *usize, written: *usize, error: **void) -> *u8 #foreign glib "g_convert";
+Free :: (data: *void) #foreign glib "g_free";
+FreeError :: (error: *void) #foreign glib "g_error_free";
+Decimal :: (text: *u8, end: **u8) -> float64 #foreign glib "g_ascii_strtod";
+Send :: (text: string) -> bool {
+    bytes: [4096]u8; at: s32
+    while at < cast(s32)text.count {
+        count := cast(s32)text.count-at; if count > 4096 { count = 4096 }
+        for i: 0..count-1 { bytes[i] = text[at+i] }
+        written: s32
+        while written < count {
+            amount := Output(1,*bytes[written],cast(usize)(count-written)); if amount <= 0 { return false }; written += cast(s32)amount
+        }
+        at += count
+    }
+    return true
+}
+Failure :: (message: string) -> bool {
+    out: Vec(u8); BuilderPrint(*out,"{\"error\":\"%\"}\n",message); return Send(BuilderFinish(out))
+}
+Line :: (bytes: []u8) -> s32 {
+    at: s32
+    while at < cast(s32)bytes.count {
+        count := ReadFD(0,*bytes[at],1)
+        if count == 0 { return ifx at == 0 then 0 else -1 }; if count != 1 { return -1 }
+        if bytes[at] == 10 { return at }; at += 1
+    }
+    return -1
+}
+Opened :: struct { fd: s32; data: StatData; missing: bool; valid: bool }
+Open :: (path: string) -> Opened {
+    result: Opened; result.fd = -1; name: [4096]u8
+    if !CopyCString(path,name[:]) { return result }
+    // O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC: a named pipe or substituted link cannot
+    // hold this worker indefinitely or supply another file's metadata.
+    result.fd = OpenFD(*name[0],131072|2048|524288,0)
+    if result.fd < 0 { code := Errno().*; result.missing = code == 2 || code == 20; return result }
+    empty: [1]u8
+    if Stat(result.fd,*empty[0],4096,577,*result.data) != 0 || (result.data.mask & 577) != 577 ||
+        (result.data.mode & 61440) != 32768 || result.data.size > 9223372036854775807 || result.data.modified.nanos >= 1000000000 {
+        unused CloseFD(result.fd); result.fd = -1; return result
+    }
+    result.valid = true; return result
+}
+Join :: (base: string, name: string) -> string {
+    out: Vec(u8); BuilderPrint(*out,"%/%",base,name); return BuilderFinish(out)
+}
+Suffix :: (name: string) -> string { out: Vec(u8); BuilderPrint(*out,"%.json",name); return BuilderFinish(out) }
+ValidJSON :: (database: *void, text: string) -> bool {
+    statement: *void
+    if SqlitePrepareText(database,"SELECT json_valid(?1)",-1,*statement,null) != SQLITE_OK { return false }
+    valid := SqliteBindTextString(statement,1,text,cast(s32)text.count) == SQLITE_OK && SqliteStep(statement) == SQLITE_ROW && SqliteColumnInt(statement,0) == 1
+    unused SqliteFinalize(statement); if !valid { return false }
+    if SqlitePrepareText(database,"SELECT json_type(?1)='object'",-1,*statement,null) != SQLITE_OK { return false }
+    valid = SqliteBindTextString(statement,1,text,cast(s32)text.count) == SQLITE_OK && SqliteStep(statement) == SQLITE_ROW && SqliteColumnInt(statement,0) == 1
+    unused SqliteFinalize(statement); return valid
+}
+Minified :: (text: string) -> string {
+    out: Vec(u8); at: s32
+    while at < cast(s32)text.count {
+        if text[at] == 34 {
+            span := ReadString(text,at); if !span.valid { return "" }
+            BuilderPrint(*out,"%",text[at:span.after]); at = span.after; continue
+        }
+        byte := text[at]
+        if byte != 32 && byte != 9 && byte != 10 && byte != 13 { BuilderPrint(*out,"%",text[at:at+1]) }
+        at += 1
+    }
+    return BuilderFinish(out)
+}
+Capture :: struct { mode: s32; value: float64 }
+CaptureTime :: (database: *void, text: string) -> Capture {
+    result: Capture; statement: *void
+    // JSON objects can repeat a key. Match the import adapter's last-key
+    // semantics rather than SQLite json_extract's first-key semantics.
+    query := "WITH capture AS (SELECT type,value FROM json_each(?1) WHERE key='photoTakenTime' ORDER BY id DESC LIMIT 1), stamp AS (SELECT type,value FROM json_each((SELECT CASE WHEN type='object' THEN value ELSE '{}' END FROM capture)) WHERE key='timestamp' ORDER BY id DESC LIMIT 1) SELECT (SELECT type FROM capture),(SELECT type FROM stamp),(SELECT value FROM stamp)"
+    if SqlitePrepareText(database,query,-1,*statement,null) != SQLITE_OK { result.mode = 2; return result }
+    defer { unused SqliteFinalize(statement) }
+    if SqliteBindTextString(statement,1,text,cast(s32)text.count) != SQLITE_OK || SqliteStep(statement) != SQLITE_ROW { result.mode = 2; return result }
+    type := TextFromCString(SqliteColumnText(statement,0)); timestamp := TextFromCString(SqliteColumnText(statement,1))
+    if type == "" || type == "object" && timestamp == "" { return result }
+    result.mode = 2
+    if type != "object" { return result }
+    value: float64
+    if timestamp == "integer" || timestamp == "real" || timestamp == "true" || timestamp == "false" { value = SqliteColumnDouble(statement,2) }
+    else if timestamp == "text" {
+        bytes := SqliteColumnText(statement,2); length := SqliteColumnBytes(statement,2); end: *u8
+        value = Decimal(bytes,*end)
+        used := cast(usize)end-cast(usize)bytes
+        if used == 0 || used > cast(usize)length { return result }
+        for i: cast(s32)used..length-1 { if bytes[i] != 32 && bytes[i] != 9 && bytes[i] != 10 && bytes[i] != 13 && bytes[i] != 11 && bytes[i] != 12 { return result } }
+    } else { return result }
+    if value != value || value <= 0.0 || value >= 32503680000.0 { return result }
+    result.mode = 1; result.value = value; return result
+}
+Documents :: (database: *void, candidates: []string, limit: u64) -> bool {
+    for candidate: candidates {
+        opened := Open(candidate); if opened.missing { continue }
+        if !opened.valid { return Failure("Cannot read the metadata sidecar") }; defer { unused CloseFD(opened.fd) }
+        if opened.data.size == 0 || opened.data.size > limit { return Failure("Metadata sidecar is empty or too large") }
+        storage := Allocate(cast(usize)opened.data.size+1); if storage == null { return Failure("Cannot allocate sidecar metadata") }; defer { Release(storage) }
+        bytes := BytesFromPointer(cast(*u8)storage,opened.data.size+1)
+        if !Camera.Range(.{opened.fd,0,cast(s64)opened.data.size,null},0,bytes[:cast(s64)opened.data.size]) { return Failure("Metadata sidecar changed while reading") }
+        // Recheck the opened descriptor, not a possibly replaced path.
+        after: StatData; empty: [1]u8
+        if Stat(opened.fd,*empty[0],4096,577,*after) != 0 || after.size != opened.data.size ||
+            after.modified.seconds != opened.data.modified.seconds || after.modified.nanos != opened.data.modified.nanos { return Failure("Metadata sidecar changed while reading") }
+        begin: s32; length := cast(s32)opened.data.size; encoding: string
+        if length >= 4 && bytes[0] == 255 && bytes[1] == 254 && bytes[2] == 0 && bytes[3] == 0 { encoding = "UTF-32LE"; begin = 4 }
+        else if length >= 4 && bytes[0] == 0 && bytes[1] == 0 && bytes[2] == 254 && bytes[3] == 255 { encoding = "UTF-32BE"; begin = 4 }
+        else if length >= 2 && bytes[0] == 255 && bytes[1] == 254 { encoding = "UTF-16LE"; begin = 2 }
+        else if length >= 2 && bytes[0] == 254 && bytes[1] == 255 { encoding = "UTF-16BE"; begin = 2 }
+        else if length >= 3 && bytes[0] == 239 && bytes[1] == 187 && bytes[2] == 191 { begin = 3 }
+        else if length >= 4 && bytes[0] == 0 { encoding = ifx bytes[1] != 0 then "UTF-16BE" else "UTF-32BE" }
+        else if length >= 4 && bytes[1] == 0 { encoding = ifx bytes[2] != 0 || bytes[3] != 0 then "UTF-16LE" else "UTF-32LE" }
+        else if length >= 2 && bytes[0] == 0 { encoding = "UTF-16BE" }
+        else if length >= 2 && bytes[1] == 0 { encoding = "UTF-16LE" }
+        converted: *u8; defer { if converted != null { Free(cast(*void)converted) } }
+        text := TextFromBytes(bytes[begin:length])
+        if encoding != "" {
+            target: [6]u8 = .{85,84,70,45,56,0}; source: [16]u8; unused CopyCString(encoding,source[:]); read: usize; written: usize; error: *void
+            converted = Convert(*bytes[begin],cast(s64)(length-begin),*target[0],*source[0],*read,*written,*error)
+            if error != null { FreeError(error) }
+            if converted == null || read != cast(usize)(length-begin) || written > 16777216 { return Failure("Metadata sidecar has invalid text") }
+            text = TextFromBytes(BytesFromPointer(converted,cast(u64)written))
+        }
+        if !ValidJSON(database,text) { return Failure("Metadata sidecar must contain a valid JSON object") }
+        capture := CaptureTime(database,text); captureValue: [64]u8; unused Metadata.Format(capture.value,captureValue[:])
+        seconds := opened.data.modified.seconds
+        if seconds < -9223372036 || seconds > 9223372035 { return Failure("Metadata sidecar time exceeds its limit") }
+        nanos := seconds*1000000000+cast(s64)opened.data.modified.nanos
+        stamp: Vec(u8); BuilderPrint(*stamp,"%:%:%",candidate,opened.data.size,nanos)
+        out: Vec(u8); BuilderPrint(*out,"{\"metadata\":%,\"stamp\":",Minified(text)); Json.Quoted(*out,BuilderFinish(stamp))
+        BuilderPrint(*out,",\"capture_mode\":%,\"capture_value\":%}\n",capture.mode,TextFromCString(*captureValue[0]))
+        return Send(BuilderFinish(out))
+    }
+    return Send("{\"metadata\":{},\"stamp\":\"\",\"capture_mode\":0,\"capture_value\":0}\n")
+}
+Sidecar :: (database: *void, path: string) -> bool {
+    split: s32 = -1; for i: 0..path.count-1 { if path[i] == 47 { split = cast(s32)i } }
+    if split < 0 { return Failure("Choose an absolute original path") }
+    base := path[:split]; name := Suffix(path[split+1:])
+    candidates: [3]string = .{Join(Join(base,"metadata"),name),Join(Join(base,".meta"),name),Join(base,name)}
+    return Documents(database,candidates[:],4194304)
+}
+CameraFields :: (path: string, fallback: float64, capture: Capture) -> bool {
+    opened := Open(path); if !opened.valid { return Failure("Cannot read the original camera metadata") }; defer { unused CloseFD(opened.fd) }
+    // Codec header queries use this exact descriptor's file, including when
+    // its original path has been renamed or replaced during a read.
+    descriptor: Vec(u8); BuilderPrint(*descriptor,"/proc/self/fd/%",opened.fd)
+    fileName: [64]u8; unused CopyCString(BuilderFinish(descriptor),fileName[:])
+    info := Camera.Extract(.{opened.fd,0,cast(s64)opened.data.size,null},*fileName[0])
+    after: StatData; empty: [1]u8
+    if Stat(opened.fd,*empty[0],4096,577,*after) != 0 || after.size != opened.data.size ||
+        after.modified.seconds != opened.data.modified.seconds || after.modified.nanos != opened.data.modified.nanos {
+        return Failure("Original camera metadata changed while reading")
+    }
+    chosen := ifx capture.mode == 1 then capture.value else ifx capture.mode == 2 then fallback else ifx info.hasTaken then info.taken else fallback
+    taken: [64]u8; if !Metadata.Format(chosen,taken[:]) { return Failure("Cannot read the capture time") }
+    out: Vec(u8); BuilderPrint(*out,"{\"taken\":%,\"width\":%,\"height\":%,\"gps\":",TextFromCString(*taken[0]),info.width,info.height)
+    if info.gps {
+        latitude: [64]u8; longitude: [64]u8
+        if !Metadata.Format(info.latitude,latitude[:]) || !Metadata.Format(info.longitude,longitude[:]) { return Failure("Cannot read the camera location") }
+        BuilderPrint(*out,"{\"latitude\":%,\"longitude\":%}",TextFromCString(*latitude[0]),TextFromCString(*longitude[0]))
+    } else { BuilderPrint(*out,"null") }
+    BuilderPrint(*out,"}\n"); return Send(BuilderFinish(out))
+}
+main :: () -> s32 {
+    database: *void
+    if SqliteOpenText(":memory:",*database,SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE) != SQLITE_OK { unused Failure("Cannot prepare metadata validation"); return 1 }
+    defer { unused SqliteClose(database) }
+    while true {
+        input: [32769]u8; length := Line(input[:]); if length == 0 { return 0 }
+        if length < 0 { unused Failure("Metadata request exceeds its limit"); return 1 }
+        request := TextFromBytes(input[:length]); path: [4096]u8; action: [16]u8
+        pathLength := ReadStringText(request,FieldAt(request,0,"path"),path[:])
+        if request[0] != 123 || Space(request,ValueEnd(request,0,0)) != length || pathLength < 1 || path[0] != 47 ||
+            ReadStringText(request,FieldAt(request,0,"operation"),action[:]) < 1 {
+            if !Failure("Choose a valid metadata request") { return 1 }; continue
+        }
+        embedded: bool; for i: 0..pathLength-1 { if path[i] == 0 { embedded = true } }
+        if embedded { if !Failure("Choose a path without an embedded NUL") { return 1 }; continue }
+        name := TextFromCString(*path[0]); operation := TextFromCString(*action[0])
+        if operation == "sidecar" { if !Sidecar(database,name) { return 1 } }
+        else if operation == "album" {
+            candidates: [1]string = .{name}; if !Documents(database,candidates[:],16384) { return 1 }
+        }
+        else if operation == "camera" {
+            number := ReadNumber(request,FieldAt(request,0,"fallback"))
+            if !number.valid { if !Failure("Choose a valid capture-time fallback") { return 1 }; continue }
+            mode := ReadNumber(request,FieldAt(request,0,"capture_mode")); value := ReadNumber(request,FieldAt(request,0,"capture_value")); capture: Capture
+            if mode.valid {
+                if (mode.value != 0.0 && mode.value != 1.0 && mode.value != 2.0) || mode.value == 1.0 && (!value.valid || value.value <= 0.0 || value.value >= 32503680000.0) {
+                    if !Failure("Choose valid capture metadata") { return 1 }; continue
+                }
+                capture.mode = cast(s32)mode.value; capture.value = value.value
+            }
+            if !CameraFields(name,number.value,capture) { return 1 }
+        } else if !Failure("Unknown metadata operation") { return 1 }
+    }
+}

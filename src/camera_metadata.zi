@@ -1,0 +1,263 @@
+// Bounded camera fields from TIFF/Exif containers. Pixels and original bytes
+// remain untouched; unknown camera fields remain in the unchanged original.
+#import "std/byte_text_linux"
+c :: #system_library "c";
+Pread :: (fd: s32, data: *u8, count: usize, offset: s64) -> s64 #foreign c "pread";
+Allocate :: (count: usize) -> *void #foreign c "malloc";
+Release :: (data: *void) #foreign c "free";
+glib :: #system_library "glib-2.0";
+NewUTC :: () -> *void #foreign glib "g_time_zone_new_utc";
+FreeZone :: (zone: *void) #foreign glib "g_time_zone_unref";
+NewDate :: (text: *u8, zone: *void) -> *void #foreign glib "g_date_time_new_from_iso8601";
+FreeDate :: (date: *void) #foreign glib "g_date_time_unref";
+UnixDate :: (date: *void) -> s64 #foreign glib "g_date_time_to_unix";
+Microseconds :: (date: *void) -> s32 #foreign glib "g_date_time_get_microsecond";
+pixbuf :: #system_library "gdk_pixbuf-2.0";
+FileInfo :: (path: *u8, width: *s32, height: *s32) -> *void #foreign pixbuf "gdk_pixbuf_get_file_info";
+heif :: #system_library "heif";
+Error :: struct { code: s32; subcode: s32; message: *u8 }
+Context :: () -> *void #foreign heif "heif_context_alloc";
+FreeContext :: (context: *void) #foreign heif "heif_context_free";
+ReadHEIF :: (context: *void, path: *u8, options: *void) -> Error #foreign heif "heif_context_read_from_file";
+Primary :: (context: *void, handle: **void) -> Error #foreign heif "heif_context_get_primary_image_handle";
+ReleaseHandle :: (handle: *void) #foreign heif "heif_image_handle_release";
+HandleWidth :: (handle: *void) -> s32 #foreign heif "heif_image_handle_get_width";
+HandleHeight :: (handle: *void) -> s32 #foreign heif "heif_image_handle_get_height";
+MetadataCount :: (handle: *void, filter: *u8) -> s32 #foreign heif "heif_image_handle_get_number_of_metadata_blocks";
+MetadataIDs :: (handle: *void, filter: *u8, ids: *u32, count: s32) -> s32 #foreign heif "heif_image_handle_get_list_of_metadata_block_IDs";
+MetadataSize :: (handle: *void, id: u32) -> usize #foreign heif "heif_image_handle_get_metadata_size";
+ReadMetadata :: (handle: *void, id: u32, data: *u8) -> Error #foreign heif "heif_image_handle_get_metadata";
+Source :: struct { fd: s32; base: s64; length: s64; memory: *u8 }
+Info :: struct { width: s32; height: s32; taken: float64; latitude: float64; longitude: float64; gps: bool; hasTaken: bool }
+Range :: (source: Source, offset: s64, bytes: []u8) -> bool {
+    if offset < 0 || cast(s64)bytes.count > source.length || offset > source.length-cast(s64)bytes.count { return false }
+    if bytes.count == 0 { return true }
+    if source.memory != null {
+        for i: 0..bytes.count-1 { bytes[i] = source.memory[source.base+offset+i] }; return true
+    }
+    count: s64
+    while count < cast(s64)bytes.count {
+        read := Pread(source.fd,*bytes[count],cast(usize)(cast(s64)bytes.count-count),source.base+offset+count)
+        if read <= 0 { return false }; count += read
+    }
+    return true
+}
+Number :: (bytes: []u8, little: bool) -> u64 {
+    value: u64
+    if little { for i: 0..bytes.count-1 { value |= cast(u64)bytes[i] << cast(u64)(i*8) } }
+    else { for byte: bytes { value = (value << 8) | cast(u64)byte } }
+    return value
+}
+Header :: struct { source: Source; little: bool; big: bool; root: s64; valid: bool }
+Tiff :: (source: Source) -> Header {
+    result: Header; result.source = source; bytes: [16]u8
+    if !Range(source,0,bytes[:8]) { return result }
+    if bytes[0] == 73 && bytes[1] == 73 { result.little = true }
+    else if bytes[0] != 77 || bytes[1] != 77 { return result }
+    magic := Number(bytes[2:4],result.little)
+    if magic == 42 { result.root = cast(s64)Number(bytes[4:8],result.little) }
+    else if magic == 43 {
+        if Number(bytes[4:6],result.little) != 8 || Number(bytes[6:8],result.little) != 0 || !Range(source,8,bytes[8:16]) { return result }
+        root := Number(bytes[8:16],result.little); if root > 9223372036854775807 { return result }
+        result.root = cast(s64)root; result.big = true
+    } else { return result }
+    result.valid = result.root > 0 && result.root < source.length; return result
+}
+Field :: struct { type: u64; count: u64; offset: s64; valid: bool }
+Find :: (header: Header, ifd: s64, wanted: u64) -> Field {
+    result: Field; bytes: [20]u8; size := ifx header.big then 8 else 2; step := ifx header.big then 20 else 12
+    if !header.valid || ifd <= 0 || !Range(header.source,ifd,bytes[:size]) { return result }
+    count := Number(bytes[:size],header.little); if count > 4096 { return result }
+    if ifd > header.source.length-size || cast(s64)count > (header.source.length-ifd-size)/step { return result }
+    for i: 0..cast(s64)count-1 {
+        at := ifd+size+i*step
+        if !Range(header.source,at,bytes[:step]) { return .{} }
+        if Number(bytes[:2],header.little) != wanted { continue }
+        if result.valid { return .{} } // Ambiguous duplicate tags are not camera facts.
+        result.type = Number(bytes[2:4],header.little)
+        result.count = Number(bytes[4:ifx header.big then 12 else 8],header.little)
+        unit: u64
+        if result.type == 1 || result.type == 2 || result.type == 7 { unit = 1 }
+        if result.type == 3 { unit = 2 }; if result.type == 4 { unit = 4 }
+        if result.type == 5 || result.type == 16 || result.type == 18 { unit = 8 }
+        if unit == 0 || result.count == 0 || result.count > 16777216/unit { return .{} }
+        length := result.count*unit; inlineSize := ifx header.big then 8 else 4
+        if length <= cast(u64)inlineSize { result.offset = at+step-inlineSize }
+        else {
+            offset := Number(bytes[step-inlineSize:step],header.little)
+            if offset > 9223372036854775807 { return .{} }; result.offset = cast(s64)offset
+        }
+        if result.offset < 0 || cast(s64)length > header.source.length || result.offset > header.source.length-cast(s64)length { return .{} }
+        result.valid = true
+    }
+    return result
+}
+Unsigned :: (header: Header, field: Field) -> s64 {
+    if !field.valid || field.count != 1 { return -1 }
+    size: s32
+    if field.type == 3 { size = 2 }; if field.type == 4 { size = 4 }; if field.type == 16 || field.type == 18 { size = 8 }
+    bytes: [8]u8; if size == 0 || !Range(header.source,field.offset,bytes[:size]) { return -1 }
+    value := Number(bytes[:size],header.little); return ifx value <= 9223372036854775807 then cast(s64)value else -1
+}
+Capture :: struct { taken: float64; valid: bool }
+TextField :: (header: Header, field: Field, bytes: []u8) -> s32 {
+    if !field.valid || field.type != 2 || field.count > cast(u64)bytes.count || !Range(header.source,field.offset,bytes[:cast(s32)field.count]) { return 0 }
+    length := cast(s32)field.count
+    while length > 0 && bytes[length-1] == 0 { length -= 1 }
+    for i: 0..length-1 { if bytes[i] == 0 { return 0 } }; return length
+}
+Date :: (header: Header, field: Field, offset: Field, fraction: Field) -> Capture {
+    result: Capture
+    if !field.valid || field.type != 2 || field.count < 19 || field.count > 128 { return result }
+    bytes: [129]u8
+    if !Range(header.source,field.offset,bytes[:cast(s32)field.count]) { return result }
+    if bytes[4] != 58 || bytes[7] != 58 || bytes[10] != 32 || bytes[13] != 58 || bytes[16] != 58 { return result }
+    for i: 0..18 { if i != 4 && i != 7 && i != 10 && i != 13 && i != 16 && (bytes[i] < 48 || bytes[i] > 57) { return result } }
+    for i: 19..cast(s32)field.count-1 { if bytes[i] != 0 { return result } }
+    bytes[4] = 45; bytes[7] = 45; at: s32 = 19
+    subseconds: [16]u8; length := TextField(header,fraction,subseconds[:]); digits := length > 0 && length <= 9
+    for i: 0..length-1 { if subseconds[i] < 48 || subseconds[i] > 57 { digits = false } }
+    if digits { bytes[at] = 46; at += 1; for i: 0..length-1 { bytes[at] = subseconds[i]; at += 1 } }
+    zoneText: [16]u8; length = TextField(header,offset,zoneText[:])
+    validZone := length == 6 && (zoneText[0] == 43 || zoneText[0] == 45) && zoneText[3] == 58
+    for i: 1..5 { if i != 3 && (zoneText[i] < 48 || zoneText[i] > 57) { validZone = false } }
+    if validZone && ((zoneText[1]-48)*10+zoneText[2]-48 > 23 || (zoneText[4]-48)*10+zoneText[5]-48 > 59) { validZone = false }
+    if validZone { for i: 0..5 { bytes[at] = zoneText[i]; at += 1 } }
+    else { bytes[at] = 90; at += 1 }; bytes[at] = 0
+    zone := NewUTC(); if zone == null { return result }; defer { FreeZone(zone) }
+    date := NewDate(*bytes[0],zone); if date == null { return result }; defer { FreeDate(date) }
+    result.taken = cast(float64)UnixDate(date)+cast(float64)Microseconds(date)/1000000.0; result.valid = true; return result
+}
+Coordinate :: struct { value: float64; valid: bool }
+Degrees :: (header: Header, reference: Field, values: Field, positive: u8, negative: u8, maximum: float64) -> Coordinate {
+    result: Coordinate; ref: [2]u8
+    if !reference.valid || reference.type != 2 || reference.count != 2 || !values.valid || values.type != 5 || values.count != 3 ||
+        !Range(header.source,reference.offset,ref[:]) || ref[1] != 0 || (ref[0] != positive && ref[0] != negative) { return result }
+    parts: [3]float64; bytes: [24]u8; if !Range(header.source,values.offset,bytes[:]) { return result }
+    for i: 0..2 {
+        numerator := Number(bytes[i*8:i*8+4],header.little); denominator := Number(bytes[i*8+4:i*8+8],header.little)
+        if denominator == 0 { return result }; parts[i] = cast(float64)numerator/cast(float64)denominator
+    }
+    if parts[1] >= 60.0 || parts[2] >= 60.0 { return result }
+    value := parts[0]+parts[1]/60.0+parts[2]/3600.0; if value > maximum { return result }
+    result.value = ifx ref[0] == negative then -value else value; result.valid = true; return result
+}
+ReadTiff :: (source: Source, info: *Info) {
+    header := Tiff(source); if !header.valid { return }
+    if info.width == 0 && info.height == 0 {
+        width := Unsigned(header,Find(header,header.root,256)); height := Unsigned(header,Find(header,header.root,257))
+        if width > 0 && width <= 2147483647 && height > 0 && height <= 2147483647 { info.width = cast(s32)width; info.height = cast(s32)height }
+    }
+    date := Find(header,header.root,36867); scope := header.root; originalDate := date.valid
+    exif := Unsigned(header,Find(header,header.root,34665))
+    if exif > 0 { original := Find(header,exif,36867); if original.valid { date = original; scope = exif; originalDate = true } }
+    if !date.valid { date = Find(header,header.root,306); originalDate = false }
+    offset := Find(header,scope,ifx originalDate then cast(u64)36881 else cast(u64)36880)
+    fraction := Find(header,scope,ifx originalDate then cast(u64)37521 else cast(u64)37520)
+    if !originalDate && exif > 0 {
+        if !offset.valid { offset = Find(header,exif,36880) }; if !fraction.valid { fraction = Find(header,exif,37520) }
+    }
+    capture := Date(header,date,offset,fraction); info.taken = capture.taken; info.hasTaken = capture.valid
+    gps := Unsigned(header,Find(header,header.root,34853)); if gps <= 0 { return }
+    latitude := Degrees(header,Find(header,gps,1),Find(header,gps,2),78,83,90.0)
+    longitude := Degrees(header,Find(header,gps,3),Find(header,gps,4),69,87,180.0)
+    if latitude.valid && longitude.valid { info.latitude = latitude.value; info.longitude = longitude.value; info.gps = true }
+}
+Packet :: (source: Source, info: *Info) {
+    bytes: [6]u8
+    if Range(source,0,bytes[:]) && bytes[0] == 69 && bytes[1] == 120 && bytes[2] == 105 && bytes[3] == 102 && bytes[4] == 0 && bytes[5] == 0 {
+        source.base += 6; source.length -= 6
+    }
+    ReadTiff(source,info)
+}
+JPEG :: (source: Source, info: *Info) {
+    at: s64 = 2; bytes: [4]u8; segments: s32
+    while at < source.length && segments < 4096 {
+        segments += 1; if !Range(source,at,bytes[:2]) || bytes[0] != 255 { return }
+        at += 1; padding: s32
+        while bytes[1] == 255 { padding += 1; if padding > 1024 || !Range(source,at,bytes[:2]) { return }; at += 1 }
+        marker := bytes[1]; at += 1
+        if marker == 218 || marker == 217 { return }
+        if marker == 216 || marker == 1 || marker >= 208 && marker <= 215 { continue }
+        if !Range(source,at,bytes[:2]) { return }; length := cast(s64)Number(bytes[:2],false)
+        if length < 2 || length > source.length-at { return }
+        if marker == 225 {
+            signature: [6]u8
+            if length >= 8 && Range(source,at+2,signature[:]) && TextFromBytes(signature[:]) == "Exif\0\0" {
+                Packet(.{source.fd,source.base+at+2,length-2,source.memory},info); return
+            }
+        }
+        at += length
+    }
+}
+PNG :: (source: Source, info: *Info) {
+    at: s64 = 8; bytes: [8]u8; chunks: s32
+    while at < source.length && chunks < 65536 {
+        chunks += 1; if !Range(source,at,bytes[:]) { return }
+        length := cast(s64)Number(bytes[:4],false); if length > source.length-at-12 { return }
+        type := TextFromBytes(bytes[4:8]); if type == "IEND" { return }
+        if type == "eXIf" {
+            if length < 8 || length > 4194304 { return }
+            // Verify the metadata chunk's CRC without allocating the pixel data.
+            crc: u32 = 4294967295; buffer: [4096]u8; offset := at+4; left := length+4
+            while left > 0 {
+                count := cast(s32)(ifx left > 4096 then 4096 else left)
+                if !Range(source,offset,buffer[:count]) { return }
+                for i: 0..count-1 { crc ^= cast(u32)buffer[i]; for bit: 0..7 { crc = (crc >> 1) ^ (ifx (crc & 1) != 0 then cast(u32)3988292384 else cast(u32)0) } }
+                offset += count; left -= count
+            }
+            check: [4]u8; if !Range(source,at+8+length,check[:]) || cast(u64)(crc ^ 4294967295) != Number(check[:],false) { return }
+            Packet(.{source.fd,source.base+at+8,length,source.memory},info); return
+        }
+        at += length+12
+    }
+}
+WEBP :: (source: Source, info: *Info) {
+    bytes: [8]u8; if !Range(source,4,bytes[:4]) { return }
+    limit := cast(s64)Number(bytes[:4],true)+8; if limit > source.length || limit < 12 { return }
+    at: s64 = 12; chunks: s32
+    while at < limit && chunks < 65536 {
+        chunks += 1; if !Range(source,at,bytes[:]) { return }
+        length := cast(s64)Number(bytes[4:8],true); if length > limit-at-8 { return }
+        type := TextFromBytes(bytes[:4])
+        if type == "EXIF" { if length <= 4194304 { Packet(.{source.fd,source.base+at+8,length,source.memory},info) }; return }
+        if info.width == 0 && info.height == 0 {
+            data: [10]u8
+            if length >= 10 && Range(source,at+8,data[:]) {
+                if type == "VP8X" { info.width = 1+cast(s32)Number(data[4:7],true); info.height = 1+cast(s32)Number(data[7:10],true) }
+                if type == "VP8 " && data[3] == 157 && data[4] == 1 && data[5] == 42 { info.width = cast(s32)Number(data[6:8],true) & 16383; info.height = cast(s32)Number(data[8:10],true) & 16383 }
+            }
+            if type == "VP8L" && length >= 5 && Range(source,at+8,data[:5]) && data[0] == 47 {
+                info.width = 1+cast(s32)data[1]+((cast(s32)data[2] & 63) << 8)
+                info.height = 1+(cast(s32)data[2] >> 6)+(cast(s32)data[3] << 2)+((cast(s32)data[4] & 15) << 10)
+            }
+        }
+        at += 8+length+(length%2)
+    }
+}
+HEIF :: (path: *u8, info: *Info) {
+    context := Context(); if context == null { return }; defer { FreeContext(context) }
+    error := ReadHEIF(context,path,null); if error.code != 0 { return }
+    handle: *void; error = Primary(context,*handle)
+    if error.code != 0 || handle == null { return }; defer { ReleaseHandle(handle) }
+    info.width = HandleWidth(handle); info.height = HandleHeight(handle)
+    filter: [5]u8 = .{69,120,105,102,0}; count := MetadataCount(handle,*filter[0]); if count != 1 { return }
+    identity: u32; if MetadataIDs(handle,*filter[0],*identity,1) != 1 { return }
+    length := MetadataSize(handle,identity); if length < 12 || length > 4194304 { return }
+    storage := Allocate(length); if storage == null { return }; defer { Release(storage) }
+    error = ReadMetadata(handle,identity,cast(*u8)storage); if error.code != 0 { return }
+    bytes := BytesFromPointer(cast(*u8)storage,cast(u64)length); offset := Number(bytes[:4],false)
+    if offset > cast(u64)length-12 { return }
+    Packet(.{-1,cast(s64)offset+4,cast(s64)length-cast(s64)offset-4,cast(*u8)storage},info)
+}
+Extract :: (source: Source, path: *u8) -> Info {
+    result: Info; unused FileInfo(path,*result.width,*result.height)
+    if result.width < 0 || result.height < 0 { result.width = 0; result.height = 0 }
+    bytes: [12]u8; if !Range(source,0,bytes[:]) { return result }
+    if bytes[0] == 255 && bytes[1] == 216 { JPEG(source,*result) }
+    else if bytes[0] == 137 && bytes[1] == 80 && bytes[2] == 78 && bytes[3] == 71 && bytes[4] == 13 && bytes[5] == 10 && bytes[6] == 26 && bytes[7] == 10 { PNG(source,*result) }
+    else if TextFromBytes(bytes[:4]) == "RIFF" && TextFromBytes(bytes[8:12]) == "WEBP" { WEBP(source,*result) }
+    else if TextFromBytes(bytes[4:8]) == "ftyp" { HEIF(path,*result) }
+    else { ReadTiff(source,*result) }
+    if result.width < 0 || result.height < 0 { result.width = 0; result.height = 0 }; return result
+}

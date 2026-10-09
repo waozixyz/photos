@@ -1,8 +1,10 @@
 """Compatibility adapter for native immutable-original import."""
 import json
+import math
 import os
 from pathlib import Path
 import re
+import select
 import subprocess
 import tempfile
 
@@ -34,6 +36,130 @@ def folder_program():
     if helper is None:
         raise LibraryError('Build or install Photos folder discovery before importing photos')
     return helper
+
+
+def metadata_reader_program():
+    root = Path(__file__).resolve().parents[1]
+    paths = [root/'read_metadata', root/'build/read-metadata/read_metadata']
+    helper = next((path for path in paths if path.is_file()), None)
+    if helper is None:
+        raise LibraryError('Build or install Photos metadata reading before importing photos')
+    return helper
+
+
+class Reader:
+    """One supervised native reader per import batch, with bounded responses."""
+    def __init__(self):
+        self.child = None
+        self.capture_path = None
+        self.capture = {}
+
+    def __enter__(self):
+        environment = {key: value for key, value in os.environ.items() if key not in {
+            'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS', 'SESSION_MANAGER'}}
+        try:
+            self.child = subprocess.Popen(['prlimit', '--as=536870912', '--', str(metadata_reader_program())],
+                env=environment, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, bufsize=0)
+        except OSError:
+            raise LibraryError('Metadata reading could not start; retry the import') from None
+        return self
+
+    def __exit__(self, *unused):
+        if self.child is None:
+            return
+        child, self.child = self.child, None
+        child.stdin.close()
+        try:
+            child.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            child.terminate()
+            try:
+                child.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                child.kill(); child.wait(timeout=2)
+        child.stdout.close()
+
+    def request(self, operation, path, fallback=None):
+        if self.child is None:
+            raise LibraryError('Metadata reader is not open')
+        if self.child.poll() is not None:
+            self.__exit__(); self.__enter__()
+        request = dict(operation=operation, path=str(Path(path).absolute()))
+        if fallback is not None:
+            request['fallback'] = fallback
+        if operation == 'camera' and self.capture_path == request['path']:
+            request.update(self.capture)
+        data = packed(request).encode()+b'\n'
+        if len(data) > 32768:
+            raise LibraryError('Metadata request exceeds its limit')
+        try:
+            at = 0
+            while at < len(data):
+                written = self.child.stdin.write(data[at:])
+                if not written:
+                    raise OSError()
+                at += written
+            # Unbuffered reads prevent a ready descriptor from hiding bytes in
+            # a Python buffer. A stalled codec is cancelled by this request's
+            # deadline rather than holding an import indefinitely.
+            import time
+            deadline = time.monotonic()+20
+            result = bytearray()
+            while len(result) <= 16*1024*1024:
+                left = deadline-time.monotonic()
+                if left <= 0 or not select.select([self.child.stdout], [], [], left)[0]:
+                    self.child.kill(); self.child.wait(timeout=2)
+                    raise LibraryError('Metadata reading timed out; retry the import')
+                block = os.read(self.child.stdout.fileno(), 65536)
+                if not block:
+                    raise LibraryError('Metadata reader stopped; retry the import')
+                result.extend(block)
+                if len(result) > 16*1024*1024:
+                    self.child.kill(); self.child.wait(timeout=2)
+                    raise LibraryError('Metadata response exceeds its limit')
+                if b'\n' in block:
+                    if not result.endswith(b'\n') or result.count(b'\n') != 1:
+                        raise LibraryError('Metadata reader returned an invalid response')
+                    break
+            else:
+                self.child.kill(); self.child.wait(timeout=2)
+                raise LibraryError('Metadata response exceeds its limit')
+            response = json.loads(result)
+        except (OSError, ValueError) as error:
+            if isinstance(error, LibraryError):
+                raise
+            raise LibraryError('Metadata reading could not finish; retry the import') from None
+        if not isinstance(response, dict):
+            raise LibraryError('Metadata reader returned an invalid response')
+        if response.get('error'):
+            raise LibraryError(response['error'])
+        return response
+
+
+def sidecar(path, reader):
+    reader.capture_path = None; reader.capture = {}
+    response = reader.request('sidecar', path)
+    if not isinstance(response.get('metadata'), dict) or not isinstance(response.get('stamp'), str) or type(response.get('capture_mode')) is not int or response['capture_mode'] not in (0, 1, 2) or type(response.get('capture_value')) not in {int, float} or not math.isfinite(response['capture_value']):
+        raise LibraryError('Metadata reader returned an invalid sidecar')
+    reader.capture_path = str(Path(path).absolute())
+    reader.capture = {key: response[key] for key in ('capture_mode', 'capture_value')}
+    return response['metadata'], response['stamp']
+
+
+def camera(path, fallback, reader):
+    response = reader.request('camera', path, fallback)
+    gps = response.get('gps')
+    if not all(type(response.get(key)) is int and 0 <= response[key] <= 2147483647 for key in ['width', 'height']) or type(response.get('taken')) not in {int, float} or not math.isfinite(response['taken']) or 'gps' not in response or gps is not None and (not isinstance(gps, dict) or any(type(gps.get(key)) not in {int, float} or not math.isfinite(gps[key]) or abs(gps[key]) > limit for key, limit in [('latitude', 90), ('longitude', 180)])):
+        raise LibraryError('Metadata reader returned invalid camera fields')
+    return response
+
+
+def album_metadata(path, reader):
+    response = reader.request('album', path)
+    if not isinstance(response.get('metadata'), dict) or not isinstance(response.get('stamp'), str):
+        raise LibraryError('Metadata reader returned invalid album metadata')
+    return response['metadata'] if response['stamp'] else None
 
 
 def walk(root):

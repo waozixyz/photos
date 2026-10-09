@@ -1,7 +1,6 @@
 """A merged, content-addressed library. Imported folders are always read-only."""
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
 import shutil
@@ -49,26 +48,6 @@ def digest_file(path):
         for block in iter(lambda: source.read(4 * 1024 * 1024), b''):
             value.update(block)
     return value.hexdigest()
-
-
-def exif_location(exif):
-    """Read camera GPS without fabricating (0, 0) for absent coordinates."""
-    try:
-        gps = exif.get_ifd(34853)
-        def degrees(value, reference, positive, negative, maximum):
-            if reference not in (positive, negative) or len(value) != 3:
-                raise ValueError('Invalid GPS coordinate')
-            parts = [float(v) for v in value]
-            if not all(math.isfinite(v) and v >= 0 for v in parts) or parts[1] >= 60 or parts[2] >= 60:
-                raise ValueError('Invalid GPS coordinate')
-            coordinate = parts[0] + parts[1] / 60 + parts[2] / 3600
-            if coordinate > maximum:
-                raise ValueError('Invalid GPS coordinate')
-            return -coordinate if reference == negative else coordinate
-        return dict(latitude=degrees(gps[2], gps[1], 'N', 'S', 90),
-                    longitude=degrees(gps[4], gps[3], 'E', 'W', 180))
-    except (AttributeError, KeyError, TypeError, ValueError, ZeroDivisionError, OverflowError):
-        return None
 
 
 class Library:
@@ -149,6 +128,7 @@ class Library:
                 if 'birth' not in {row[1] for row in self.db.execute('PRAGMA table_info(people)')}:
                     self.db.execute("ALTER TABLE people ADD COLUMN birth TEXT NOT NULL DEFAULT ''")
         self.import_album_names = {}
+        self.import_reader = None
         if not self.setting('album_catalog_migrated', False):
             with self.db:
                 self.db.execute('BEGIN IMMEDIATE')
@@ -224,22 +204,24 @@ class Library:
             return
 
     def sidecar(self, path):
-        candidates = [path.parent / 'metadata' / (path.name + '.json'),
-                      path.parent / '.meta' / (path.name + '.json'),
-                      path.with_name(path.name + '.json')]
-        for candidate in candidates:
-            if candidate.is_file():
-                stat = candidate.stat()
-                stamp = f'{candidate}:{stat.st_size}:{stat.st_mtime_ns}'
-                if stat.st_size > 4 * 1024 * 1024:
-                    raise ValueError('Metadata sidecar is too large')
-                value = json.loads(candidate.read_bytes())
-                if not isinstance(value, dict):
-                    raise ValueError('Metadata sidecar must be an object')
-                return value, stamp
-        return {}, ''
+        from . import importing
+        if self.import_reader is None:
+            with importing.Reader() as reader:
+                return importing.sidecar(path, reader)
+        return importing.sidecar(path, self.import_reader)
 
     def import_file(self, path, source_root):
+        if self.import_reader is None:
+            from . import importing
+            with importing.Reader() as reader:
+                self.import_reader = reader
+                try:
+                    return self._import_file(path, source_root)
+                finally:
+                    self.import_reader = None
+        return self._import_file(path, source_root)
+
+    def _import_file(self, path, source_root):
         path = Path(path)
         if path.is_symlink() or path.suffix.lower() not in IMAGES | VIDEOS:
             return 'skipped'
@@ -264,29 +246,20 @@ class Library:
                 motion.detect(self, cached['photo_id'], unchanged=True)
             except LibraryError:
                 return 'warning'
-            return 'unchanged'
+            return 'warning' if warning else 'unchanged'
         photo_id = digest_file(path)
         existing = self.db.execute('SELECT * FROM photos WHERE id=?', (photo_id,)).fetchone()
         taken, width, height = stat.st_mtime, 0, 0
-        if path.suffix.lower() in IMAGES:
-            try:
-                with Image.open(path) as image:
-                    width, height = image.size
-                    exif = image.getexif()
-                    gps = exif_location(exif)
-                    if gps is not None and 'geoDataExif' not in metadata:
-                        metadata['geoDataExif'] = gps
-                    date = exif.get(36867) or exif.get(306)
-                    if date:
-                        taken = datetime.strptime(str(date), '%Y:%m:%d %H:%M:%S').replace(tzinfo=timezone.utc).timestamp()
-            except (OSError, ValueError, UnidentifiedImageError):
-                pass
         try:
-            taken = float(metadata.get('photoTakenTime', {}).get('timestamp', taken))
-            if not (0 < taken < 32503680000):
-                taken = stat.st_mtime
-        except (TypeError, ValueError, AttributeError):
-            taken = stat.st_mtime
+            from . import importing
+            fields = importing.camera(path, taken, self.import_reader)
+            taken = fields['taken']
+            if path.suffix.lower() in IMAGES:
+                width, height = fields['width'], fields['height']
+                if fields['gps'] is not None and 'geoDataExif' not in metadata:
+                    metadata['geoDataExif'] = fields['gps']
+        except LibraryError:
+            warning = True
         relative = path.relative_to(source_root)
         album = self.import_album_names.get(str(path.parent), str(relative.parent) if relative.parent != Path('.') else source_root.name)
         if not existing:
@@ -387,6 +360,17 @@ class Library:
         return 'warning' if warning else ('merged' if existing else 'added')
 
     def import_folders(self, folders):
+        if self.import_reader is None:
+            from . import importing
+            with importing.Reader() as reader:
+                self.import_reader = reader
+                try:
+                    return self._import_folders(folders)
+                finally:
+                    self.import_reader = None
+        return self._import_folders(folders)
+
+    def _import_folders(self, folders):
         result = dict(added=0, merged=0, unchanged=0, skipped=0, warning=0, errors=0)
         failures = []
         for folder in folders:
@@ -399,12 +383,11 @@ class Library:
                     result['errors'] += 1
                     failures.append(dict(path=str(path), error='FolderDiscoveryError'))
                     continue
-                album_sidecar = path / '.photos-album.json'
-                if kind == 'directory' and album_sidecar.is_file() and not album_sidecar.is_symlink():
+                if kind == 'directory':
                     try:
-                        if album_sidecar.stat().st_size > 16384:
-                            raise LibraryError('Album metadata is too large')
-                        info = json.loads(album_sidecar.read_bytes())
+                        info = importing.album_metadata(path/'.photos-album.json', self.import_reader)
+                        if info is None:
+                            continue
                         name = self.album_name(info.get('name'))
                         description = info.get('description', '')
                         cover = info.get('cover', '')

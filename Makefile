@@ -1,6 +1,8 @@
 .DEFAULT_GOAL := build
-.PHONY: original-importer metadata-importer folder-importer
-folder-importer:
+.PHONY: original-importer metadata-importer folder-importer metadata-reader
+metadata-reader:
+	LDLIBS='-l:libsqlite3.so.0 -l:libheif.so.1 -lgdk_pixbuf-2.0 -lglib-2.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry read_metadata:main --exe -o build/read-metadata src/read_metadata.zi
+folder-importer: metadata-reader
 	$(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry import_folders:main --exe -o build/import-folders src/import_folders.zi
 metadata-importer: folder-importer
 	LDLIBS='-l:libsqlite3.so.0 -lglib-2.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry import_metadata:main --exe -o build/import-metadata src/import_metadata.zi

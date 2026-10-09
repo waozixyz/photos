@@ -375,13 +375,15 @@ class LibraryTest(unittest.TestCase):
         sidecar.write_text(sidecar.read_text() + ' ')
         other = Library(self.library.root)
         self.addCleanup(other.db.close)
-        opened = Image.open
+        from photos import importing
+        camera = importing.camera
         def during_read(*args, **kwargs):
             other.edit(photo_id, 'taken', '2024-06-15')
             other.edit(photo_id, 'album_remove', 'Holiday')
-            return opened(*args, **kwargs)
-        with patch('photos.library.Image.open', side_effect=during_read):
+            return camera(*args, **kwargs)
+        with patch('photos.importing.camera', side_effect=during_read) as read:
             self.library.import_folders([path.parents[1]])
+        self.assertEqual(read.call_count, 1)
         self.assertEqual(self.library.query(album='Holiday')['count'], 0)
         self.assertEqual(self.library.details(photo_id)['taken'], '2024-06-15T00:00:00+00:00')
 

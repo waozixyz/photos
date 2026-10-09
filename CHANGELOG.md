@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.32
+
+- Preserve camera capture dates, fractional seconds, time-zone offsets and valid GPS locations when importing JPEG, PNG, WebP, TIFF and HEIC photos.
+- Retain historic camera dates through export and encrypted restore, including photos taken before 1970.
+- Read provider and album sidecars in Unicode encodings while keeping unknown metadata, complete captions and later library corrections.
+- Keep originals safe and report unreadable or malformed metadata; interrupted metadata reading can be retried without blocking the next import.
+
 ## 0.1.31
 
 - Discover source photos in a predictable order while excluding provider metadata folders and linked folders.

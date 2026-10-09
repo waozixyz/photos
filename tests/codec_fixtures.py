@@ -26,7 +26,7 @@ def dng(path, orientation=1):
     image.save(path, format='TIFF', tiffinfo=tags)
 
 
-def heic(path, orientation=1, xmp=None, codec=1):
+def heic(path, orientation=1, xmp=None, codec=1, exif=None):
     class Error(c.Structure):
         _fields_ = [('code', c.c_int), ('subcode', c.c_int), ('message', c.c_char_p)]
     class Options(c.Structure):
@@ -53,6 +53,7 @@ def heic(path, orientation=1, xmp=None, codec=1):
     encode = bind('heif_context_encode_image', Error, ptr, ptr, ptr, ptr, c.POINTER(ptr))
     write = bind('heif_context_write_to_file', Error, ptr, c.c_char_p)
     add_xmp = bind('heif_context_add_XMP_metadata', Error, ptr, ptr, ptr, c.c_int)
+    add_exif = bind('heif_context_add_exif_metadata', Error, ptr, ptr, ptr, c.c_int)
     release_image = bind('heif_image_release', None, ptr)
     release_encoder = bind('heif_encoder_release', None, ptr)
     release_handle = bind('heif_image_handle_release', None, ptr)
@@ -82,6 +83,9 @@ def heic(path, orientation=1, xmp=None, codec=1):
         if xmp is not None:
             metadata = c.create_string_buffer(xmp)
             check(add_xmp(context,handle,c.cast(metadata,ptr),len(xmp)))
+        if exif is not None:
+            metadata = c.create_string_buffer(exif)
+            check(add_exif(context,handle,c.cast(metadata,ptr),len(exif)))
         check(write(context, str(path).encode()))
     finally:
         if handle: release_handle(handle)

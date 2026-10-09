@@ -45,6 +45,12 @@ def main():
             parser.error('Install the signed Photos bundle through Harmony before registering its catalog entry')
     installed = args.prefix/'lib/photos'
     installed.mkdir(parents=True,exist_ok=True,mode=0o700)
+    metadata_reader = repo/'build/read-metadata/read_metadata'
+    if not metadata_reader.is_file():
+        parser.error('Build Photos metadata reading before installing')
+    shutil.copyfile(metadata_reader,installed/'read_metadata.next')
+    os.chmod(installed/'read_metadata.next',0o755)
+    os.replace(installed/'read_metadata.next',installed/'read_metadata')
     folder_importer = repo/'build/import-folders/import_folders'
     if not folder_importer.is_file():
         parser.error('Build Photos folder discovery before installing')
