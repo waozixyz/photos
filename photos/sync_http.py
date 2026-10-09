@@ -29,7 +29,7 @@ def route(path,method):
     return method in {'GET','PUT','HEAD'} and re.fullmatch('/api/v1/blobs/photos/'+HASH,path) is not None
 
 
-def frame(node,path,method='GET',body=None,headers=None,limit=LIMIT,timeout_ms=60000):
+def frame(node,path,method='GET',body=None,headers=None,limit=LIMIT,timeout_ms=60000,node_id=None):
     try:
         origin=urlsplit(node)
         if (origin.scheme!='http' or origin.hostname!='127.0.0.1' or not origin.port or
@@ -39,6 +39,12 @@ def frame(node,path,method='GET',body=None,headers=None,limit=LIMIT,timeout_ms=6
                 type(limit) is not int or not 0<=limit<=LIMIT or
                 type(timeout_ms) is not int or not 1<=timeout_ms<=60000): raise ValueError()
         body=b'' if body is None else body
+        pin=b''
+        if node_id is not None:
+            if (type(node_id) is not str or not re.fullmatch(HASH,node_id) or
+                    path!='/api/v1/node' or method!='GET' or headers or limit>1048576):
+                raise ValueError()
+            pin=bytes.fromhex(node_id)
         if len(body)>LIMIT or (method in {'GET','HEAD'} and body): raise ValueError()
         headers={} if headers is None else headers
         if type(headers) is not dict or len(headers)>5: raise ValueError()
@@ -48,13 +54,13 @@ def frame(node,path,method='GET',body=None,headers=None,limit=LIMIT,timeout_ms=6
             name=name.encode('ascii');value=value.encode('ascii')
             if len(value)>=8192 or any(b<32 or b>126 for b in value): raise ValueError()
             pairs.append(struct.pack('!HH',len(name),len(value))+name+value)
-        return struct.pack('!BBHHBIII',1,METHODS[method],origin.port,len(path_bytes),len(pairs),len(body),limit,timeout_ms)+path_bytes+b''.join(pairs)+body
+        return struct.pack('!BBHHBIII',2 if pin else 1,METHODS[method],origin.port,len(path_bytes),len(pairs),len(body),limit,timeout_ms)+pin+path_bytes+b''.join(pairs)+body
     except (ValueError,TypeError,KeyError,UnicodeError):
         raise ValueError('Invalid Photos loopback sync request') from None
 
 
-def request(node,path,method='GET',body=None,headers=None,limit=LIMIT,timeout_ms=60000):
-    data=frame(node,path,method,body,headers,limit,timeout_ms)
+def request(node,path,method='GET',body=None,headers=None,limit=LIMIT,timeout_ms=60000,node_id=None):
+    data=frame(node,path,method,body,headers,limit,timeout_ms,node_id)
     environment={k:v for k,v in os.environ.items() if k not in
                  {'DISPLAY','WAYLAND_DISPLAY','XAUTHORITY','DBUS_SESSION_BUS_ADDRESS','SESSION_MANAGER'}}
     try:
@@ -64,6 +70,12 @@ def request(node,path,method='GET',body=None,headers=None,limit=LIMIT,timeout_ms
         raise URLError('Photos local transport is unavailable; originals and keys were preserved') from None
     if result.returncode==3:
         raise ValueError('Local node response exceeded its safe limit')
+    if result.returncode==5:
+        raise ValueError('Malformed ThinkPad node policy; Photos refuses to sync')
+    if result.returncode==6:
+        raise ValueError('Node identity mismatch: Photos refuses to sync')
+    if result.returncode==7:
+        raise ValueError('Node has outward Photos replication; local-only sync refused')
     if result.returncode!=0 or result.stderr or len(result.stdout)<6:
         raise URLError('Photos local transport could not finish; originals and keys were preserved')
     status,size=struct.unpack('!HI',result.stdout[:6]);body=result.stdout[6:]
@@ -74,3 +86,7 @@ def request(node,path,method='GET',body=None,headers=None,limit=LIMIT,timeout_ms
     if status>=400:
         raise HTTPError(node+path,status,'Local Photos node request failed',{},io.BytesIO(body))
     return body
+
+
+def check_node(node,node_id):
+    request(node,'/api/v1/node',limit=1048576,node_id=node_id)

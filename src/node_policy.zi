@@ -1,0 +1,85 @@
+// Validate the pinned node and its Photos replication policy before any login.
+// Node JSON is bounded and checked before the Python adapter can interpret it.
+#import "std/json_scan"
+#import "std/text"
+#import "std/byte_text_linux"
+UTF8 :: #import "std/utf8";
+
+Fields :: (json: string, at: s32, names: []string, positions: []s32) -> bool {
+    if positions.count != names.count || at < 0 || at >= cast(s32)json.count || json[at] != 123 { return false }
+    for i: 0..cast(s32)names.count-1 { positions[i] = -1 }
+    cursor := Space(json,at+1)
+    while cursor < cast(s32)json.count && json[cursor] != 125 {
+        key := ReadString(json,cursor); if !key.valid { return false }
+        decoded: [257]u8; length := ReadStringText(json,cursor,decoded[:])
+        if length < 0 { return false }
+        name := TextFromBytes(decoded[:length])
+        cursor = Space(json,key.after)
+        if cursor >= cast(s32)json.count || json[cursor] != 58 { return false }
+        cursor = Space(json,cursor+1)
+        for i: 0..cast(s32)names.count-1 {
+            if name == names[i] {
+                if positions[i] >= 0 { return false }; positions[i] = cursor
+            }
+        }
+        cursor = Space(json,ValueEnd(json,cursor,0))
+        if cursor < 0 || cursor >= cast(s32)json.count { return false }
+        if json[cursor] == 125 { return true }
+        if json[cursor] != 44 { return false }; cursor = Space(json,cursor+1)
+    }
+    return cursor >= 0 && cursor < cast(s32)json.count && json[cursor] == 125
+}
+
+Check :: (json: string, pin: []u8) -> s32 {
+    // 0 permitted, 5 malformed policy, 6 identity mismatch, 7 outward Photos.
+    if json.count < 2 || json.count > 1048576 || pin.count != 32 || !UTF8.Valid(json) { return 5 }
+    at := Space(json,0); end := ValueEnd(json,at,0)
+    if end < 0 || Space(json,end) != cast(s32)json.count || json[at] != 123 { return 5 }
+    names: [2]string = .{"node_id","known_nodes"}; positions: [2]s32
+    if !Fields(json,at,names[:],positions[:]) { return 5 }
+    identity: [65]u8
+    if ReadStringText(json,positions[0],identity[:]) != 64 { return 6 }
+    hex := "0123456789abcdef"
+    for i: 0..31 {
+        if identity[i*2] != hex[pin[i] >> 4] || identity[i*2+1] != hex[pin[i] & 15] { return 6 }
+    }
+    if positions[1] < 0 { return 5 }
+    array := positions[1]; if json[array] != 91 { return 5 }
+    peer := Space(json,array+1); peers: s32
+    while peer < cast(s32)json.count && json[peer] != 93 {
+        peers += 1; if peers > 1024 { return 5 }
+        peer_names: [1]string = .{"sync"}; peer_positions: [1]s32
+        if !Fields(json,peer,peer_names[:],peer_positions[:]) { return 5 }
+        policy := peer_positions[0]
+        // A missing policy means an unscoped outward peer in the node API.
+        if policy < 0 || MatchLiteral(json,policy,"null") { return 7 }
+        policy_names: [2]string = .{"direction","apps"}; policy_positions: [2]s32
+        if !Fields(json,policy,policy_names[:],policy_positions[:]) { return 5 }
+        direction: [17]u8
+        size := ReadStringText(json,policy_positions[0],direction[:])
+        if size < 0 || size > 16 { return 5 }
+        direction[size] = 0
+        mode := TextFromBytes(direction[0:size])
+        if mode != "pull" && mode != "push" && mode != "bidirectional" && mode != "none" { return 5 }
+        scopes := policy_positions[1]; matches := scopes < 0
+        if scopes >= 0 {
+            if json[scopes] != 91 { return 5 }
+            scope := Space(json,scopes+1); count: s32
+            while scope < cast(s32)json.count && json[scope] != 93 {
+                count += 1; if count > 1024 { return 5 }
+                app: [257]u8; length := ReadStringText(json,scope,app[:])
+                if length < 1 || length > 256 { return 5 }
+                for i: 0..length-1 { if app[i] == 0 { return 5 } }
+                app[length] = 0; name := TextFromBytes(app[0:length])
+                if name == "photos" || name == "*" { matches = true }
+                scope = Space(json,ValueEnd(json,scope,0))
+                if scope < 0 { return 5 }; if json[scope] == 44 { scope = Space(json,scope+1) }
+            }
+            if count == 0 { matches = true }
+        }
+        if mode != "pull" && mode != "none" && matches { return 7 }
+        peer = Space(json,ValueEnd(json,peer,0))
+        if peer < 0 { return 5 }; if json[peer] == 44 { peer = Space(json,peer+1) }
+    }
+    return 0
+}

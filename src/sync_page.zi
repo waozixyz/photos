@@ -1,0 +1,204 @@
+// Merge one decrypted encrypted-sync page and its cursor in one SQLite writer
+// transaction. A failed record, stale request or interrupted pipe acknowledges
+// nothing. Content keys and originals never enter this helper.
+using SQLite :: #import "sqlite/SQLite";
+Wire :: #import "sync_crypto";
+Faces :: #import "face_import";
+Albums :: #import "album_edit";
+Search :: #import "search";
+Policy :: #import "node_policy";
+UTF8 :: #import "std/utf8";
+#import "std/byte_text_linux"
+#import "std/json_scan"
+#import "std/text_buffer"
+c :: #system_library "c";
+sodium :: #system_library "sodium";
+Allocate :: (bytes: usize) -> *void #foreign c "malloc";
+Read :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign c "read";
+Decode :: (bytes: *u8, capacity: usize, text: *u8, length: usize, ignore: *u8, count: *usize, end: **u8, variant: s32) -> s32 #foreign sodium "sodium_base642bin";
+
+Execute :: (database: *void, sql: string) -> bool { return SqliteExecText(database,sql) == SQLITE_OK }
+Integer :: (database: *void, sql: string) -> s64 {
+    statement: *void
+    if SqlitePrepareText(database,sql,-1,*statement,null) != SQLITE_OK { return -1 }
+    defer { unused SqliteFinalize(statement) }
+    if SqliteStep(statement) != SQLITE_ROW { return -1 }
+    return SqliteColumnInt64(statement,0)
+}
+Check :: (database: *void, sql: string) -> bool { return Integer(database,sql) == 1 }
+Bind :: (statement: *void, index: s32, text: string) -> bool {
+    return SqliteBindTextString(statement,index,text,cast(s32)text.count) == SQLITE_OK
+}
+Failure :: (message: string) -> s32 {
+    out: Vec(u8); BuilderPrint(*out,"{\"error\":\"%\"}",message); text := BuilderFinish(out)
+    bytes: [512]u8; if text.count > bytes.count { return 1 }
+    for i: 0..text.count-1 { bytes[i] = text[i] }
+    unused Wire.SendAll(*bytes[0],cast(s64)text.count); return 1
+}
+Put :: (database: *void, table: string, text: string) -> bool {
+    statement: *void; sql: Vec(u8); BuilderPrint(*sql,"INSERT INTO %(data) VALUES(?)",table)
+    if SqlitePrepareText(database,BuilderFinish(sql),-1,*statement,null) != SQLITE_OK { return false }
+    defer { unused SqliteFinalize(statement) }
+    return Bind(statement,1,text) && SqliteStep(statement) == SQLITE_DONE
+}
+
+ValidatePage :: (database: *void) -> bool {
+    // SQLite keeps counters as exact signed integers, including past 2^53.
+    if !Check(database,"SELECT coalesce(json_type(data,'$.since')='integer' AND typeof(json_extract(data,'$.since'))='integer' AND json_extract(data,'$.since')>=0 AND json_type(data,'$.limit')='integer' AND json_extract(data,'$.limit') BETWEEN 1 AND 200 AND json_type(data,'$.response')='object' AND json_type(data,'$.response.encrypted_records_only')='true' AND json_extract(data,'$.response.status')='ok' AND coalesce(json_extract(data,'$.response.full_snapshot_required'),0)=0 AND json_type(data,'$.response.server_version')='integer' AND typeof(json_extract(data,'$.response.server_version'))='integer' AND json_extract(data,'$.response.server_version')>=json_extract(data,'$.since') AND json_type(data,'$.response.changes')='object' AND json_type(data,'$.response.changes.encrypted_records')='array' AND json_array_length(data,'$.response.changes.encrypted_records')<=json_extract(data,'$.limit') AND json_type(data,'$.decoded')='array' AND json_array_length(data,'$.decoded')=json_array_length(data,'$.response.changes.encrypted_records'),0) FROM page") { return false }
+    // Compare the request's exact checkpoint with the current writer snapshot.
+    if !Check(database,"SELECT json_extract(data,'$.since')=coalesce((SELECT json_extract(value,'$') FROM settings WHERE key='server_version'),0) AND json(coalesce(json_extract(data,'$.cursor'),'null')) IS json(coalesce((SELECT value FROM settings WHERE key='record_cursor'),'null')) FROM page") { return false }
+    if !Execute(database,"CREATE TEMP TABLE records AS SELECT r.key AS ordinal,r.type AS record_type,d.type AS data_type,r.value AS record,coalesce(d.value,'null') AS data FROM page,json_each(page.data,'$.response.changes.encrypted_records') r JOIN json_each(page.data,'$.decoded') d ON d.key=r.key") { return false }
+    if !Check(database,"SELECT NOT EXISTS(SELECT 1 FROM records WHERE NOT coalesce(record_type='object' AND json_extract(record,'$.collection') IN ('private.photos.v1.records.media','private.photos.v1.records.albums') AND json_type(record,'$.id')='text' AND length(json_extract(record,'$.id'))=64 AND length(CAST(json_extract(record,'$.id') AS BLOB))=64 AND json_extract(record,'$.id') NOT GLOB '*[^0-9a-f]*' AND (data_type='object' OR (data_type='null' AND json_type(record,'$.deleted_at')='text' AND length(json_extract(record,'$.deleted_at'))>0)) AND (data_type='null' OR json_extract(data,'$.id')=json_extract(record,'$.id')),0))") { return false }
+    complete := Integer(database,"SELECT CASE json_type(data,'$.response.changes_complete') WHEN 'true' THEN 1 WHEN 'false' THEN 0 ELSE -1 END FROM page")
+    if complete == 1 {
+        return Check(database,"SELECT json_type(data,'$.response.record_cursor') IS NULL OR json_type(data,'$.response.record_cursor')='null' FROM page")
+    }
+    if complete != 0 { return false }
+    if !Check(database,"SELECT coalesce(json_type(data,'$.response.record_cursor')='object' AND json_type(data,'$.response.record_cursor.version')='integer' AND typeof(json_extract(data,'$.response.record_cursor.version'))='integer' AND json_extract(data,'$.response.record_cursor.version')>json_extract(data,'$.since') AND json_extract(data,'$.response.record_cursor.version')<=json_extract(data,'$.response.server_version') AND json_type(data,'$.response.record_cursor.collection')='text' AND json_type(data,'$.response.record_cursor.id')='text' AND json_array_length(data,'$.decoded')>0 AND (json_extract(data,'$.response.record_cursor.version'),json_extract(data,'$.response.record_cursor.collection'),json_extract(data,'$.response.record_cursor.id'))>(coalesce(json_extract(data,'$.cursor.version'),json_extract(data,'$.since')),coalesce(json_extract(data,'$.cursor.collection'),''),coalesce(json_extract(data,'$.cursor.id'),'')),0) FROM page") { return false }
+    return Check(database,"SELECT json_extract(page.data,'$.response.record_cursor.collection')=json_extract(records.record,'$.collection') AND json_extract(page.data,'$.response.record_cursor.id')=json_extract(records.record,'$.id') FROM page,records ORDER BY ordinal DESC LIMIT 1")
+}
+
+EnsureAlbum :: (database: *void, name: string) -> bool {
+    if !Albums.NameValid(name) { return false }
+    statement: *void
+    if SqlitePrepareText(database,"SELECT 1 FROM albums WHERE name=?",-1,*statement,null) != SQLITE_OK { return false }
+    status := ifx Bind(statement,1,name) then SqliteStep(statement) else -1; unused SqliteFinalize(statement)
+    if status == SQLITE_ROW { return true }; if status != SQLITE_DONE { return false }
+    key: Vec(u8); BuilderPrint(*key,"photos.album.v1:%",name); id: [65]u8
+    if !Albums.Digest(BuilderFinish(key),id[:]) { return false }
+    attempts: s32
+    while true {
+        exists := Albums.Exists(database,TextFromCString(*id[0]))
+        if exists < 0 { return false }; if exists == 0 { break }
+        attempts += 1; if attempts > 4096 { return false }
+        next: Vec(u8); BuilderPrint(*next,"%:next",TextFromCString(*id[0]))
+        if !Albums.Digest(BuilderFinish(next),id[:]) { return false }
+    }
+    if SqlitePrepareText(database,"INSERT INTO albums(id,name,created,updated,dirty) VALUES(?,?,0,0,0)",-1,*statement,null) != SQLITE_OK { return false }
+    defer { unused SqliteFinalize(statement) }
+    return Bind(statement,1,TextFromCString(*id[0])) && Bind(statement,2,name) && SqliteStep(statement) == SQLITE_DONE
+}
+
+MergeAlbum :: (database: *void) -> string {
+    if !Check(database,"SELECT coalesce(json_type(data,'$.name')='text' AND json_type(data,'$.description')='text' AND length(CAST(json_extract(data,'$.description') AS BLOB))<=8192 AND json_type(data,'$.cover')='text' AND (json_extract(data,'$.cover')='' OR (length(json_extract(data,'$.cover'))=64 AND length(CAST(json_extract(data,'$.cover') AS BLOB))=64 AND json_extract(data,'$.cover') NOT GLOB '*[^0-9a-f]*')) AND (json_type(data,'$.filter') IS NULL OR (json_type(data,'$.filter')='text' AND length(CAST(json_extract(data,'$.filter') AS BLOB))<=512)) AND json_type(data,'$.pinned') IN ('integer','true','false') AND json_extract(data,'$.pinned') IN (0,1) AND json_type(data,'$.archived') IN ('integer','true','false') AND json_extract(data,'$.archived') IN (0,1) AND json_type(data,'$.deleted') IN ('integer','true','false') AND json_extract(data,'$.deleted') IN (0,1) AND json_type(data,'$.created') IN ('integer','real') AND json_extract(data,'$.created')>=0 AND json_extract(data,'$.created')<32503680000 AND json_type(data,'$.updated') IN ('integer','real') AND json_extract(data,'$.updated')>=0 AND json_extract(data,'$.updated')<32503680000 AND (json_type(data,'$.auto_people') IS NULL OR (json_type(data,'$.auto_people')='array' AND json_array_length(data,'$.auto_people')<=64 AND NOT EXISTS(SELECT 1 FROM json_each(data,'$.auto_people') WHERE type<>'text' OR length(value)<>64 OR length(CAST(value AS BLOB))<>64 OR value GLOB '*[^0-9a-f]*'))),0) FROM incoming") { return "Invalid album record; the cursor was retained" }
+    statement: *void
+    if SqlitePrepareText(database,"SELECT json_extract(data,'$.name'),coalesce(json_extract(data,'$.filter'),'') FROM incoming",-1,*statement,null) != SQLITE_OK { return "Cannot read the album record" }
+    valid := SqliteStep(statement) == SQLITE_ROW
+    if valid {
+        name := Faces.Column(statement,0); rules := Faces.Column(statement,1)
+        valid = Albums.NameValid(name) && name[0] != 32 && name[name.count-1] != 32
+        for byte: rules { if byte == 0 { valid = false } }
+        if rules.count > 0 {
+            content: bool; for byte: rules { if byte > 32 { content = true } }
+            query: Search.Predicate; Search.Parse(*query,rules); valid = valid && content && query.error == ""
+        }
+    }
+    unused SqliteFinalize(statement); if !valid { return "Invalid album name or smart album search" }
+    if !Execute(database,"UPDATE incoming SET data=json_set(data,'$.auto_people',json(coalesce(json_extract(data,'$.auto_people'),(SELECT auto_people FROM albums WHERE id=json_extract(incoming.data,'$.id')),'[]')))") { return "Cannot retain automatic album rules" }
+    if !Check(database,"SELECT coalesce(json_extract(data,'$.filter'),'')='' OR json_array_length(data,'$.auto_people')=0 FROM incoming") { return "Smart albums cannot auto-add people" }
+    stale := Integer(database,"SELECT EXISTS(SELECT 1 FROM albums,incoming WHERE albums.id=json_extract(data,'$.id') AND albums.updated>=json_extract(data,'$.updated'))")
+    if stale == 1 { return "" }; if stale < 0 { return "Cannot compare album versions" }
+    if !Check(database,"SELECT NOT EXISTS(SELECT 1 FROM albums,incoming WHERE albums.name=json_extract(data,'$.name') AND albums.id<>json_extract(data,'$.id') AND albums.updated<>0)") { return "Album name conflict; local edits are retained" }
+    if !Execute(database,"DELETE FROM albums WHERE id IN (SELECT albums.id FROM albums,incoming WHERE albums.name=json_extract(data,'$.name') AND albums.id<>json_extract(data,'$.id') AND albums.updated=0); INSERT OR REPLACE INTO albums(id,name,description,cover,pinned,archived,deleted,created,updated,filter,auto_people,dirty) SELECT json_extract(data,'$.id'),json_extract(data,'$.name'),json_extract(data,'$.description'),json_extract(data,'$.cover'),json_extract(data,'$.pinned'),json_extract(data,'$.archived'),json_extract(data,'$.deleted'),json_extract(data,'$.created'),json_extract(data,'$.updated'),coalesce(json_extract(data,'$.filter'),''),(SELECT json_group_array(value) FROM (SELECT DISTINCT value FROM incoming,json_each(data,'$.auto_people') ORDER BY value)),0 FROM incoming") { return "Cannot merge the album record" }
+    return ""
+}
+
+Semantic :: (database: *void) -> bool {
+    if Check(database,"SELECT json_type(data,'$.semantic') IS NULL FROM incoming") { return true }
+    if Check(database,"SELECT json_type(data,'$.semantic')='null' FROM incoming") {
+        return Execute(database,"DELETE FROM semantic_embeddings WHERE photo_id=(SELECT json_extract(data,'$.id') FROM incoming)")
+    }
+    if !Check(database,"SELECT coalesce(json_type(data,'$.semantic')='object' AND json_extract(data,'$.semantic.model')='clip-vit-b32-int8-v1',0) FROM incoming") { return false }
+    vector: [512]float32
+    statement: *void
+    if SqlitePrepareText(database,"SELECT json_type(data,'$.semantic.vector'),json_extract(data,'$.semantic.vector') FROM incoming",-1,*statement,null) != SQLITE_OK { return false }
+    if SqliteStep(statement) != SQLITE_ROW { unused SqliteFinalize(statement); return false }
+    encoded := Faces.Column(statement,0) == "text"; valid: bool
+    if encoded {
+        count: usize; end: *u8; text := SqliteColumnText(statement,1); length := SqliteColumnBytes(statement,1)
+        valid = length == 2732 && Decode(cast(*u8)*vector[0],2048,text,cast(usize)length,null,*count,*end,1) == 0 && count == 2048 && cast(usize)end-cast(usize)text == cast(usize)length
+    }
+    unused SqliteFinalize(statement)
+    if !encoded {
+        if !Check(database,"SELECT json_type(data,'$.semantic.values')='array' AND json_array_length(data,'$.semantic.values')=512 FROM incoming") { return false }
+        if SqlitePrepareText(database,"SELECT type,value FROM incoming,json_each(data,'$.semantic.values') ORDER BY key",-1,*statement,null) != SQLITE_OK { return false }
+        valid = true; at: s32
+        while at < 512 {
+            if SqliteStep(statement) != SQLITE_ROW { valid = false; break }
+            type := Faces.Column(statement,0); value := SqliteColumnDouble(statement,1)
+            if (type != "integer" && type != "real") || value != value || value < -1.001 || value > 1.001 { valid = false; break }
+            vector[at] = cast(float32)value; at += 1
+        }
+        unused SqliteFinalize(statement)
+    }
+    if !valid { return false }
+    norm: float64
+    for value: vector {
+        if value != value || value < -1.001 || value > 1.001 { return false }
+        norm += cast(float64)value*cast(float64)value
+    }
+    if norm < 0.99 || norm > 1.01 { return false }
+    if SqlitePrepareText(database,"INSERT OR REPLACE INTO semantic_embeddings SELECT json_extract(data,'$.id'),'clip-vit-b32-int8-v1',?,'' FROM incoming",-1,*statement,null) != SQLITE_OK { return false }
+    defer { unused SqliteFinalize(statement) }
+    return SqliteBindBlob(statement,1,BytesFromPointer(cast(*u8)*vector[0],2048)) == SQLITE_OK && SqliteStep(statement) == SQLITE_DONE
+}
+
+MergePhoto :: (database: *void) -> string {
+    if !Check(database,"SELECT coalesce(json_type(data,'$.extension')='text' AND json_extract(data,'$.extension') IN ('.jpg','.jpeg','.jpe','.png','.webp','.gif','.heic','.heif','.avif','.tif','.tiff','.bmp','.dng','.cr2','.cr3','.nef','.nrw','.arw','.sr2','.srf','.orf','.rw2','.raf','.pef','.srw','.hif','.rwl','.ptx','.3fr','.fff','.iiq','.kdc','.dcr','.erf','.mrw','.mos','.mef','.mp4','.mov','.m4v','.3gp','.avi','.webm','.mpg','.mpeg','.mod','.flv','.mkv','.wmv') AND json_type(data,'$.name')='text' AND json_type(data,'$.kind')='text' AND json_extract(data,'$.kind') IN ('photo','video') AND json_type(data,'$.size')='integer' AND json_extract(data,'$.size')>=0 AND json_type(data,'$.taken') IN ('integer','real') AND json_extract(data,'$.taken')>=-62135596800 AND json_extract(data,'$.taken')<253402300800 AND json_type(data,'$.updated') IN ('integer','real') AND json_extract(data,'$.updated')>=0 AND json_extract(data,'$.updated')<32503680000 AND json_type(data,'$.width')='integer' AND json_extract(data,'$.width')>=0 AND json_type(data,'$.height')='integer' AND json_extract(data,'$.height')>=0 AND json_type(data,'$.metadata')='object' AND json_type(data,'$.albums')='array' AND json_type(data,'$.manifest')='object' AND (json_type(data,'$.edits') IS NULL OR json_type(data,'$.edits')='object') AND json_type(data,'$.favorite') IN ('integer','true','false') AND json_extract(data,'$.favorite') IN (0,1) AND json_type(data,'$.hidden') IN ('integer','true','false') AND json_extract(data,'$.hidden') IN (0,1) AND (json_type(data,'$.archived') IS NULL OR (json_type(data,'$.archived') IN ('integer','true','false') AND json_extract(data,'$.archived') IN (0,1))) AND json_type(data,'$.trashed')='integer' AND json_extract(data,'$.trashed')>=0 AND json_type(data,'$.caption')='text' AND json_type(data,'$.tags')='text' AND NOT EXISTS(SELECT 1 FROM json_each(data,'$.albums') WHERE type<>'text' OR length(CAST(value AS BLOB)) NOT BETWEEN 1 AND 512),0) FROM incoming") { return "Invalid photo metadata; the cursor was retained" }
+    if !Check(database,"SELECT (json_type(data,'$.edits.auto_albums') IS NULL OR (json_type(data,'$.edits.auto_albums')='object' AND (SELECT count(*) FROM json_each(data,'$.edits.auto_albums'))<=128 AND NOT EXISTS(SELECT 1 FROM json_each(data,'$.edits.auto_albums') WHERE length(key)<>64 OR length(CAST(key AS BLOB))<>64 OR key GLOB '*[^0-9a-f]*' OR type<>'array' OR json_array_length(value)>64 OR EXISTS(SELECT 1 FROM json_each(value) WHERE type<>'text' OR length(value)<>64 OR length(CAST(value AS BLOB))<>64 OR value GLOB '*[^0-9a-f]*')))) FROM incoming") { return "Invalid automatic album memberships" }
+    stale := Integer(database,"SELECT EXISTS(SELECT 1 FROM photos,incoming WHERE photos.id=json_extract(data,'$.id') AND photos.updated>=json_extract(data,'$.updated'))")
+    if stale == 1 { return "" }; if stale < 0 { return "Cannot compare photo versions" }
+    if !Semantic(database) { return "Invalid semantic search index" }
+    if !Execute(database,"UPDATE incoming SET data=json_set(data,'$.people_index',json_extract(data,'$.people'))") || Faces.Import(database) != 1 { return "Invalid private face index" }
+    if !Execute(database,"INSERT OR REPLACE INTO photos(id,name,extension,kind,size,taken,width,height,metadata,albums,favorite,hidden,trashed,archived,caption,tags,updated,manifest,edits,dirty) SELECT json_extract(data,'$.id'),json_extract(data,'$.name'),json_extract(data,'$.extension'),json_extract(data,'$.kind'),json_extract(data,'$.size'),json_extract(data,'$.taken'),json_extract(data,'$.width'),json_extract(data,'$.height'),json_extract(data,'$.metadata'),json_extract(data,'$.albums'),json_extract(data,'$.favorite'),json_extract(data,'$.hidden'),json_extract(data,'$.trashed'),coalesce(json_extract(data,'$.archived'),0),json_extract(data,'$.caption'),json_extract(data,'$.tags'),json_extract(data,'$.updated'),json_extract(data,'$.manifest'),coalesce(json_extract(data,'$.edits'),'{}'),0 FROM incoming") { return "Cannot merge the photo record" }
+    statement: *void
+    if SqlitePrepareText(database,"SELECT value FROM incoming,json_each(data,'$.albums')",-1,*statement,null) != SQLITE_OK { return "Cannot retain photo albums" }
+    valid := true
+    while true {
+        status := SqliteStep(statement); if status == SQLITE_DONE { break }
+        if status != SQLITE_ROW || !EnsureAlbum(database,Faces.Column(statement,0)) { valid = false; break }
+    }
+    unused SqliteFinalize(statement)
+    return ifx valid then "" else "Cannot retain photo albums"
+}
+
+main :: (argc: s32, argv: **u8) -> s32 {
+    if argc != 2 { return Failure("Supply the private library database") }
+    length: [4]u8; if !Wire.ReadAll(*length[0],4) { return Failure("Sync page was interrupted; the cursor was retained") }
+    count := cast(s64)Wire.Number(length[:]); if count < 2 || count > 134217728 { return Failure("Sync page exceeds its safe limit") }
+    input := cast(*u8)Allocate(cast(usize)(count+1)); defer { Wire.Free(input,count+1) }
+    if input == null || !Wire.ReadAll(input,count) { return Failure("Sync page was interrupted; the cursor was retained") }
+    extra: u8
+    if Read(0,*extra,1) != 0 { return Failure("Sync page has trailing data") }
+    json := TextFromBytes(BytesFromPointer(input,cast(u64)count))
+    if !UTF8.Valid(json) || json[0] != 123 || Space(json,ValueEnd(json,0,0)) != cast(s32)count { return Failure("Invalid sync page") }
+    names: [5]string = .{"since","cursor","limit","response","decoded"}; positions: [5]s32
+    if !Policy.Fields(json,0,names[:],positions[:]) { return Failure("Invalid sync page fields") }
+    database: *void
+    if SqliteOpenText(TextFromCString(argv[1]),*database,SQLITE_OPEN_READWRITE) != SQLITE_OK {
+        if database != null { unused SqliteClose(database) }; return Failure("Cannot open the private library")
+    }
+    defer { unused SqliteClose(database) }
+    unused SqliteBusyTimeout(database,5000)
+    if !Execute(database,"PRAGMA temp_store=MEMORY; CREATE TEMP TABLE page(data TEXT NOT NULL CHECK(json_valid(data))); CREATE TEMP TABLE incoming(data TEXT NOT NULL)") || !Put(database,"page",json) { return Failure("Invalid sync page") }
+    if !Execute(database,"UPDATE page SET data=json_set(data,'$.response.changes.encrypted_records',json('[]')) WHERE json_type(data,'$.response.changes')='object' AND (json_type(data,'$.response.changes.encrypted_records') IS NULL OR json_type(data,'$.response.changes.encrypted_records')='null')") { return Failure("Invalid metadata page") }
+    if !Execute(database,"BEGIN IMMEDIATE") { return Failure("The library is busy; the cursor was retained") }
+    defer { unused Execute(database,"ROLLBACK") }
+    if !ValidatePage(database) { return Failure("Invalid or stale sync page; the cursor was retained") }
+    amount := Integer(database,"SELECT count(*) FROM records")
+    if amount < 0 || amount > 200 { return Failure("Invalid metadata page") }
+    for i: 0..amount-1 {
+        sql: Vec(u8); BuilderPrint(*sql,"DELETE FROM incoming; INSERT INTO incoming SELECT data FROM records WHERE ordinal=% AND json_type(data)='object'",i)
+        if !Execute(database,BuilderFinish(sql)) { return Failure("Cannot stage the photo record") }
+        if Integer(database,"SELECT count(*) FROM incoming") == 0 { continue }
+        lookup: Vec(u8); BuilderPrint(*lookup,"SELECT json_extract(record,'$.collection')='private.photos.v1.records.albums' FROM records WHERE ordinal=%",i)
+        album := Integer(database,BuilderFinish(lookup)); if album < 0 { return Failure("Invalid photo collection") }
+        error := ifx album == 1 then MergeAlbum(database) else MergePhoto(database)
+        if error != "" { return Failure(error) }
+        if !Execute(database,"DROP TABLE IF EXISTS face_index; DROP TABLE IF EXISTS face_input; DROP TABLE IF EXISTS person_input") { return Failure("Cannot finish the private face index") }
+    }
+    if !Execute(database,"INSERT OR REPLACE INTO settings(key,value) SELECT 'server_version',CAST(CASE WHEN json_type(data,'$.response.changes_complete')='true' THEN json_extract(data,'$.response.server_version') ELSE json_extract(data,'$.since') END AS TEXT) FROM page; INSERT OR REPLACE INTO settings(key,value) SELECT 'record_cursor',CASE WHEN json_type(data,'$.response.changes_complete')='true' THEN 'null' ELSE json_extract(data,'$.response.record_cursor') END FROM page") { return Failure("Cannot retain the sync checkpoint") }
+    if !Execute(database,"COMMIT") { return Failure("Cannot save the sync page; the cursor was retained") }
+    reply: [11]u8 = .{123,34,115,97,118,101,100,34,58,49,125}
+    return ifx Wire.SendAll(*reply[0],11) then 0 else 1
+}

@@ -384,8 +384,11 @@ address, key or nonce returns no plaintext. A missing or interrupted helper
 pauses that operation and preserves originals and keys. Ed25519 device seed
 generation, public keys and transaction signatures also run in Ziran and retain
 existing device identities. Account signing and loopback HTTP transport also
-run in native helpers. Pinned-node checks, sync checkpoints and the remaining
-library/credential-file adapter still use Python.
+run in native helpers. The native transport checks the pinned node and its
+replication policy. A native SQLite writer merges each photo/album/index page
+and its resume checkpoint atomically; stale requests retain local edits and
+backup progress. Envelope decoding, compatibility record imports and the
+remaining library/credential-file adapter still use Python.
 
 Create collage combines two through six visible photos or Live Photo stills.
 Select them in a gallery, then choose Create collage. Switch between balanced
@@ -550,7 +553,12 @@ The remaining replacement work includes:
   account keys and wire signatures. HTTP framing and requests run in a bounded
   headless Ziran helper using libcurl, with numeric loopback as its only destination,
   disabled proxies, refused redirects and a fixed set of signed sync routes.
-  Pinned-node identity/policy checks and sync checkpoint orchestration still use Python.
+  Pinned-node identity/replication checks also run in that native transport.
+  Normal paged sync uses a headless Ziran SQLite writer for photo/album merges,
+  face/semantic indexes and resume checkpoints in one transaction. It compares
+  the exact request checkpoint against a fresh writer snapshot and retains newer
+  local edits. Encrypted-envelope decoding and the compatibility record-import
+  adapter still use Python, along with automatic index mutations and scheduling.
 
 Choose Play video to watch a video in the Photos window. Pause/resume, Replay,
 the position slider, five-second seek buttons, volume and Mute work offline.

@@ -75,6 +75,12 @@ def main():
     shutil.copyfile(transport,installed/'sync_http.next')
     os.chmod(installed/'sync_http.next',0o755)
     os.replace(installed/'sync_http.next',installed/'sync_http')
+    pages = repo/'build/sync-page/sync_page'
+    if not pages.is_file():
+        parser.error('Build native Photos sync pages before installing')
+    shutil.copyfile(pages,installed/'sync_page.next')
+    os.chmod(installed/'sync_page.next',0o755)
+    os.replace(installed/'sync_page.next',installed/'sync_page')
     metadata_reader = repo/'build/read-metadata/read_metadata'
     if not metadata_reader.is_file():
         parser.error('Build Photos metadata reading before installing')

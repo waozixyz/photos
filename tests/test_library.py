@@ -474,15 +474,16 @@ class LibraryTest(unittest.TestCase):
 
     def test_sync_refuses_wrong_identity_and_outward_photos_replication(self):
         client = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a' * 64))
-        client.raw = Mock(return_value=dict(node_id='b' * 64))
-        with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+        # Actual native policy parsing is exercised by the loopback fixtures.
+        # The client must propagate failures and cannot fall back to raw JSON.
+        from unittest.mock import patch
+        from photos import sync_http
+        for message in ['Node identity mismatch', 'outward Photos replication']:
+            with patch.object(sync_http, 'check_node', side_effect=ValueError(message)):
+                with self.assertRaisesRegex(ValueError, message): client.check_node()
+        with patch.object(sync_http, 'check_node') as policy:
             client.check_node()
-        client.raw.return_value = dict(node_id='a' * 64, known_nodes=[
-            dict(sync=dict(direction='push', apps=['photos']))])
-        with self.assertRaisesRegex(ValueError, 'outward Photos replication'):
-            client.check_node()
-        client.raw.return_value['known_nodes'][0]['sync'] = dict(direction='pull', apps=['inbe'])
-        client.check_node()
+            policy.assert_called_once_with(client.node, 'a' * 64)
 
     def test_failed_batch_stays_queued_and_edits_during_upload_are_retained(self):
         path = self.export('desktop', 'Holiday')

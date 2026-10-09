@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 from datetime import datetime, timezone
 
 from .sync_crypto import encrypt, decrypt, seal_blob, seal_record, device_seed, device_public, device_signature
-from . import account_sign, sync_http
+from . import account_sign, sync_http, sync_pages
 
 from .library import atomic, packed, digest_file
 
@@ -77,15 +77,7 @@ class Client:
         return json.loads(data) if data else {}
 
     def check_node(self):
-        value = self.raw('/api/v1/node')
-        if value.get('node_id') != self.config['node_id']:
-            raise ValueError('Node identity mismatch: Photos refuses to sync')
-        for peer in value.get('known_nodes', []):
-            policy = peer.get('sync') or {}
-            direction = policy.get('direction', '')
-            scopes = policy.get('apps', [])
-            if direction != 'pull' and (not scopes or APP in scopes or '*' in scopes):
-                raise ValueError('Node has outward Photos replication; local-only sync refused')
+        sync_http.check_node(self.node,self.config['node_id'])
         self.checked = True
 
     def login(self):
@@ -324,49 +316,45 @@ class Client:
             if cursor:
                 request['record_cursor'] = cursor
             result = self.request('/api/v1/sync', 'POST', packed(request).encode())
-            if result.get('encrypted_records_only') is not True or result.get('status') != 'ok' or result.get('full_snapshot_required'):
-                raise ValueError('ThinkPad node needs paged encrypted sync; changes remain queued')
-            version = result.get('server_version')
-            if type(version) is not int or version < since:
-                raise ValueError('Node returned an invalid metadata version; the cursor was retained')
-            incoming = result.get('changes', {}).get('encrypted_records') or []
+            changes = result.get('changes') if isinstance(result, dict) else None
+            incoming = changes.get('encrypted_records') if isinstance(changes, dict) else None
+            if isinstance(changes, dict) and incoming is None:
+                incoming = []  # Daochi represents an empty record list as null.
             if not isinstance(incoming, list) or len(incoming) > RECORD_PAGE:
                 raise ValueError('Node returned an invalid metadata page')
-            complete = result.get('changes_complete')
-            following = result.get('record_cursor')
-            if complete is not True:
-                valid = (complete is False and isinstance(following, dict) and
-                         type(following.get('version')) is int and since < following['version'] <= version and
-                         isinstance(following.get('collection'), str) and isinstance(following.get('id'), str) and
-                         bool(incoming))
-                previous_key = (cursor['version'], cursor['collection'], cursor['id']) if cursor else (since, '', '')
-                next_key = (following['version'], following['collection'], following['id']) if valid else previous_key
-                if not valid or next_key <= previous_key:
-                    raise ValueError('Node returned a stalled metadata page; the cursor was retained')
-                last = incoming[-1]
-                if (following['collection'], following['id']) != (last.get('collection'), last.get('id')):
-                    raise ValueError('Node returned an invalid page boundary; the cursor was retained')
-            elif following is not None:
-                raise ValueError('Node returned a conflicting metadata cursor')
-            # Keep decrypted records and their checkpoint in one transaction.
-            # A failed decrypt or write must never acknowledge a partial page.
-            try:
-                self.library.db.execute('BEGIN IMMEDIATE')
-                for record in incoming:
-                    if not isinstance(record, dict) or record.get('collection') not in {COLLECTION, ALBUM_COLLECTION} or not HASH.fullmatch(record.get('id', '')):
-                        raise ValueError('Node returned an unsupported photo record; the cursor was retained')
-                    self.accept(record)
-                for key, value in [('server_version', version if complete else since),
-                                   ('record_cursor', None if complete else following)]:
-                    self.library.db.execute('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)', (key, packed(value)))
-                self.library.db.commit()
-            except Exception:
-                self.library.db.rollback()
-                raise
+            decoded = [self.open_record(record) for record in incoming]
+            # Native Ziran compares the request checkpoint with a fresh writer
+            # snapshot, validates the page and merges records/indexes/cursor in
+            # one transaction. Failed decryption never reaches that writer.
+            sync_pages.apply(self.library, result, since, cursor, decoded, RECORD_PAGE)
             uploaded = uploaded or result
             records = None
-            if complete:
+            if result.get('changes_complete') is True:
                 return uploaded
+
+    def open_record(self, record):
+        if (not isinstance(record, dict) or record.get('collection') not in {COLLECTION, ALBUM_COLLECTION}
+                or not isinstance(record.get('id'), str) or not HASH.fullmatch(record['id'])):
+            raise ValueError('Node returned an unsupported photo record; the cursor was retained')
+        if record.get('deleted_at'):
+            # Keep originals in Trash; physical deletion needs a separate policy.
+            return None
+        collection = record['collection']
+        schema = 'photos.album.v1' if collection == ALBUM_COLLECTION else 'photos.media.v1'
+        aad = dict(account_id=self.account, app_id=APP, collection=collection, id=record['id'], schema=schema)
+        try:
+            envelope = json.loads(decode(record['ciphertext']))
+            if (envelope.get('aad') != aad or envelope.get('nonce') != record.get('nonce')
+                    or envelope.get('key_id') != record.get('key_id') or envelope.get('alg') != 'xchacha20poly1305'):
+                raise ValueError()
+            value = json.loads(decrypt(decode(envelope['ciphertext']), packed(aad).encode(), decode(envelope['nonce']), self.key))
+            if not isinstance(value, dict) or value.get('id') != record['id']:
+                raise ValueError()
+            if collection == ALBUM_COLLECTION and self.library.album_name(value.get('name')) != value.get('name'):
+                raise ValueError()
+            return value
+        except (KeyError, TypeError, ValueError):
+            raise ValueError('Encrypted record metadata was moved or altered; the cursor was retained') from None
 
     def sync(self, maximum=50):
         self.check_node()

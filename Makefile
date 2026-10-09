@@ -21,6 +21,10 @@ build bundle test: account-sign
 sync-http:
 	LDLIBS='-l:libcurl.so.4 -l:libsodium.so.23' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry sync_http:main --exe -o build/sync-http src/sync_http.zi
 build bundle test: sync-http
+.PHONY: sync-page
+sync-page:
+	LDLIBS='-l:libsqlite3.so.0 -l:libsodium.so.23 -lglib-2.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry sync_page:main --exe -o build/sync-page src/sync_page.zi
+build bundle test: sync-page
 .PHONY: app-lock-policy-test
 app-lock-policy-test:
 	$(ZIRAN) build --project $(PACKAGE_FLAGS) --root tests --target=c --entry app_lock_policy_test:main --exe -o build/app-lock-policy tests/app_lock_policy_test.zi

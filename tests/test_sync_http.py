@@ -158,6 +158,63 @@ class SyncHTTPTest(unittest.TestCase):
             with patch.object(sync_http.subprocess,'run',return_value=result):
                 with self.assertRaises(ValueError):sync_http.request(self.node,'/api/v1/node')
 
+    def test_native_node_policy_permits_only_no_outward_photos_and_preserves_identity(self):
+        def node(peers):
+            return json.dumps(dict(node_id='a'*64,known_nodes=peers,description='私有 nodo')).encode()
+        allowed=[[],[dict(sync=dict(direction='pull',apps=[]))],
+                 [dict(sync=dict(direction='pull',apps=['photos','*']))],
+                 [dict(sync=dict(direction='none',apps=['photos']))],
+                 [dict(sync=dict(direction='push',apps=['other']))],
+                 [dict(sync=dict(direction='bidirectional',apps=['other']))]]
+        for peers in allowed:
+            self.server.content=node(peers)
+            sync_http.check_node(self.node,'a'*64)
+        for direction in ['push','bidirectional']:
+            for apps in [[],['photos'],['*'],['other','photos']]:
+                self.server.content=node([dict(sync=dict(direction=direction,apps=apps))])
+                with self.assertRaisesRegex(ValueError,'outward'):
+                    sync_http.check_node(self.node,'a'*64)
+        for peer in [{},dict(sync=None),dict(sync=dict(direction='push'))]:
+            self.server.content=node([peer])
+            with self.assertRaisesRegex(ValueError,'outward'):
+                sync_http.check_node(self.node,'a'*64)
+        self.server.content=node([])
+        with self.assertRaisesRegex(ValueError,'identity mismatch'):
+            sync_http.check_node(self.node,'b'*64)
+
+    def test_native_node_policy_refuses_duplicate_escaped_keys_malformed_types_and_invalid_utf8(self):
+        prefix=b'{"node_id":"'+b'a'*64+b'",'
+        bodies=[prefix+b'"node_id":"'+b'a'*64+b'"}',
+                b'{"node_id":"'+b'a'*64+b'"}',
+                prefix+b'"known_nodes":[],"known\\u005fnodes":[]}',
+                prefix+b'"known_nodes":null}',prefix+b'"known_nodes":[null]}',
+                prefix+b'"known_nodes":[{"sync":{},"sync":{"direction":"pull"}}]}',
+                prefix+b'"known_nodes":[{"sync":{"direction":"pull","direction":"push"}}]}',
+                prefix+b'"known_nodes":[{"sync":{"direction":"push","apps":"other"}}]}',
+                prefix+b'"known_nodes":[{"sync":{"direction":"pull","apps":[null]}}]}',
+                prefix+b'"known_nodes":[{"sync":{"direction":"pull","apps":["photos\\u0000"]}}]}',
+                prefix+b'"known_nodes":[{"sync":{"direction":"unknown","apps":["other"]}}]}',
+                prefix+b'"extra":"\xff"}',prefix+b'"known_nodes":[]} trailing',
+                b'[]',b'null',prefix+b'"extra":'+b'['*66+b'0'+b']'*66+b'}']
+        for body in bodies:
+            self.server.content=body
+            with self.assertRaisesRegex(ValueError,'policy'):
+                sync_http.check_node(self.node,'a'*64)
+        self.server.content=prefix+b'"known_nodes":[]}'
+        sync_http.check_node(self.node,'a'*64)
+        # Escapes are decoded before the sensitive field names are matched.
+        self.server.content=b'{"node\\u005fid":"'+b'a'*64+b'","known\\u005fnodes":[]}'
+        sync_http.check_node(self.node,'a'*64)
+
+    def test_node_policy_binary_mode_rejects_invalid_frames_before_contacting_node(self):
+        valid=sync_http.frame(self.node,'/api/v1/node',limit=1048576,node_id='a'*64)
+        cases=[valid[:40],valid[:19]+valid[51:],valid+b'extra',
+               valid[:11]+struct.pack('!I',1048577)+valid[15:],valid[:1]+b'\2'+valid[2:]]
+        for data in cases:
+            result=subprocess.run([str(sync_http.program())],input=data,capture_output=True,timeout=5)
+            self.assertEqual(result.returncode,2);self.assertFalse(result.stdout);self.assertFalse(result.stderr)
+        self.assertEqual(self.server.calls,[])
+
     def test_actual_network_deadline_reaps_stalled_request_and_next_request_can_retry(self):
         self.server.delay=.3
         start=time.monotonic()

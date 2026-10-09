@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.48
+
+- Keep restored photos, albums, private people/search indexes and backup progress together when a sync page fails or is interrupted.
+- Retain newer local edits and queued changes when another sync advances the library, and resume using exact backup version counters.
+- Verify the private ThinkPad node's identity and replication settings before signing in, including escaped fields; refuse missing or malformed policies while preserving originals and keys.
+
 ## 0.1.47
 
 - Keep app and Hidden access separate, with local unlocks ending after their access limit, credential changes or service restart.
