@@ -73,7 +73,12 @@ feed_height: float32;
 swipe: SelectionDrag.State;
 swipe_epoch: s64;
 swipe_end: s32 = -1;
+swipe_selecting: bool;
+swipe_reflow: bool;
+swipe_body_y: float32;
+GallerySelecting :: () -> bool { return Model.selecting && (!swipe.pending || swipe_selecting) }
 CancelSwipe :: () {
+    if swipe.active && !swipe_selecting && Model.selecting { swipe_reflow = true }
     SelectionDrag.Reset(*swipe)
     Model.ClearSwipeSelection(); swipe_end = -1
 }
@@ -104,16 +109,17 @@ GalleryHit :: (px: float32, py: float32, body: Rectangle, cell: float32, nearest
     return ifx nearest then closest else -1
 }
 SwipeSelection :: (session: Session, pointer: Input.PointerFrame, body: Rectangle, cell: float32) -> bool {
-    eligible := Model.swipe_selection_enabled && Model.selecting && !Model.busy && !Model.CatalogView() && !Model.guest_active &&
+    eligible := Model.swipe_selection_enabled && !Model.busy && !Model.CatalogView() && !Model.guest_active &&
         !Model.app_locked && Model.editor == "" && Model.selected < 0 && HostWindow.WindowFocused() &&
         (Model.view != "hidden" || Model.vault_unlocked)
     hit := GalleryHit(pointer.x,pointer.y,body,cell,swipe.active)
     selected := hit >= 0 && Model.IsPicked(TextUntilNul(Model.photos[hit].id[:]))
-    decision := SelectionDrag.Update(*swipe,eligible,Model.picked_count,hit,selected,
+    decision := SelectionDrag.Update(*swipe,eligible,hit,selected,
         pointer.x,pointer.y,pointer.pressed,pointer.down,pointer.released,
         Clock.Milliseconds(),body.y,body.height,pointer.x >= body.x && pointer.x < body.x+body.width)
     if decision.began {
         swipe_epoch = Model.gallery_epoch; swipe_end = -1
+        swipe_selecting = Model.selecting; swipe_body_y = body.y
         if !Model.SaveSwipeSelection() { CancelSwipe(); return false }
     }
     if decision.claimed {
@@ -129,7 +135,14 @@ SwipeSelection :: (session: Session, pointer: Input.PointerFrame, body: Rectangl
             swipe_end = hit
         }
     }
-    if decision.finished || decision.canceled { CancelSwipe() }
+    if decision.finished || decision.canceled {
+        // Keep the gallery still under the held pointer. Show the bulk actions
+        // after release and compensate their added height in the scroll offset.
+        if decision.claimed && !swipe_selecting && Model.selecting {
+            swipe_reflow = true; swipe_body_y = body.y
+        }
+        CancelSwipe()
+    }
     return decision.claimed
 }
 
@@ -511,7 +524,7 @@ GuestView :: (session: Session, viewport: Rectangle, key: s32, modifiers: s32, t
 Frame :: (session: Session, viewport: Rectangle) -> s32 {
     Prepare(); defer { Publish() }
     Model.Tick(HostWindow.WindowFocused())
-    if (swipe.pending || swipe.active) && (!Model.swipe_selection_enabled || !Model.selecting || Model.busy || Model.guest_active ||
+    if (swipe.pending || swipe.active) && (!Model.swipe_selection_enabled || (!Model.selecting && swipe_selecting) || Model.busy || Model.guest_active ||
         Model.app_locked || Model.editor != "" || Model.selected >= 0 || Model.CatalogView() ||
         Model.gallery_epoch != swipe_epoch || !HostWindow.WindowFocused() ||
         (Model.view == "hidden" && !Model.vault_unlocked)) {
@@ -596,7 +609,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
     if Model.editor == "collage" && key == Input.KeyEscape { Model.CancelEditor(); key = 0 }
     if (Model.editor == "image_crop" || Model.editor == "video_crop") && key == Input.KeyEscape { Model.FinishCrop(false) }
     if !Model.focused && !Model.search_focused && Model.editor == "" {
-        if key == Input.KeyEscape { if Viewer.expanded { Viewer.expanded = false } else if Model.selected >= 0 { Model.selected = -1; Viewer.Reset() } else { Model.ClearSelection() } }
+        if key == Input.KeyEscape { Input.TreePointerCancel(session); CancelSwipe(); swipe_reflow = false; if Viewer.expanded { Viewer.expanded = false } else if Model.selected >= 0 { Model.selected = -1; Viewer.Reset() } else { Model.ClearSelection() } }
         if Model.selected >= 0 && !Model.loading {
             if key == Input.KeyLeft { Model.Choose(Model.selected - 1) }
             if key == Input.KeyRight { Model.Choose(Model.selected + 1) }
@@ -915,8 +928,8 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                 Label(session, 417, "Photos in the selected location", .{x + 148.0, body.y + 7.0, width - 148.0, 26.0}, 14)
                 body.y += 44.0; body.height -= 44.0
             }
-            if Action(session, 45, ifx Model.selecting then "Done" else "Select", .{x, body.y, 78.0, 36.0}) { if Model.selecting { Model.ClearSelection() } else { Model.selecting = true } }
-            if Model.selecting {
+            if Action(session, 45, ifx GallerySelecting() then "Done" else "Select", .{x, body.y, 78.0, 36.0}) { if GallerySelecting() { Model.ClearSelection() } else { Model.selecting = true } }
+            if GallerySelecting() {
                 if Action(session, 46, "Select loaded", .{x + 88.0, body.y, 126.0, 36.0}) { Model.SelectLoaded() }
                 if Action(session, 47, "Clear", .{x + 224.0, body.y, 70.0, 36.0}) { Model.ClearSelection(); Model.selecting = true }
                 text: Vec(u8); BuilderPrint(*text, "% selected", Model.picked_count); value := BuilderFinish(text)
@@ -937,15 +950,15 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                     if Action(session,472,"Jump to date",.{x+346.0,body.y,120.0,36.0},!Model.loading) { Model.BeginEdit("jump_date","Jump to date","","YYYY-MM-DD; keeps the current gallery and search") }
                 }
             }
-            if !Model.selecting {
+            if !GallerySelecting() {
                 if Action(session, 60, ifx Model.view == "large" then "Largest first" else (ifx Model.view == "semantic" || Model.view == "similar" then "Closest first" else (ifx Model.sort == "newest" then "Newest first" else "Oldest first")), .{x + width - 132.0, body.y, 132.0, 36.0}, !Model.loading && Model.view != "semantic" && Model.view != "similar" && Model.view != "large") { Model.ToggleSort() }
             }
             body.y += 44.0; body.height -= 44.0
-            if width < 620.0 && Model.JumpGallery() && !Model.selecting {
+            if width < 620.0 && Model.JumpGallery() && !GallerySelecting() {
                 if Action(session,472,"Jump to date",.{x,body.y,122.0,36.0},!Model.loading) { Model.BeginEdit("jump_date","Jump to date","","YYYY-MM-DD; keeps the current gallery, album and search") }
                 body.y += 44.0; body.height -= 44.0
             }
-            if Model.album[0] != 0 && !Model.selecting {
+            if Model.album[0] != 0 && !GallerySelecting() {
                 step := (width - 24.0) / 4.0
                 if Action(session, 203, "Description", .{x, body.y, step, 36.0}, !Model.loading) { Model.BeginEdit("album_description", "Album description", TextUntilNul(Model.album_description[:]), "Describe this album") }
                 pin_label := ifx Model.AlbumPlace() then (ifx Model.album_pinned then "Unpin place" else "Pin place") else (ifx Model.album_pinned then "Unpin album" else "Pin album")
@@ -977,13 +990,17 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                     body.y += 44.0; body.height -= 44.0
                 }
             }
-            if Model.view == "memories" && !Model.selecting {
+            if Model.view == "memories" && !GallerySelecting() {
                 text: Vec(u8); BuilderPrint(*text, "On this day · % · earlier years (UTC)", TextUntilNul(Model.memory_date[:]))
                 value := BuilderFinish(text); Label(session, 217, value, .{x, body.y + 4.0, width - 130.0, 26.0}, 14); Model.Release(value)
                 if Action(session, 218, "Choose day", .{x + width - 118.0, body.y, 118.0, 34.0}, !Model.loading) { Model.BeginEdit("memory_date", "Choose a memories day", TextUntilNul(Model.memory_date[:]), "YYYY-MM-DD; shows the same day in earlier years") }
                 body.y += 42.0; body.height -= 42.0
             }
-            if Model.selecting { BulkBar(session, .{x, body.y, width, 80.0}); height: float32 = ifx width < 720.0 then 176.0 else 88.0; if width < 620.0 && Model.picked_count >= 2 && Model.picked_count <= 6 { height += 44.0 }; body.y += height; body.height -= height }
+            if GallerySelecting() { BulkBar(session, .{x, body.y, width, 80.0}); height: float32 = ifx width < 720.0 then 176.0 else 88.0; if width < 620.0 && Model.picked_count >= 2 && Model.picked_count <= 6 { height += 44.0 }; body.y += height; body.height -= height }
+        }
+        if swipe_reflow {
+            if Model.gallery_epoch == swipe_epoch && Model.selecting { Model.scroll += cast(s32)(body.y-swipe_body_y) }
+            swipe_reflow = false
         }
         pointer := Input.PointerSample(session)
         cols := cast(s32)(width / 196.0); if cols < 2 { cols = 2 }; if cols > 8 { cols = 8 }

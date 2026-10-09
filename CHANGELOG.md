@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.57
+
+- Click and drag a photo in any direction to select multiple items immediately, without selecting a first photo or entering Select mode.
+- Keep photos steady under the pointer while selecting and when the selection actions appear.
+
 ## 0.1.56
 
 - Keep gallery scrolling timed to elapsed time, so wheel motion settles promptly when drawing takes longer.

@@ -182,12 +182,13 @@ service receives coordinates or searches.
 
 Use Select, Ctrl-click or Shift-click to select up to 1000 items. Select loaded
 selects the photos already loaded into the feed, including those outside the
-visible rows; scrolling loads more. After picking at least one item, drag
-horizontally over the gallery to activate Swipe to select. Continue in either
-direction to select the range from the starting photo; starting on a selected
+visible rows; scrolling loads more. Click and drag a photo in any direction to
+select multiple items, without entering Select mode or picking an item first.
+Continue in either direction to select the range from the starting photo; starting on a selected
 photo unselects that range. Reversing restores the initial selection outside the
 current range. Holding near the top or bottom scrolls and loads later pages.
-Ordinary clicks and vertical scrolling remain available. Local sync has a
+Ordinary clicks still open a photo; use the wheel, scrollbar or empty gallery
+space to scroll. Local sync has a
 Swipe to select switch, saved on this device. Focus loss, replacement gallery
 pages, navigation and expired private access cancel a held gesture. Guest view
 does not offer selection. This follows Ente's

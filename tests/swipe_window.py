@@ -129,6 +129,26 @@ with tempfile.TemporaryDirectory() as temporary:
             window = wait(locate,'Swipe test app did not open')
             xdo('windowsize',window,1180,880); xdo('windowmove',window,0,0); xdo('windowfocus',window)
             wait(lambda: calls,'Initial gallery missing'); time.sleep(.8)
+            if not portable:
+                first_y = next(q['y'] for q in state()['controls'] if q['control'] == '100')
+            # Start directly in the ordinary gallery, with no prior picks or
+            # Select-mode click. Vertical and reverse drags keep the anchor
+            # still until release; the bulk toolbar then preserves its position.
+            move(260,322); xdo('mousedown',1); time.sleep(.15)
+            move(260,550); count(5)
+            move(490,322); count(2)
+            xdo('mouseup',1); time.sleep(.3); count(2)
+            if not portable:
+                controls = {q['control']: q for q in state()['controls']}
+                assert abs(controls['100']['y']-first_y) < 3, 'Bulk toolbar moved the anchored photo'
+            favorite(initial[:2])
+            library.db.execute('UPDATE photos SET favorite=0'); library.db.commit()
+            # Select mode also permits an empty selection and a vertical start.
+            click(230,166); count(0)
+            move(260,410); xdo('mousedown',1); time.sleep(.15)
+            move(260,638); count(5)
+            xdo('mouseup',1); time.sleep(.25); favorite(initial[:5])
+            library.db.execute('UPDATE photos SET favorite=0'); library.db.commit()
             # A click still selects one item; horizontal activation adds a
             # range, and reversing restores the range's original selection.
             click(230,166); click(260,410); count(1)
@@ -186,8 +206,13 @@ with tempfile.TemporaryDirectory() as temporary:
             xdo('mouseup',1); time.sleep(.3); count(1)
             click(65,378); click(300,682)
             wait(lambda: library.setting('swipe_selection_enabled',False) is True,'Swipe preference did not re-enable')
+            click(65,90)
+            move(260,322); xdo('mousedown',1); time.sleep(.15)
+            move(265,327); xdo('mouseup',1)
+            wait(lambda: any(q.get('action') == 'open' for q in calls), 'A click with small pointer motion did not open a photo')
+            assert sum(q.get('action') == 'open' for q in calls) == 1, 'A drag opened an extra photo'
             assert all(path.read_bytes() == value for path,value in originals.items())
-            print(suffix.capitalize()+' swipe: click selection, reversible add/remove, focus cancellation, edge scrolling across pages, batch identities and original preservation passed')
+            print(suffix.capitalize()+' drag: first selection in any direction, stable gallery, empty selection, reversible add/remove, focus cancellation, edge scrolling across pages, batch identities and original preservation passed')
         except BaseException:
             if window:
                 subprocess.run(['import','-window',window,str(output/('swipe-failed-'+('portable' if portable else 'native')+'.png'))],timeout=5)

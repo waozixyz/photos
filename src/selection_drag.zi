@@ -7,7 +7,7 @@ State :: struct {
 Decision :: struct { began: bool; claimed: bool; finished: bool; canceled: bool; scroll: s32 }
 Reset :: (state: *State) { state.* = .{} }
 Absolute :: (value: float32) -> float32 { return ifx value < 0.0 then -value else value }
-Update :: (state: *State, eligible: bool, picked: s32, hit: s32, selected: bool,
+Update :: (state: *State, eligible: bool, hit: s32, selected: bool,
     x: float32, y: float32, pressed: bool, down: bool, released: bool,
     now: s64, top: float32, height: float32, inside_x: bool) -> Decision {
     result: Decision
@@ -16,7 +16,7 @@ Update :: (state: *State, eligible: bool, picked: s32, hit: s32, selected: bool,
     }
     if pressed {
         Reset(state)
-        if picked <= 0 || hit < 0 || !down { return result }
+        if hit < 0 || !down { return result }
         state.pending = true; state.anchor = hit; state.remove = selected
         state.x = x; state.y = y; state.last_time = now; result.began = true
     }
@@ -26,10 +26,9 @@ Update :: (state: *State, eligible: bool, picked: s32, hit: s32, selected: bool,
     }
     dx := Absolute(x-state.x); dy := Absolute(y-state.y)
     if !state.active {
-        // A vertical gesture belongs to the normal gallery scroller. Once a
-        // horizontal gesture activates selection, either direction is valid.
-        if dy >= 12.0 && dy > dx { result.canceled = true; Reset(state); return result }
-        if dx >= 12.0 { state.active = true }
+        // A click keeps its ordinary action. Dragging a thumbnail selects in
+        // any direction, including the very first selection in the gallery.
+        if dx >= 12.0 || dy >= 12.0 { state.active = true }
     }
     result.claimed = state.active
     elapsed := now-state.last_time; state.last_time = now
