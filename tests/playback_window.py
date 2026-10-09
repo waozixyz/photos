@@ -48,15 +48,19 @@ with tempfile.TemporaryDirectory() as folder:
     photo_id = digest_file(source)
     calls = []
     blocked = threading.Event()
+    delayed_completed = threading.Event()
     delay = [False]
     original_process = service_module.process
 
     def record(request, config):
-        if request.get('action') == 'playback_check' and delay[0]:
+        delayed = request.get('action') == 'playback_check' and delay[0]
+        if delayed:
             blocked.set()
             time.sleep(3.5)
         result = original_process(request, config)
         calls.append((request, result))
+        if delayed:
+            delayed_completed.set()
         return result
 
     service_module.process = record
@@ -140,13 +144,20 @@ with tempfile.TemporaryDirectory() as folder:
             time.sleep(2.8)
             if not portable:
                 assert snapshot()['playback_state']==0, 'A stalled library request kept playing'
+            wait(delayed_completed.is_set,'Stalled playback check did not complete')
             time.sleep(1); delay[0] = False
             # A late response cannot resurrect a revoked player. Open a new one.
+            before = len(calls)
             click(535,222)
-            wait(lambda:len([r for q,r in calls if r.get('playback_path')])>=3,'Playback did not reopen')
-            time.sleep(.6)
+            wait(lambda:any(r.get('playback_path') for q,r in calls[before:]),'Playback did not reopen')
+            if not portable:
+                wait(lambda:snapshot().get('playback_state')==2,'Reopened decoder did not start')
+            else:
+                baseline = shoot('playback-reopened.png').crop((400,280,950,590))
+                wait(lambda:ImageChops.difference(baseline,shoot('playback-reopening.png').crop((400,280,950,590))).getbbox(),
+                     'Reopened portable decoder did not render moving frames')
             library.edit(photo_id,'hidden')
-            wait(lambda:any('error' in r and q.get('action')=='playback_check' for q,r in calls),
+            wait(lambda:any('error' in r and q.get('action')=='playback_check' for q,r in calls[before:]),
                  'Concurrent hiding did not revoke video access')
             time.sleep(.4)
             if not portable:
