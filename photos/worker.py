@@ -55,7 +55,7 @@ def library_request(library, request, config):
         folders = request.get('folders') or [request.get('value', '')]
         if not folders or any(not isinstance(folder, str) or not folder.strip() or not Path(folder).expanduser().is_dir() for folder in folders):
             raise ValueError('Choose an existing folder to import')
-        sources = list(dict.fromkeys([*config.get('sources', []), *folders]))
+        sources = list(dict.fromkeys([*config.get('sources', []), *library.setting('sources', []), *folders]))
         library.set_setting('sources', sources)
         library.set_setting('import_requested', True)
         library.set_setting('status', 'Import queued · originals stay intact')
@@ -68,16 +68,31 @@ def library_request(library, request, config):
             Client(library, config).materialize(photo['id'])
         result = ui_query(library, request)
         result['opened'] = request['id']
+        result['detail'] = library.details(request['id'])
         return result
+    elif action == 'album_rename':
+        library.rename_album(request.get('album'), request.get('value'))
+        request = {**request, 'album': request['value'].strip(), 'offset': 0}
+    elif request.get('ids') is not None and action != 'export':
+        library.edit_many(request['ids'], action, request.get('value'))
     elif action == 'export':
-        photo = library.photo(request['id'])
-        if not library.original(photo).exists():
-            Client(library, config).materialize(photo['id'])
-        exported = library.export(request['id'], request.get('value') or str(Path.home() / 'Pictures/Photos Export'))
+        ids = request.get('ids', [request.get('id')])
+        if not isinstance(ids, list) or not 0 < len(ids) <= 1000 or any(not isinstance(i, str) for i in ids):
+            raise ValueError('Select between 1 and 1000 photos')
+        for photo_id in dict.fromkeys(ids):
+            photo = library.photo(photo_id)
+            if not library.original(photo).exists():
+                Client(library, config).materialize(photo['id'])
+            exported = library.export(photo_id, request.get('value') or str(Path.home() / 'Pictures/Photos Export'))
         library.set_setting('status', 'Original and metadata exported to ' + str(Path(exported).parent))
     else:
         library.edit(request['id'], action, request.get('value'))
-    return ui_query(library, request)
+    result = ui_query(library, request)
+    if request.get('id') and action != 'export':
+        result['detail'] = library.details(request['id'])
+    if action == 'album_rename':
+        result['album'] = request['album']
+    return result
 
 
 def daemon(config, once=False):

@@ -7,7 +7,7 @@ import socket
 import socketserver
 import struct
 
-from .library import packed
+from .library import LibraryError, packed
 from .worker import configuration, process
 
 LIMIT = 1024 * 1024
@@ -47,6 +47,8 @@ class Handler(socketserver.BaseRequestHandler):
             if not isinstance(value, dict):
                 return
             result = process(value, self.server.config)
+        except LibraryError as error:
+            result = dict(error=str(error))
         except Exception as error:
             result = dict(error=f'Local request failed ({type(error).__name__}); your originals are safe')
         output = packed(result).encode()

@@ -15,6 +15,9 @@ from photos.library import Library, packed, digest_file
 from photos.sync import Client
 
 repo = Path(__file__).resolve().parents[1]
+node_binary = os.environ.get('PHOTOS_DAOCHI') or shutil.which('daochi')
+if not node_binary or not Path(node_binary).is_file():
+    raise SystemExit('Set PHOTOS_DAOCHI to the Daochi server executable for this isolated test')
 with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as folder:
     folder = Path(folder)
     with socket.socket() as probe:
@@ -29,7 +32,7 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
                DAOCHI_ADMIN_TOKEN='fixture-admin', DAOCHI_KNOWN_NODES='', DAOCHI_LAN_DISCOVERY='0',
                DAOCHI_NODE_SYNC_INTERVAL_SECONDS='0', DAOCHI_TOKEN_SECRET_HEX='42'*32)
     log = (folder / 'node.log').open('w')
-    process = subprocess.Popen([str(repo.parent / 'daochi/daochi')], env=env, stdout=log, stderr=log)
+    process = subprocess.Popen([str(Path(node_binary).resolve())], env=env, stdout=log, stderr=log)
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         node = None
@@ -73,11 +76,18 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         client.sync()
         assert first.photo(photo_id)['favorite'] == 1
         assert 'New local album' in json.loads(first.photo(photo_id)['albums'])
+        second.edit_many([photo_id], 'taken', '2024-06-15 14:30:00+02:00')
+        second.rename_album('Fixture', 'Renamed fixture')
+        assert peer.sync() == 0
+        client.sync()
+        assert first.details(photo_id)['taken'] == '2024-06-15T12:30:00+00:00'
+        assert 'Renamed fixture' in json.loads(first.photo(photo_id)['albums'])
+        assert json.loads(first.photo(photo_id)['edits'])['removed_albums'] == ['Fixture']
         second.edit(photo_id,'trash'); peer.sync(); client.sync()
         assert first.query('trash')['count'] == 1
         second.edit(photo_id,'restore'); peer.sync(); client.sync()
         assert first.query()['count'] == 2
-        print('Real Daochi v6 login, device signatures, encrypted binary originals, verified download, albums, favorites, Trash and restore round-trip passed')
+        print('Isolated Daochi v6: login, signatures, encrypted originals, verified download, batch dates, album rename and edit markers, favorites, Trash and restore round-trip passed')
     finally:
         process.terminate()
         process.wait(timeout=10)

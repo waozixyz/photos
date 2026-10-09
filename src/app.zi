@@ -79,12 +79,14 @@ ImageAt :: (session: Session, key: u64, path: string, alt: string, bounds: Recta
 }
 Field :: (session: Session, bounds: Rectangle, is_search: bool, key: s32, modifiers: s32, typed: string) -> bool {
     props: TextFieldProps; props.key = ifx is_search then 40 else 41; props.focus_id = ifx is_search then 40 else 41; props.bounds = bounds
-    props.label = ifx is_search then "Search" else "Folder or album"; props.placeholder = ifx is_search then "Search names, captions, tags, albums or dates" else "Import folder, album name, caption or export folder"
-    value: [4097]u8
-    Model.Set(value[:], ifx is_search then TextUntilNul(Model.search[:]) else TextUntilNul(Model.input[:]))
+    editing := !is_search && Model.editor != ""
+    props.label = ifx is_search then "Search" else (ifx editing then Model.editor_title else "Import folder")
+    props.placeholder = ifx is_search then "Search names, captions, tags, albums or dates" else (ifx editing then Model.editor_hint else "Path to a local folder")
+    value: [8193]u8
+    Model.Set(value[:], ifx is_search then TextUntilNul(Model.search[:]) else (ifx editing then TextUntilNul(Model.edit_value[:]) else TextUntilNul(Model.input[:])))
     props.value = TextUntilNul(value[:])
     props.cursor = ifx is_search then Model.search_cursor else Model.cursor; props.anchor = ifx is_search then Model.search_anchor else Model.anchor
-    props.focused = ifx is_search then Model.search_focused else Model.focused; props.max_bytes = ifx is_search then 512 else 4096
+    props.focused = ifx is_search then Model.search_focused else Model.focused; props.max_bytes = ifx is_search then 512 else (ifx editing then 8192 else 4096)
     if props.focused { props.input = TextFieldInputFor(key, modifiers, typed) }
     result := TextField(session, props)
     Record(ifx is_search then 40 else 41, props.label, bounds, true)
@@ -93,12 +95,32 @@ Field :: (session: Session, bounds: Rectangle, is_search: bool, key: s32, modifi
         if result.edit.changed { Model.Edit(Model.search[:], result.edit.start, result.edit.end, result.edit.replacement) }
     } else {
         Model.cursor = result.cursor; Model.anchor = result.anchor; Model.focused = result.focused
-        if result.edit.changed { Model.Edit(Model.input[:], result.edit.start, result.edit.end, result.edit.replacement) }
+        if result.edit.changed {
+            if editing { Model.Edit(Model.edit_value[:], result.edit.start, result.edit.end, result.edit.replacement) }
+            else { Model.Edit(Model.input[:], result.edit.start, result.edit.end, result.edit.replacement) }
+        }
     }
     return result.committed
 }
 SelectedAction :: (action: string) {
-    if Model.selected >= 0 { Model.Request(action, TextUntilNul(Model.photos[Model.selected].id[:]), TextUntilNul(Model.input[:])) }
+    Model.Apply(action)
+}
+
+BulkBounds :: (bounds: Rectangle, index: s32) -> Rectangle {
+    cols: s32 = ifx bounds.width < 720.0 then 3 else 6
+    step := (bounds.width - cast(float32)(cols - 1) * 8.0) / cast(float32)cols
+    return .{bounds.x + cast(float32)(index % cols) * (step + 8.0), bounds.y + cast(float32)(index / cols) * 44.0, step, 36.0}
+}
+BulkBar :: (session: Session, bounds: Rectangle) {
+    ready := Model.picked_count > 0 && !Model.loading
+    if Action(session, 61, "Favorite", BulkBounds(bounds, 0), ready) { Model.Apply("favorite_set", "1") }
+    if Action(session, 62, "Unfavorite", BulkBounds(bounds, 1), ready) { Model.Apply("favorite_set", "0") }
+    if Action(session, 63, ifx Model.view == "hidden" then "Unhide" else "Hide", BulkBounds(bounds, 2), ready) { Model.Apply("hidden_set", ifx Model.view == "hidden" then "0" else "1") }
+    if Action(session, 64, ifx Model.view == "trash" then "Restore" else "Trash", BulkBounds(bounds, 3), ready) { Model.Apply(ifx Model.view == "trash" then "restore" else "trash") }
+    if Action(session, 65, "Add to album", BulkBounds(bounds, 4), ready) { Model.BeginEdit("album_add", "Add selection to album", "", "Enter an album name") }
+    if Action(session, 66, "Edit date", BulkBounds(bounds, 5), ready) { Model.BeginEdit("taken", "Set date for selection", "", "2024-06-15 14:30:00+00:00 (UTC if no offset)") }
+    if Action(session, 67, "Export selection", BulkBounds(bounds, 6), ready) { Model.BeginEdit("export", "Export selected originals", "", "Destination folder; empty uses Pictures/Photos Export") }
+    if Action(session, 68, "Remove from album", BulkBounds(bounds, 7), ready && Model.album[0] != 0) { Model.Apply("album_remove", TextUntilNul(Model.album[:])) }
 }
 
 #program_export
@@ -107,6 +129,13 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
     Model.Tick()
     background: BoxProps; background.key = 1; background.bounds = viewport; background.fill = BackgroundColor(); Box(session, background)
     key := KeyboardTake(session); modifiers := KeyboardModifiers(session); typed_bytes: [256]u8; typed := TypedTextTake(session, typed_bytes[:])
+    if !Model.focused && !Model.search_focused && Model.editor == "" {
+        if key == Input.KeyEscape { if Model.selected >= 0 { Model.selected = -1 } else { Model.ClearSelection() } }
+        if Model.selected >= 0 && !Model.loading {
+            if key == Input.KeyLeft { Model.Choose(Model.selected - 1) }
+            if key == Input.KeyRight { Model.Choose(Model.selected + 1) }
+        }
+    }
     left := viewport.x + 12.0; top := viewport.y + 12.0
     sidebar: float32 = ifx viewport.width < 800.0 then 126.0 else 166.0
     x := left + sidebar + 14.0; width := viewport.width - sidebar - 38.0
@@ -119,14 +148,22 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
     Label(session, 3, "ThinkPad only", .{left, viewport.y + viewport.height - 76.0, sidebar, 22.0}, 13)
     Label(session, 4, "Private local library", .{left, viewport.y + viewport.height - 50.0, sidebar, 22.0}, 12)
     search := Field(session, .{x, top, width - 78.0, 40.0}, true, key, modifiers, typed)
-    if Action(session, 42, "Find", .{x + width - 70.0, top, 70.0, 40.0}) || search { Model.offset = 0; Model.scroll = 0; Model.selected = -1; Model.Request() }
+    if Action(session, 42, "Find", .{x + width - 70.0, top, 70.0, 40.0}) || search { Model.Find() }
     Label(session, 5, TextUntilNul(Model.summary[:]), .{x, top + 49.0, width, 24.0}, 14)
     y := top + 84.0
-    unused Field(session, .{x, y, width - 176.0, 39.0}, false, key, modifiers, typed)
-    if Action(session, 43, "Import", .{x + width - 164.0, y, 78.0, 39.0}) { Model.Request("import", "", TextUntilNul(Model.input[:])) }
-    if Action(session, 44, "Sync", .{x + width - 78.0, y, 78.0, 39.0}) { Model.Request("sync") }
+    if Model.editor == "" {
+        unused Field(session, .{x, y, width - 176.0, 39.0}, false, key, modifiers, typed)
+        if Action(session, 43, "Import", .{x + width - 164.0, y, 78.0, 39.0}) { Model.Request("import", "", TextUntilNul(Model.input[:])) }
+        if Action(session, 44, "Sync", .{x + width - 78.0, y, 78.0, 39.0}) { Model.Request("sync") }
+    }
     body := Rectangle.{x, y + 52.0, width, viewport.height - 216.0}
-    if Model.view == "sync" {
+    if Model.editor != "" {
+        Label(session, 91, Model.editor_title, .{x + 12.0, body.y + 12.0, width - 24.0, 34.0}, 22)
+        committed := Field(session, .{x + 12.0, body.y + 64.0, width - 24.0, 44.0}, false, key, modifiers, typed)
+        Label(session, 92, Model.editor_hint, .{x + 12.0, body.y + 124.0, width - 24.0, 26.0}, 13)
+        if Action(session, 93, "Save", .{x + 12.0, body.y + 172.0, 94.0, 38.0}, !Model.loading) || (committed && !Model.loading) { Model.Apply(Model.editor, TextUntilNul(Model.edit_value[:])) }
+        if Action(session, 94, "Cancel", .{x + 118.0, body.y + 172.0, 94.0, 38.0}, !Model.loading) { Model.editor = ""; Model.focused = false }
+    } else if Model.view == "sync" {
         Label(session, 70, "Local by design", .{x + 18.0, body.y + 24.0, width - 36.0, 36.0}, 26)
         Label(session, 71, "Your originals and albums stay on your desktop and ThinkPad.", .{x + 18.0, body.y + 80.0, width - 36.0, 30.0})
         Label(session, 72, "Encrypted sync uses your ThinkPad's Daochi node only.", .{x + 18.0, body.y + 122.0, width - 36.0, 30.0})
@@ -137,19 +174,44 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, 50, "Back", .{x, body.y, 68.0, 36.0}) { Model.selected = -1 }
         if Action(session, 51, "Previous", .{x + 78.0, body.y, 92.0, 36.0}, Model.selected > 0) { Model.Choose(Model.selected - 1) }
         if Action(session, 52, "Next", .{x + 180.0, body.y, 68.0, 36.0}, Model.selected + 1 < Model.count) { Model.Choose(Model.selected + 1) }
-        if Action(session, 53, ifx photo.favorite then "Unfavorite" else "Favorite", .{x + 258.0, body.y, 106.0, 36.0}) { SelectedAction("favorite") }
-        if Action(session, 54, ifx photo.trashed then "Restore" else "Trash", .{x + 374.0, body.y, 76.0, 36.0}) { SelectedAction(ifx photo.trashed then "restore" else "trash") }
+        if Action(session, 53, ifx photo.favorite then "Unfavorite" else "Favorite", .{x + 258.0, body.y, 106.0, 36.0}, !Model.loading) { SelectedAction("favorite") }
+        if Action(session, 54, ifx photo.trashed then "Restore" else "Trash", .{x + 374.0, body.y, 76.0, 36.0}, !Model.loading) { SelectedAction(ifx photo.trashed then "restore" else "trash") }
         image := ifx photo.original[0] != 0 && TextUntilNul(photo.kind[:]) == "photo" then TextUntilNul(photo.original[:]) else TextUntilNul(photo.thumbnail[:])
-        ImageAt(session, 3000, image, TextUntilNul(photo.name[:]), .{x, body.y + 48.0, width, body.height - 156.0})
-        Label(session, 75, TextUntilNul(photo.name[:]), .{x, body.y + body.height - 102.0, width, 24.0}, 17)
-        Label(session, 76, TextUntilNul(photo.date[:]), .{x, body.y + body.height - 72.0, width, 22.0}, 13)
+        ImageAt(session, 3000, image, TextUntilNul(photo.name[:]), .{x, body.y + 48.0, width, body.height - 320.0})
+        Label(session, 75, TextUntilNul(photo.name[:]), .{x, body.y + body.height - 262.0, width, 24.0}, 17)
+        details: Vec(u8); BuilderPrint(*details, "% · % x % · % bytes", TextUntilNul(Model.detail_taken[:]), photo.width, photo.height, Model.detail_size)
+        text := BuilderFinish(details); Label(session, 76, text, .{x, body.y + body.height - 232.0, width, 22.0}, 13); Model.Release(text)
+        Label(session, 77, TextUntilNul(Model.detail_caption[:]), .{x, body.y + body.height - 202.0, width, 22.0}, 14)
+        Label(session, 78, TextUntilNul(Model.detail_albums[:]), .{x, body.y + body.height - 172.0, width, 22.0}, 13)
+        Label(session, 79, TextUntilNul(Model.detail_tags[:]), .{x, body.y + body.height - 142.0, width, 22.0}, 13)
+        Label(session, 96, TextUntilNul(Model.detail_location[:]), .{x, body.y + body.height - 114.0, width, 22.0}, 13)
+        ready := !Model.loading && TextUntilNul(Model.detail_id[:]) == TextUntilNul(photo.id[:])
         step := (width - 32.0) / 5.0
-        if Action(session, 55, "Add to album", .{x, body.y + body.height - 42.0, step, 36.0}) { SelectedAction("album_add") }
-        if Action(session, 56, "Caption", .{x + step + 8.0, body.y + body.height - 42.0, step, 36.0}) { SelectedAction("caption") }
-        if Action(session, 57, "Tags", .{x + 2.0 * (step + 8.0), body.y + body.height - 42.0, step, 36.0}) { SelectedAction("tags") }
-        if Action(session, 58, ifx photo.hidden then "Unhide" else "Hide", .{x + 3.0 * (step + 8.0), body.y + body.height - 42.0, step, 36.0}) { SelectedAction("hidden") }
-        if Action(session, 59, "Export", .{x + 4.0 * (step + 8.0), body.y + body.height - 42.0, step, 36.0}) { SelectedAction("export") }
+        bottom := body.y + body.height - 82.0
+        if Action(session, 55, "Add to album", .{x, bottom, step, 36.0}, ready) { Model.BeginEdit("album_add", "Add photo to album", "", "Enter an album name") }
+        if Action(session, 56, "Caption", .{x + step + 8.0, bottom, step, 36.0}, ready && Model.detail_caption_editable) { Model.BeginEdit("caption", "Edit caption", TextUntilNul(Model.detail_caption[:]), "Describe this photo") }
+        if Action(session, 57, "Tags", .{x + 2.0 * (step + 8.0), bottom, step, 36.0}, ready && Model.detail_tags_editable) { Model.BeginEdit("tags", "Edit tags", TextUntilNul(Model.detail_tags[:]), "Searchable keywords") }
+        if Action(session, 58, ifx photo.hidden then "Unhide" else "Hide", .{x + 3.0 * (step + 8.0), bottom, step, 36.0}, ready) { SelectedAction("hidden") }
+        if Action(session, 59, "Export", .{x + 4.0 * (step + 8.0), bottom, step, 36.0}, ready) { Model.BeginEdit("export", "Export original and metadata", "", "Destination folder; empty uses Pictures/Photos Export") }
+        bottom += 44.0
+        if Action(session, 97, "Edit date", .{x, bottom, step, 36.0}, ready) { Model.BeginEdit("taken", "Edit photo date", TextUntilNul(Model.detail_taken[:]), "Date and time; include an offset, or use UTC") }
+        if Action(session, 98, "Rename", .{x + step + 8.0, bottom, step, 36.0}, ready) { Model.BeginEdit("rename", "Rename photo", TextUntilNul(photo.name[:]), "File name; the original bytes stay intact") }
+        if Action(session, 99, "Remove from album", .{x + 2.0 * (step + 8.0), bottom, step * 2.0 + 8.0, 36.0}, ready) { Model.BeginEdit("album_remove", "Remove photo from album", TextUntilNul(Model.album[:]), "Album name; removing membership keeps the photo") }
     } else {
+        if Model.view != "albums" {
+            if Action(session, 45, ifx Model.selecting then "Done" else "Select", .{x, body.y, 78.0, 36.0}) { if Model.selecting { Model.ClearSelection() } else { Model.selecting = true } }
+            if Model.selecting {
+                if Action(session, 46, "Select loaded", .{x + 88.0, body.y, 126.0, 36.0}) { Model.SelectLoaded() }
+                if Action(session, 47, "Clear", .{x + 224.0, body.y, 70.0, 36.0}) { Model.ClearSelection(); Model.selecting = true }
+                text: Vec(u8); BuilderPrint(*text, "% selected", Model.picked_count); value := BuilderFinish(text)
+                Label(session, 48, value, .{x + 304.0, body.y + 7.0, width - 304.0, 26.0}); Model.Release(value)
+            } else if Model.album[0] != 0 {
+                Label(session, 48, TextUntilNul(Model.album[:]), .{x + 88.0, body.y + 7.0, width - 236.0, 26.0})
+                if Action(session, 49, "Rename album", .{x + width - 138.0, body.y, 138.0, 36.0}, !Model.loading) { Model.BeginEdit("album_rename", "Rename album", TextUntilNul(Model.album[:]), "New album name; originals and other albums stay intact") }
+            }
+            body.y += 44.0; body.height -= 44.0
+            if Model.selecting { BulkBar(session, .{x, body.y, width, 80.0}); height: float32 = ifx width < 720.0 then 132.0 else 88.0; body.y += height; body.height -= height }
+        }
         pointer := Input.PointerSample(session)
         ScrollDevice.BeginScrollFrame(session, .{pointer.x, pointer.y}, pointer.pressed, pointer.down, pointer.released, PointerWheelTake(session, body), cast(float64)Model.ticks / 60.0)
         cols := cast(s32)(width / 196.0); if cols < 2 { cols = 2 }; if cols > 8 { cols = 8 }
@@ -178,19 +240,26 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
             if by + height < body.y || by > body.y + body.height { continue }
             if Model.view == "albums" {
                 if Action(session, cast(s32)(100 + i), TextUntilNul(Model.albums[i][:]), .{bx, by, width, 56.0}) {
-                    Model.Set(Model.album[:], TextUntilNul(Model.albums[i][:])); Model.view = "photos"; Model.offset = 0; Model.scroll = 0; Model.Request(); break
+                    Model.ClearSelection(); Model.Set(Model.album[:], TextUntilNul(Model.albums[i][:])); Model.view = "photos"; Model.offset = 0; Model.scroll = 0; Model.Request(); break
                 }
             } else {
                 photo: *Photo = *Model.photos[i]
                 clicked := PhotoAction(session, cast(s32)(100 + i), TextUntilNul(photo.name[:]), .{bx, by, cell, cell})
                 ImageAt(session, cast(u64)(1000000 + i), TextUntilNul(photo.thumbnail[:]), TextUntilNul(photo.name[:]), .{bx + 3.0, by + 3.0, cell - 6.0, cell - 6.0}, true)
                 if TextUntilNul(photo.kind[:]) == "video" { Label(session, cast(u64)(2100000 + i), "Video", .{bx + 8.0, by + cell - 30.0, cell - 16.0, 22.0}, 12) }
-                if clicked { Model.Choose(i); break }
+                if Model.IsPicked(TextUntilNul(photo.id[:])) {
+                    badge: BoxProps; badge.key = cast(u64)(2300000 + i); badge.bounds = .{bx + 6.0, by + 6.0, 82.0, 28.0}; badge.fill = BackgroundColor(); Box(session, badge)
+                    Label(session, cast(u64)(2200000 + i), "Selected", .{bx + 12.0, by + 8.0, 72.0, 24.0}, 14)
+                }
+                if clicked {
+                    if Model.selecting || (modifiers & Input.KeyModifierControl) != 0 || (modifiers & Input.KeyModifierShift) != 0 { Model.Pick(i, (modifiers & Input.KeyModifierShift) != 0) }
+                    else { Model.Choose(i) }; break
+                }
             }
         }
         if scrolling.opened { unused End(session) }
         if Model.view != "albums" && cast(float32)Model.scroll + body.height + height * 2.0 >= feed_height { Model.More() }
-        if item_count == 0 { Label(session, 90, "Your photos will appear here. Import a local folder to begin.", .{x + 20.0, body.y + 48.0, width - 40.0, 40.0}, 18) }
+        if item_count == 0 { Label(session, 90, ifx Model.total == 0 then "Import a local folder to begin." else "No items match this view or search.", .{x + 20.0, body.y + 48.0, width - 40.0, 40.0}, 18) }
     }
     footer := viewport.y + viewport.height - 42.0
     Label(session, 6, TextUntilNul(Model.message[:]), .{x, footer, width - 182.0, 28.0}, 12)

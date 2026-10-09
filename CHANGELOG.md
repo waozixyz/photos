@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2
+
+- Select multiple photos to organize, favorite, hide, restore, export or correct their dates together.
+- Rename albums and remove photos from an album while keeping originals and other memberships.
+- View photo details and use dedicated caption, tag, name and date editors.
+- Keep corrected dates and removed album memberships when source folders are scanned again.
+- Show useful errors for invalid edits and adapt selection controls to narrow windows.
+
 ## 0.1.1
 
 - Open to a newest-first photo feed grouped by day, loading older photos as you scroll.

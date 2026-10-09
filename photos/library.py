@@ -17,6 +17,10 @@ IMAGES = {'.jpg', '.jpeg', '.jpe', '.png', '.webp', '.gif', '.heic', '.heif',
 VIDEOS = {'.mp4', '.mov', '.m4v', '.3gp', '.avi', '.webm', '.mpg', '.mpeg', '.mod', '.flv', '.mkv', '.wmv'}
 
 
+class LibraryError(ValueError):
+    """A local validation message safe to show in the native editor."""
+
+
 def packed(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
 
@@ -66,6 +70,11 @@ class Library:
                 meta_stamp TEXT, photo_id TEXT REFERENCES photos(id));
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         ''')
+        if 'edits' not in {row[1] for row in self.db.execute('PRAGMA table_info(photos)')}:
+            with self.db:
+                self.db.execute('BEGIN IMMEDIATE')
+                if 'edits' not in {row[1] for row in self.db.execute('PRAGMA table_info(photos)')}:
+                    self.db.execute("ALTER TABLE photos ADD COLUMN edits TEXT NOT NULL DEFAULT '{}'")
         self.db.commit()
 
     def setting(self, key, default=None):
@@ -79,7 +88,7 @@ class Library:
     def photo(self, photo_id):
         row = self.db.execute('SELECT * FROM photos WHERE id=?', (photo_id,)).fetchone()
         if row is None:
-            raise ValueError('Photo not found')
+            raise LibraryError('Photo not found')
         return dict(row)
 
     def original(self, photo):
@@ -169,12 +178,23 @@ class Library:
             taken = stat.st_mtime
         relative = path.relative_to(source_root)
         album = str(relative.parent) if relative.parent != Path('.') else source_root.name
-        albums = sorted(set(json.loads(existing['albums']) if existing else []) | {album})
+        if existing:
+            # An edit may have completed while EXIF/sidecars were being read.
+            # Re-read its markers under the writer lock before merging.
+            self.db.execute('BEGIN IMMEDIATE')
+            existing = self.db.execute('SELECT * FROM photos WHERE id=?', (photo_id,)).fetchone()
+        edits = json.loads(existing['edits']) if existing else {}
+        exported_albums = metadata.get('albums', [])
+        if not isinstance(exported_albums, list):
+            exported_albums = []
+        exported_albums = {name for name in exported_albums if isinstance(name, str) and name.strip() and len(name.encode()) <= 512}
+        albums = sorted((set(json.loads(existing['albums']) if existing else []) | {album} | exported_albums)
+                        - set(edits.get('removed_albums', [])))
         combined = json.loads(existing['metadata']) if existing else {}
         combined.update(metadata)
         if existing:
             if packed(albums) != existing['albums'] or packed(combined) != existing['metadata']:
-                corrected = taken if metadata.get('photoTakenTime') else existing['taken']
+                corrected = taken if metadata.get('photoTakenTime') and not edits.get('taken') else existing['taken']
                 self.db.execute('UPDATE photos SET albums=?,metadata=?,taken=?,updated=?,dirty=1 WHERE id=?',
                                 (packed(albums), packed(combined), corrected, time.time(), photo_id))
         else:
@@ -196,11 +216,12 @@ class Library:
             finally:
                 Path(temporary).unlink(missing_ok=True)
             caption = str(metadata.get('description', ''))
-            self.db.execute('''INSERT INTO photos(id,name,extension,kind,size,taken,width,height,metadata,albums,favorite,caption,updated)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+            self.db.execute('''INSERT INTO photos(id,name,extension,kind,size,taken,width,height,metadata,albums,favorite,caption,tags,updated)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                 (photo_id, path.name, photo['extension'], photo['kind'], stat.st_size, taken,
                  width, height, packed(combined), packed(albums),
-                 int(album.casefold() in {'favorites', 'favourites'}), caption, time.time()))
+                 int(album.casefold() in {'favorites', 'favourites'} or metadata.get('favorite') is True), caption,
+                 metadata.get('tags', '') if isinstance(metadata.get('tags', ''), str) else '', time.time()))
             self.preview(photo, destination)
         self.db.execute('INSERT OR REPLACE INTO sources VALUES(?,?,?,?,?)',
                         (str(path), stat.st_size, stat.st_mtime_ns, stamp, photo_id))
@@ -230,27 +251,98 @@ class Library:
         return result
 
     def edit(self, photo_id, action, value=None):
+        self.edit_many([photo_id], action, value)
+
+    def edit_many(self, photo_ids, action, value=None):
+        if not isinstance(photo_ids, list) or not 0 < len(photo_ids) <= 1000 or any(not isinstance(i, str) for i in photo_ids):
+            raise LibraryError('Select between 1 and 1000 photos')
+        # Acquire the writer before reading, and roll back the whole selection
+        # if one item or value is invalid. Sync must see one complete edit.
+        with self.db:
+            self.db.execute('BEGIN IMMEDIATE')
+            for photo_id in dict.fromkeys(photo_ids):
+                self._edit(photo_id, action, value)
+
+    @staticmethod
+    def album_name(value):
+        if not isinstance(value, str) or not value.strip() or len(value.strip().encode()) > 512 or any(ord(c) < 32 for c in value):
+            raise LibraryError('Enter an album name of at most 512 bytes')
+        return value.strip()
+
+    def _edit(self, photo_id, action, value=None):
         photo = self.photo(photo_id)
-        if action in {'favorite', 'hidden'}:
-            self.db.execute(f'UPDATE photos SET {action}=?,updated=?,dirty=1 WHERE id=?',
-                            (int(not photo[action]), time.time(), photo_id))
+        edits = json.loads(photo['edits'])
+        if action in {'favorite', 'hidden', 'favorite_set', 'hidden_set'}:
+            field = action.removesuffix('_set')
+            if action.endswith('_set') and str(value) not in {'0', '1'}:
+                raise LibraryError('Choose whether to enable this property')
+            enabled = int(value) if action.endswith('_set') else int(not photo[field])
+            self.db.execute(f'UPDATE photos SET {field}=?,updated=?,dirty=1 WHERE id=?',
+                            (enabled, time.time(), photo_id))
         elif action in {'trash', 'restore'}:
             self.db.execute('UPDATE photos SET trashed=?,updated=?,dirty=1 WHERE id=?',
                             (int(time.time()) if action == 'trash' else 0, time.time(), photo_id))
         elif action in {'caption', 'tags'}:
+            if not isinstance(value, str) or len(value.encode()) > 8192:
+                raise LibraryError('Enter at most 8192 bytes of text')
             self.db.execute(f'UPDATE photos SET {action}=?,updated=?,dirty=1 WHERE id=?',
-                            (str(value)[:8192], time.time(), photo_id))
+                            (value, time.time(), photo_id))
         elif action in {'album_add', 'album_remove'}:
             albums = set(json.loads(photo['albums']))
-            name = str(value).strip()[:256]
-            if not name:
-                raise ValueError('Enter an album name')
+            name = self.album_name(value)
             albums.add(name) if action == 'album_add' else albums.discard(name)
-            self.db.execute('UPDATE photos SET albums=?,updated=?,dirty=1 WHERE id=?',
-                            (packed(sorted(albums)), time.time(), photo_id))
+            removed = set(edits.get('removed_albums', []))
+            removed.discard(name) if action == 'album_add' else removed.add(name)
+            edits['removed_albums'] = sorted(removed)
+            self.db.execute('UPDATE photos SET albums=?,edits=?,updated=?,dirty=1 WHERE id=?',
+                            (packed(sorted(albums)), packed(edits), time.time(), photo_id))
+        elif action == 'taken':
+            try:
+                date = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+                timestamp = (date if date.tzinfo else date.replace(tzinfo=timezone.utc)).timestamp()
+                if not 0 < timestamp < 32503680000:
+                    raise ValueError()
+            except (ValueError, OverflowError):
+                raise LibraryError('Enter a valid date and time, for example 2024-06-15 14:30:00+00:00') from None
+            edits['taken'] = True
+            self.db.execute('UPDATE photos SET taken=?,edits=?,updated=?,dirty=1 WHERE id=?',
+                            (timestamp, packed(edits), time.time(), photo_id))
+        elif action == 'rename':
+            if not isinstance(value, str) or not value.strip() or value.strip() in {'.', '..'} or any(c in value for c in '/\\') or any(ord(c) < 32 for c in value) or len(value.encode()) > 512:
+                raise LibraryError('Enter a file name without a folder path')
+            self.db.execute('UPDATE photos SET name=?,updated=?,dirty=1 WHERE id=?',
+                            (value.strip(), time.time(), photo_id))
         else:
-            raise ValueError('Unknown photo action')
-        self.db.commit()
+            raise LibraryError('Unknown photo action')
+
+    def rename_album(self, old, new):
+        old, new = self.album_name(old), self.album_name(new)
+        if old == new:
+            return
+        with self.db:
+            self.db.execute('BEGIN IMMEDIATE')
+            if self.db.execute('SELECT 1 FROM photos,json_each(photos.albums) WHERE value=? LIMIT 1', (new,)).fetchone():
+                raise LibraryError('An album with that name already exists')
+            ids = [r[0] for r in self.db.execute('SELECT id FROM photos WHERE EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=?)', (old,))]
+            if not ids:
+                raise LibraryError('Album not found')
+            for photo_id in ids:
+                self._edit(photo_id, 'album_remove', old)
+                self._edit(photo_id, 'album_add', new)
+
+    def details(self, photo_id):
+        photo = self.photo(photo_id)
+        metadata = json.loads(photo['metadata'])
+        geo = metadata.get('geoDataExif') or metadata.get('geoData') or {}
+        return dict(id=photo_id, name=photo['name'],
+                    caption=photo['caption'].encode()[:8192].decode('utf-8', 'ignore'),
+                    tags=photo['tags'].encode()[:8192].decode('utf-8', 'ignore'),
+                    caption_editable=int(len(photo['caption'].encode()) <= 8192),
+                    tags_editable=int(len(photo['tags'].encode()) <= 8192),
+                    albums=' · '.join(json.loads(photo['albums'])), size=photo['size'],
+                    width=photo['width'], height=photo['height'],
+                    taken=datetime.fromtimestamp(photo['taken'], timezone.utc).isoformat(),
+                    location=f"{geo.get('latitude', '')}, {geo.get('longitude', '')}" if isinstance(geo, dict) and 'latitude' in geo else '')
 
     def query(self, view='photos', search='', album='', offset=0, limit=60):
         where, args = ['trashed=0', 'hidden=0'], []
@@ -304,5 +396,6 @@ class Library:
             shutil.copyfileobj(incoming, output, 4 * 1024 * 1024)
         metadata = json.loads(photo['metadata'])
         metadata.update(description=photo['caption'], photoTakenTime={'timestamp': str(int(photo['taken']))}, albums=json.loads(photo['albums']))
+        metadata.update(tags=photo['tags'], favorite=bool(photo['favorite']))
         atomic(folder / 'metadata' / (destination.name + '.json'), packed(metadata).encode())
         return str(destination)

@@ -2,6 +2,7 @@ Transport :: #import "transport";
 #import "std/json_scan"
 #import "std/text"
 #import "std/text_buffer"
+#import "std/option"
 #import "std/byte_text_linux"
 #if #defined(POSIX_THREADS) {
 libc :: #system_library "libc";
@@ -24,6 +25,25 @@ Photo :: struct {
     width: s32
     height: s32
 }
+Selection :: struct { id: [65]u8 }
+picked: Vec(Selection);
+picked_count: s32;
+selecting: bool;
+last_pick: s32 = -1;
+editor: string;
+editor_title: string;
+editor_hint: string;
+edit_value: [8193]u8;
+detail_id: [65]u8;
+detail_caption: [8193]u8;
+detail_tags: [8193]u8;
+detail_albums: [4097]u8;
+detail_taken: [65]u8;
+detail_location: [257]u8;
+detail_size: s64;
+detail_caption_editable: bool;
+detail_tags_editable: bool;
+mutation: bool;
 photos: Vec(Photo);
 count: s32;
 total: s32;
@@ -51,7 +71,7 @@ queued_view: s32 = -1;
 queued_request: bool;
 queued_action: [32]u8;
 queued_id: [65]u8;
-queued_value: [4097]u8;
+queued_value: [8193]u8;
 initialized: bool;
 next_refresh: s64;
 ticks: s64;
@@ -75,6 +95,10 @@ Quoted :: (out: *Vec(u8), value: string) {
         if byte == 34 { BuilderPrint(out, "\\\"") }
         else if byte == 92 { BuilderPrint(out, "\\\\") }
         else if byte == 10 { BuilderPrint(out, "\\n") }
+        else if byte < 32 {
+            hex := "0123456789abcdef"; high := cast(s32)byte / 16; low := cast(s32)byte % 16
+            BuilderPrint(out, "\\u00"); BuilderPrint(out, "%", hex[high:high + 1]); BuilderPrint(out, "%", hex[low:low + 1])
+        }
         else if byte >= 32 { BuilderPrint(out, "%", value[i:i + 1]) }
     }
     BuilderPrint(out, "\"")
@@ -90,6 +114,12 @@ SendRequest :: (action: string, id: string, value: string) {
     BuilderPrint(*out, "{\"action\":"); Quoted(*out, action)
     Property(*out, "view", view); Property(*out, "search", TextUntilNul(search[:]))
     Property(*out, "album", TextUntilNul(album[:])); Property(*out, "id", id); Property(*out, "value", value)
+    mutation = action != "query" && action != "open" && action != "sync" && action != "import"
+    if mutation && picked_count > 0 && action != "album_rename" {
+        BuilderPrint(*out, ",\"ids\":[")
+        for i: 0..picked_count - 1 { if i > 0 { BuilderPrint(*out, ",") }; Quoted(*out, TextUntilNul(picked[i].id[:])) }
+        BuilderPrint(*out, "]")
+    }
     BuilderPrint(*out, ",\"offset\":%}", offset)
     request := BuilderFinish(out)
     loading = Transport.Start(request)
@@ -116,9 +146,20 @@ Tick :: () {
         Decode(json, 0, "error", message[:]); if message[0] != 0 { if appending { more_due = ticks + 300; appending = false }; return }
         total = Number(json, 0, "total"); matches = Number(json, 0, "count"); pending = Number(json, 0, "pending")
         Decode(json, 0, "status", message[:])
+        if mutation { ClearSelection(); editor = "" }
+        if FieldAt(json, 0, "album") >= 0 { Decode(json, 0, "album", album[:]); offset = 0; scroll = 0 }
+        detail := FieldAt(json, 0, "detail")
+        if detail >= 0 {
+            Decode(json, detail, "id", detail_id[:]); Decode(json, detail, "caption", detail_caption[:])
+            Decode(json, detail, "tags", detail_tags[:]); Decode(json, detail, "albums", detail_albums[:])
+            Decode(json, detail, "taken", detail_taken[:]); Decode(json, detail, "location", detail_location[:])
+            size := ReadNumber(json, FieldAt(json, detail, "size")); detail_size = ifx size.valid then cast(s64)size.value else 0
+            detail_caption_editable = Number(json, detail, "caption_editable") > 0
+            detail_tags_editable = Number(json, detail, "tags_editable") > 0
+        }
         previous: [65]u8
         if selected >= 0 && selected < count { Set(previous[:], TextUntilNul(photos[selected].id[:])) }
-        if !appending { selected = -1; VecClear(photos); count = 0; feed_base = offset }; revision += 1
+        if !appending { selected = -1; last_pick = -1; VecClear(photos); count = 0; feed_base = offset }; revision += 1
         array := FieldAt(json, 0, "photos"); at := Space(json, array + 1); page_count: s32
         while at >= 0 && at < cast(s32)json.count && json[at] != 93 && page_count < 60 {
             empty: Photo; if !VecPush(photos, empty) { Set(message[:], "Unable to load more photos"); break }
@@ -150,15 +191,52 @@ Tick :: () {
 Navigate :: (target: string) {
     queued_request = false
     if loading { for i: 0..cast(s32)6 { if View(i) == target { queued_view = i } }; return }
-    view = target; appending = false; feed_base = 0; album[0] = 0; selected = -1; offset = 0; scroll = 0; Request()
+    ClearSelection(); editor = ""; view = target; appending = false; feed_base = 0; album[0] = 0; selected = -1; offset = 0; scroll = 0; Request()
 }
 Choose :: (index: s32) {
     if busy || index < 0 || index >= count { return }
     selected = index
-    if photos[index].original[0] == 0 { Request("open", TextUntilNul(photos[index].id[:])) }
+    detail_id[0] = 0
+    detail_caption[0] = 0; detail_tags[0] = 0; detail_albums[0] = 0; detail_taken[0] = 0; detail_location[0] = 0; detail_size = 0
+    Request("open", TextUntilNul(photos[index].id[:]))
 }
+ClearSelection :: () { VecClear(picked); picked_count = 0; last_pick = -1; selecting = false }
+IsPicked :: (id: string) -> bool {
+    for i: 0..picked_count - 1 { if TextUntilNul(picked[i].id[:]) == id { return true } }; return false
+}
+Pick :: (index: s32, range: bool = false) {
+    if index < 0 || index >= count || busy { return }
+    selecting = true
+    first := ifx range && last_pick >= 0 then last_pick else index
+    end := index
+    if first > end { swap := first; first = end; end = swap }
+    for at: first..end {
+        id := TextUntilNul(photos[at].id[:]); found: s32 = -1
+        for i: 0..picked_count - 1 { if TextUntilNul(picked[i].id[:]) == id { found = i; break } }
+        if found >= 0 && !range {
+            for i: found..picked_count - 2 { picked[i] = picked[i + 1] }
+            picked_count -= 1; unused VecPop(picked)
+        } else if found < 0 && picked_count < 1000 {
+            item: Selection; Set(item.id[:], id); if VecPush(picked, item) { picked_count += 1 }
+        }
+    }
+    last_pick = index
+}
+SelectLoaded :: () {
+    for i: 0..count - 1 { if picked_count >= 1000 { break }; if !IsPicked(TextUntilNul(photos[i].id[:])) { Pick(i, true) } }
+}
+BeginEdit :: (action: string, title: string, value: string, hint: string) {
+    editor = action; editor_title = title; editor_hint = hint; Set(edit_value[:], value)
+    cursor = cast(s32)value.count; anchor = cursor; focused = false; search_focused = false
+}
+Apply :: (action: string, value: string = "") {
+    if loading { return }
+    id := ifx selected >= 0 && selected < count then TextUntilNul(photos[selected].id[:]) else ""
+    Request(action, id, value)
+}
+Find :: () { ClearSelection(); editor = ""; offset = 0; scroll = 0; selected = -1; Request() }
 Edit :: (out: []u8, start: s32, end: s32, replacement: string) {
-    copied: [4097]u8; Set(copied[:], replacement)
+    copied: [8193]u8; Set(copied[:], replacement)
     length := cast(s32)TextUntilNul(out).count; inserted := cast(s32)replacement.count
     if start < 0 || end < start || end > length || length - (end - start) + inserted >= cast(s32)out.count { return }
     shift := inserted - (end - start)

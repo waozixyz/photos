@@ -5,7 +5,7 @@ import unittest
 from PIL import Image
 from photos.library import Library, digest_file
 from photos.sync import Client, encrypt, decrypt
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 import urllib.error
 
 
@@ -111,6 +111,157 @@ class LibraryTest(unittest.TestCase):
         destination = Path(self.library.export(photo_id, self.root / 'export'))
         self.assertEqual(destination.read_bytes(), path.read_bytes())
         self.assertTrue((destination.parent / 'metadata' / (destination.name + '.json')).exists())
+
+    def test_batch_edits_are_atomic_explicit_and_keep_originals(self):
+        first = self.export('desktop', 'Holiday', 'red')
+        second = self.export('desktop', 'Family', 'blue')
+        self.library.import_folders([first.parents[1]])
+        ids = [digest_file(first), digest_file(second)]
+        self.library.edit(ids[0], 'favorite')
+        self.library.edit_many(ids + ids, 'favorite_set', '1')
+        self.assertEqual(self.library.query('favorites')['count'], 2)
+        with self.assertRaises(ValueError):
+            self.library.edit_many([ids[0], 'missing'], 'hidden_set', '1')
+        self.assertEqual(self.library.query()['count'], 2)
+        self.library.edit_many(ids, 'trash')
+        self.assertEqual(self.library.query('trash')['count'], 2)
+        self.library.edit_many(ids, 'restore')
+        self.library.edit_many(ids, 'album_add', 'Together')
+        self.assertEqual(self.library.query(album='Together')['count'], 2)
+        for path, photo_id in zip([first, second], ids):
+            self.assertEqual(self.library.original(self.library.photo(photo_id)).read_bytes(), path.read_bytes())
+
+    def test_date_and_album_edits_survive_changed_import_metadata(self):
+        path = self.export('desktop', 'Holiday')
+        self.library.import_folders([path.parents[1]])
+        photo_id = digest_file(path)
+        self.library.edit(photo_id, 'taken', '2024-06-15 14:30:00+02:00')
+        corrected = self.library.photo(photo_id)['taken']
+        self.library.edit(photo_id, 'album_remove', 'Holiday')
+        sidecar = path.parent / 'metadata/same.jpg.json'
+        metadata = json.loads(sidecar.read_text())
+        metadata['description'] = 'Changed externally'
+        metadata['photoTakenTime']['timestamp'] = '1500000000'
+        sidecar.write_text(json.dumps(metadata))
+        self.library.import_folders([path.parents[1]])
+        self.assertEqual(self.library.photo(photo_id)['taken'], corrected)
+        self.assertEqual(self.library.query(album='Holiday')['count'], 0)
+        self.assertEqual(self.library.query()['count'], 1)
+        self.assertEqual(self.library.details(photo_id)['taken'], '2024-06-15T12:30:00+00:00')
+        with self.assertRaises(ValueError):
+            self.library.edit(photo_id, 'taken', '2024-99-99')
+        self.assertEqual(self.library.photo(photo_id)['taken'], corrected)
+
+    def test_album_rename_keeps_other_memberships_hidden_items_and_rescan(self):
+        first = self.export('desktop', 'Holiday', 'red')
+        second = self.export('desktop', 'Holiday 2', 'blue')
+        self.library.import_folders([first.parents[1]])
+        ids = [digest_file(first), digest_file(second)]
+        self.library.edit_many(ids, 'album_add', 'Together')
+        self.library.edit(ids[1], 'hidden')
+        self.library.rename_album('Together', 'Trip')
+        for photo_id in ids:
+            self.assertIn('Trip', json.loads(self.library.photo(photo_id)['albums']))
+            self.assertNotIn('Together', json.loads(self.library.photo(photo_id)['albums']))
+        with self.assertRaises(ValueError):
+            self.library.rename_album('Trip', 'Holiday')
+        self.assertEqual(self.library.query(album='Trip')['count'], 1)
+        self.library.rename_album('Holiday', 'Summer')
+        sidecar = first.parent / 'metadata/same.jpg.json'
+        sidecar.write_text(sidecar.read_text() + ' ')
+        self.library.import_folders([first.parents[1]])
+        self.assertEqual(self.library.query(album='Holiday')['count'], 0)
+        self.assertEqual(self.library.query(album='Summer')['count'], 1)
+
+    def test_selected_details_and_batch_requests_reach_the_same_library(self):
+        from photos.worker import library_request
+        first = self.export('desktop', 'Holiday', 'red')
+        second = self.export('desktop', 'Family', 'blue')
+        self.library.import_folders([first.parents[1]])
+        ids = [digest_file(first), digest_file(second)]
+        result = library_request(self.library, dict(action='favorite_set', ids=ids, value='1'), {})
+        self.assertEqual(sum(p['favorite'] for p in result['photos']), 2)
+        result = library_request(self.library, dict(action='open', id=ids[0]), {})
+        self.assertEqual(result['detail']['caption'], 'A preserved caption')
+        self.assertEqual(result['detail']['albums'], 'Holiday')
+        self.assertNotIn('metadata', result['detail'])
+        self.assertNotIn('detail', library_request(self.library, {}, {}))
+        library_request(self.library, dict(action='rename', id=ids[0], value='New title.jpg'), {})
+        self.assertEqual(self.library.photo(ids[0])['name'], 'New title.jpg')
+        self.assertEqual(digest_file(self.library.original(self.library.photo(ids[0]))), ids[0])
+        for invalid in ['..', ' .. ', '../other.jpg', 'line\nbreak.jpg']:
+            with self.assertRaises(ValueError):
+                self.library.edit(ids[0], 'rename', invalid)
+
+    def test_edit_markers_are_encrypted_and_synced(self):
+        path = self.export('desktop', 'Holiday')
+        self.library.import_folders([path.parents[1]])
+        photo_id = digest_file(path)
+        self.library.edit(photo_id, 'taken', '2024-06-15')
+        self.library.edit(photo_id, 'album_remove', 'Holiday')
+        client = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a' * 64))
+        record = client.record(self.library.photo(photo_id), dict(chunks=[]))
+        self.assertNotIn('removed_albums', json.dumps(record))
+        self.library.db.execute('DELETE FROM photos WHERE id=?', (photo_id,))
+        client.accept(record)
+        photo = self.library.photo(photo_id)
+        self.assertEqual(json.loads(photo['edits']), dict(taken=True, removed_albums=['Holiday']))
+        self.assertEqual(photo['dirty'], 0)
+
+    def test_edits_during_import_metadata_read_are_preserved(self):
+        path = self.export('desktop', 'Holiday')
+        self.library.import_folders([path.parents[1]])
+        photo_id = digest_file(path)
+        sidecar = path.parent / 'metadata/same.jpg.json'
+        sidecar.write_text(sidecar.read_text() + ' ')
+        other = Library(self.library.root)
+        self.addCleanup(other.db.close)
+        opened = Image.open
+        def during_read(*args, **kwargs):
+            other.edit(photo_id, 'taken', '2024-06-15')
+            other.edit(photo_id, 'album_remove', 'Holiday')
+            return opened(*args, **kwargs)
+        with patch('photos.library.Image.open', side_effect=during_read):
+            self.library.import_folders([path.parents[1]])
+        self.assertEqual(self.library.query(album='Holiday')['count'], 0)
+        self.assertEqual(self.library.details(photo_id)['taken'], '2024-06-15T00:00:00+00:00')
+
+    def test_exported_tags_favorites_and_album_metadata_round_trip(self):
+        path = self.export('desktop', 'Holiday')
+        self.library.import_folders([path.parents[1]])
+        photo_id = digest_file(path)
+        self.library.edit(photo_id, 'tags', 'forest hiking')
+        self.library.edit(photo_id, 'favorite_set', '1')
+        self.library.edit(photo_id, 'album_add', 'Family')
+        self.library.export(photo_id, self.root / 'exported')
+        other = Library(self.root / 'second')
+        self.addCleanup(other.db.close)
+        other.import_folders([self.root / 'exported'])
+        self.assertEqual(other.query('favorites', search='hiking')['count'], 1)
+        self.assertEqual(other.query(album='Family')['count'], 1)
+        self.assertEqual(other.query(album='Holiday')['count'], 1)
+
+    def test_large_imported_caption_cannot_be_silently_truncated_by_editor(self):
+        path = self.export('desktop', 'Holiday')
+        sidecar = path.parent / 'metadata/same.jpg.json'
+        metadata = json.loads(sidecar.read_text())
+        metadata['description'] = 'é' * 10000
+        sidecar.write_text(json.dumps(metadata))
+        self.library.import_folders([path.parents[1]])
+        photo_id = digest_file(path)
+        details = self.library.details(photo_id)
+        self.assertEqual(details['caption_editable'], 0)
+        self.assertLessEqual(len(details['caption'].encode()), 8192)
+        self.assertEqual(self.library.photo(photo_id)['caption'], metadata['description'])
+
+    def test_adding_an_import_source_keeps_previously_added_sources(self):
+        from photos.worker import library_request
+        first = self.export('desktop', 'Holiday')
+        second = self.export('phone', 'Camera')
+        config = dict(sources=[])
+        library_request(self.library, dict(action='import', value=str(first.parents[1])), config)
+        library_request(self.library, dict(action='import', value=str(second.parents[1])), config)
+        self.assertEqual(self.library.setting('sources'), [str(first.parents[1]), str(second.parents[1])])
 
     def test_public_urls_and_unpinned_nodes_are_rejected_before_key_creation(self):
         for node in ['https://api.waozi.xyz', 'http://thinkpad.local:18080', 'http://192.168.100.97:18080', 'http://127.0.0.1:18080/path', 'http://127.0.0.1:18080']:

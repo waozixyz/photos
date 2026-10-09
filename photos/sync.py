@@ -218,6 +218,7 @@ class Client:
         photo['manifest'] = self.upload_original(photo) if manifest is None else manifest
         photo['albums'] = json.loads(photo['albums'])
         photo['metadata'] = json.loads(photo['metadata'])
+        photo['edits'] = json.loads(photo['edits'])
         photo.pop('dirty', None)
         nonce = secrets.token_bytes(24)
         aad = dict(account_id=self.account, app_id=APP, collection=COLLECTION, id=photo['id'], schema='photos.media.v1')
@@ -243,12 +244,15 @@ class Client:
             raise ValueError('Invalid photo record')
         if not isinstance(photo['albums'], list) or not isinstance(photo['manifest'], dict) or not (0 < photo['taken'] < 32503680000):
             raise ValueError('Invalid photo metadata')
+        photo.setdefault('edits', {})
+        if not isinstance(photo['edits'], dict):
+            raise ValueError('Invalid photo edits')
         existing = self.library.db.execute('SELECT * FROM photos WHERE id=?', (photo['id'],)).fetchone()
         if existing and existing['updated'] >= photo['updated']:
             return
         columns = ['id', 'name', 'extension', 'kind', 'size', 'taken', 'width', 'height', 'metadata', 'albums',
-                   'favorite', 'hidden', 'trashed', 'caption', 'tags', 'updated', 'manifest']
-        for key in ['metadata', 'albums', 'manifest']:
+                   'favorite', 'hidden', 'trashed', 'caption', 'tags', 'updated', 'manifest', 'edits']
+        for key in ['metadata', 'albums', 'manifest', 'edits']:
             photo[key] = packed(photo[key])
         self.library.db.execute('INSERT OR REPLACE INTO photos(' + ','.join(columns) + ',dirty) VALUES(' + ','.join('?' for _ in columns) + ',0)',
                                 [photo[c] for c in columns])
