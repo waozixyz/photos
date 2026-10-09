@@ -27,9 +27,10 @@ def process(request, config):
         with guest.guard:
             if guest.scope(library) is not None:
                 result = library_request(library, request, config)
+                result.update(app_lock.state(library))
                 if result.get('guest_exit_authorized') == 1 and app_lock.enabled(library):
-                    # Guest exit has already authenticated the same local
-                    # password. Return a fresh, separate app session only.
+                    # Guest exit has authenticated the current app credential.
+                    # Return a fresh, separate app session only.
                     token = app_lock.grant(library)
                     result.update(app_lock.state(library, token), app_lock_token=token)
                 return result
@@ -64,7 +65,7 @@ def ui_query(library, request):
                            person=request.get('person',''), people_mode=request.get('people_mode','active'),
                            lane_year=request.get('lane_year',0), jump_day=request.get('jump_day',''))
     result.update(vault.state(library, request.get('vault_token', '')))
-    result.update(guest_active=0, guest_configured=int(vault.configured(library)))
+    result.update(guest_active=0, guest_configured=int(vault.configured(library) or app_lock.enabled(library)))
     # A native page or slow catalog query may outlast the unlock. Recheck
     # before returning any Hidden paths to the caller.
     if not result['vault_unlocked']:

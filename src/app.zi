@@ -2,6 +2,7 @@ Collage :: #import "collage";
 using UI :: #import "kryon/Widgets";
 using Model :: #import "model";
 #import "std/date_parse"
+#import "std/text"
 Playback :: #import "playback";
 Crop :: #import "crop";
 Viewer :: #import "viewer";
@@ -449,32 +450,36 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
     if Model.app_locked {
         x := viewport.x+24.0; y := viewport.y+32.0; width := viewport.width-48.0
         Label(session,620,"Photos is locked",.{x,y,width,40.0},28)
-        Label(session,621,"Unlock with your local Hidden password.",.{x,y+54.0,width,28.0},16)
+        Label(session,621,Model.AppLockHint(),.{x,y+54.0,width,28.0},16)
         committed := Field(session,.{x,y+104.0,width,44.0},false,key,modifiers,typed)
         if Action(session,622,"Unlock Photos",.{x,y+174.0,168.0,40.0},!Model.loading) || (committed && !Model.loading) { Model.SaveEditor() }
         Label(session,623,TextUntilNul(Model.message[:]),.{x,y+234.0,width,56.0},15)
         return 0
     }
-    if Model.editor == "app_lock_settings" || Model.editor == "app_lock_enable" || Model.editor == "app_lock_disable" {
+    if StartsWithFoldASCII(Model.editor,"app_lock_") {
         x := viewport.x+24.0; y := viewport.y+24.0; width := viewport.width-48.0
         Label(session,624,"App lock",.{x,y,width-120.0,40.0},28)
         if Action(session,625,"Back",.{x+width-110.0,y,110.0,36.0}) || key == Input.KeyEscape { Model.CancelEditor(); return 0 }
-        Label(session,626,"Use your local Hidden password to protect opening Photos. Hidden stays separately locked.",.{x,y+58.0,width,52.0},16)
+        Label(session,626,"Protect opening Photos with an app PIN, app password or your Hidden password. Hidden stays separately locked.",.{x,y+58.0,width,52.0},16)
         if Model.editor != "app_lock_settings" {
             committed := Field(session,.{x,y+126.0,width,44.0},false,key,modifiers,typed)
-            if Action(session,627,ifx Model.editor == "app_lock_enable" then "Enable app lock" else "Disable app lock",.{x,y+192.0,180.0,40.0},Model.AppLockReady()) || (committed && Model.AppLockReady()) { Model.SaveEditor() }
-        } else if !Model.vault_configured {
+            if Action(session,627,Model.AppLockSubmit(),.{x,y+192.0,180.0,40.0},Model.AppLockReady()) || (committed && Model.AppLockReady()) { Model.SaveEditor() }
+        } else if !Model.app_lock_enabled && !Model.vault_configured {
             Label(session,628,"Create your local password in Hidden first.",.{x,y+126.0,width,32.0},18)
             if Action(session,629,"Open Hidden",.{x,y+178.0,168.0,40.0}) { Model.CancelEditor(); Model.Navigate("hidden") }
         } else if Model.app_lock_enabled {
-            Label(session,628,"App lock is enabled",.{x,y+126.0,width,32.0},18)
+            Label(session,628,ifx Model.app_lock_method == 1 then "App lock uses your app PIN" else (ifx Model.app_lock_method == 2 then "App lock uses your app password" else "App lock uses your Hidden password"),.{x,y+126.0,width,32.0},18)
             if Action(session,630,"Lock now",.{x,y+178.0,148.0,40.0},Model.AppLockReady()) { Model.LockApp() }
-            if Action(session,631,"Turn off app lock",.{x+164.0,y+178.0,180.0,40.0},Model.AppLockReady()) { Model.BeginEdit("app_lock_disable","Disable app lock","","Your local Hidden password") }
+            if Action(session,631,"Turn off app lock",.{x+164.0,y+178.0,180.0,40.0},Model.AppLockReady()) { Model.BeginEdit("app_lock_disable","Disable app lock","",Model.AppLockHint()) }
         } else {
             Label(session,628,"App lock is disabled",.{x,y+126.0,width,32.0},18)
             if Action(session,632,"Turn on app lock",.{x,y+178.0,180.0,40.0},!Model.loading) { Model.BeginEdit("app_lock_enable","Enable app lock","","Your local Hidden password") }
         }
-        Label(session,633,TextUntilNul(Model.message[:]),.{x,y+262.0,width,56.0},15)
+        if Model.editor == "app_lock_settings" {
+            if Action(session,635,ifx Model.app_lock_enabled then "Change app PIN" else "Set app PIN",.{x,y+234.0,168.0,40.0},Model.AppLockReady()) { Model.BeginEdit("app_lock_pin","Set app PIN","","4 through 12 digits; separate from Hidden") }
+            if Action(session,636,ifx Model.app_lock_enabled then "Change app password" else "Set app password",.{x+184.0,y+234.0,204.0,40.0},Model.AppLockReady()) { Model.BeginEdit("app_lock_password","Set app password","","At least 8 characters; separate from Hidden") }
+        }
+        Label(session,633,TextUntilNul(Model.message[:]),.{x,y+300.0,width,56.0},15)
         return 0
     }
     if Model.slide_active {

@@ -307,8 +307,9 @@ selection identities stay in memory and never become library tables or backup
 records. Native checks reject malformed scopes and ignore owner-gallery filters
 that could broaden guest access. The local adapter still stores the scope,
 checks passwords and dispatches permitted viewing requests.
-Create a local Hidden password first, then use Leave Guest view and that password
-to return to the library. The password stays masked and does not appear in app
+Set up App lock or a local Hidden password first, then use Leave Guest view and
+your app credential (or the Hidden password when app lock is disabled) to return
+to the library. The credential stays masked and does not appear in app
 inspection state, process arguments or logs. Entering Guest view locks all local
 Hidden sessions; leaving does not unlock Hidden or change originals or backup keys.
 This implements local desktop handover. Ente's mobile
@@ -318,18 +319,26 @@ unfinished here. Guest view is an app access restriction; local originals retain
 their existing storage format.
 
 App lock adds opening protection to the standalone app and Harmony's Photos
-view. Open App lock in the sidebar, create your local Hidden password first if
-needed, then enter that password to enable the lock. Unlock Photos uses a separate
+view. Open App lock in the sidebar and choose Set app PIN, Set app password, or
+enable with an existing Hidden password. An app PIN contains 4 through 12 ASCII
+digits and preserves leading zeroes; an app password contains at least eight
+characters. Confirm it before saving. Separate credentials do not require a
+Hidden password. They use the native Argon2id verifier, with five failed attempts
+per minute. Changing the method or credential locks every local app session.
+Unlock Photos uses a separate
 local app session and leaves Hidden locked. Lock now closes viewing and editing
 and revokes local app sessions. Turn off app lock also requires your password.
-The enabled setting survives restart and stays local to this device. A service
-restart, changed password or expired session requires authentication again.
+The enabled setting and app credential verifier survive restart and stay local
+to this device. A service restart, changed app credential or expired session
+requires authentication again. Changing Hidden's password also relocks an app
+using that password. Hidden's password stays unchanged when setting an app PIN
+or password. Guest view uses the current app credential for authenticated exit
+when app lock is enabled, and the Hidden password otherwise.
 Permission checks continue while viewing; an unavailable service clears photos,
 playback, extracted text and other previews within a short access lease. A stale
 query or permission response cannot reopen the library after it locks.
 Originals, account keys and encrypted ThinkPad backup remain unchanged.
-This currently provides opening and manual locking with the shared Hidden
-password. Separate app PIN/password options, background auto-lock timers,
+This currently provides opening and manual locking. Background auto-lock timers,
 system authentication and phone app-switcher hiding remain unfinished compared
 with [Ente app lock](https://ente.com/help/photos/features/account/app-lock).
 The screen and its access-expiry decisions are Ziran/Kryon; the local session

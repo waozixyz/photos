@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.39
+
+- Choose a separate app PIN or password to protect opening Photos without needing to set up Hidden first.
+- Confirm new credentials before saving; changing them locks every local app session while preserving originals and backup keys.
+- Authenticate leaving Guest view with your app credential when app lock is enabled, while keeping Hidden separately locked.
+- Keep existing Hidden-password app locks working; background lock timers and device authentication remain unfinished.
+
 ## 0.1.38
 
 - Protect opening Photos with your local Hidden password, using a separate app session that leaves Hidden locked.

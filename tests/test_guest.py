@@ -164,7 +164,7 @@ class GuestTest(unittest.TestCase):
     def test_start_without_password_and_failed_publication_do_not_change_originals(self):
         verifier = self.library.root/'private/hidden-password.json'
         saved = verifier.read_bytes(); verifier.unlink()
-        with self.assertRaisesRegex(LibraryError, 'Create a Hidden password'): self.start()
+        with self.assertRaisesRegex(LibraryError, 'Set up App lock or a Hidden password'): self.start()
         self.assertIsNone(guest.scope(self.library)); verifier.write_bytes(saved)
         with patch.object(guest, 'atomic', side_effect=OSError('fixture')):
             with self.assertRaises(OSError): self.start()

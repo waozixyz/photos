@@ -42,6 +42,7 @@ with tempfile.TemporaryDirectory() as temporary:
     Client(library, dict(node='http://127.0.0.1:1', node_id='42'*32))
     keys = (library.root/'private/identity.json').read_bytes()
     password = 'synthetic-app-lock-password'; hidden = vault.authenticate(library, password, setup=True)
+    hidden_settings = (library.root/'private/hidden-password.json').read_bytes()
     calls = []; stall = threading.Event(); entered = threading.Event(); release = threading.Event()
     original_process = service_module.process
     def record(request, config):
@@ -101,8 +102,8 @@ with tempfile.TemporaryDirectory() as temporary:
             xdo('type', '--clearmodifiers', '--delay', '15', '--', value); time.sleep(.2)
         def shoot(name):
             subprocess.run(['import', '-window', window, str(output/name)], check=True, timeout=5)
-        def unlock():
-            since = len(calls); text(password); control('Unlock Photos', 108, 226)
+        def unlock(credential=None):
+            since = len(calls); text(password if credential is None else credential); control('Unlock Photos', 108, 226)
             wait(lambda: result('app_lock_unlock', since) and result('app_lock_unlock', since).get('app_lock_authorized') == 1, 'App password was not accepted')
             if not portable: wait(lambda: not state().get('app_locked'), 'Owner controls did not return')
             time.sleep(.5)
@@ -138,9 +139,30 @@ with tempfile.TemporaryDirectory() as temporary:
             text(password, 172); control('Disable app lock', 114, 236)
             wait(lambda: result('app_lock_disable') and result('app_lock_disable')['app_lock_enabled'] == 0, 'App lock did not disable')
             assert not app_lock.enabled(library)
+            # A distinct credential must be confirmed without changing Hidden.
+            control('App lock', 95, 781); control('Set app PIN', 108, 278)
+            text('0042', 172); control('Continue', 108, 236)
+            text('0043', 172); control('Save PIN', 108, 236)
+            assert not app_lock.enabled(library), 'Mismatched confirmation enabled app lock'
+            text('0042', 172); control('Save PIN', 108, 236)
+            wait(lambda: result('app_lock_pin') and result('app_lock_pin')['app_lock_method'] == 1, 'Separate PIN did not enable')
+            shoot('app-pin-'+suffix+'.png'); unlock('0042'); stop(); launch()
+            wait(lambda: result('query') and result('query')['app_locked'] == 1, 'PIN restart did not lock')
+            unlock('0042'); control('App lock', 95, 781); control('Change app password', 310, 278)
+            credential = 'Separate synthetic app password'
+            text(credential, 172); control('Continue', 108, 236)
+            text(credential, 172); control('Save password', 108, 236)
+            wait(lambda: result('app_lock_password') and result('app_lock_password')['app_lock_method'] == 2, 'Separate password did not enable')
+            since = len(calls); text(password); control('Unlock Photos', 108, 226)
+            failed = wait(lambda: result('app_lock_unlock', since), 'Previous credential was not checked')
+            assert failed['app_locked'] == 1 and 'Incorrect password' in failed['error']
+            unlock(credential); control('App lock', 95, 781); control('Turn off app lock', 278, 222)
+            text(credential, 172); control('Disable app lock', 108, 236)
+            wait(lambda: not app_lock.enabled(library), 'Separate password did not disable')
+            assert (library.root/'private/hidden-password.json').read_bytes() == hidden_settings
             assert (library.root/'private/identity.json').read_bytes() == keys
             for path, data in originals.items(): assert path.read_bytes() == data
-            print('Private Xvfb '+suffix+' app lock: enable, masked password, wrong password, restart, manual lock, stalled heartbeat, disable and originals/keys passed')
+            print('Private Xvfb '+suffix+' app lock: shared password, masked fields, wrong password, restart, manual lock, stalled heartbeat, confirmed separate PIN/password, credential replacement and originals/keys passed')
         except Exception:
             if child is not None and child.poll() is None:
                 shoot('app-lock-failed-'+('portable' if portable else 'native')+'.png')

@@ -142,6 +142,8 @@ app_lock_poll: s64;
 app_lock_valid_until: s64;
 app_lock_auth_pending: bool;
 app_lock_check_pending: bool;
+app_lock_method: s32;
+app_lock_begin_pending: bool;
 edit_value: [8193]u8;
 detail_id: [65]u8;
 detail_caption: [8193]u8;
@@ -274,11 +276,14 @@ SendRequest :: (action: string, id: string, value: string) {
     BuilderPrint(*out, ",\"offset\":%}", offset)
     request := BuilderFinish(out)
     loading = Transport.Start(request)
-    app_lock_auth_pending = loading && (action == "app_lock_unlock" || action == "app_lock_enable" || action == "app_lock_disable")
+    app_lock_auth_pending = loading && (action == "app_lock_unlock" || action == "app_lock_enable" || action == "app_lock_disable" || action == "app_lock_pin" || action == "app_lock_password")
     app_lock_check_pending = loading && action == "app_lock_check"
     Release(request)
     if !loading { Set(message[:], Transport.error); if appending { more_due = ticks + 300; appending = false } }
     busy = loading && action != "query" && action != "playback_check" && action != "text_check" && !app_lock_check_pending && !slide_request && !qr_request && !collage_request; next_refresh = ticks + 300
+    // Lock only after the authenticated request has been serialized. A passive
+    // check may have queued it; clearing private UI state must not lose it.
+    if loading && (action == "app_lock_enable" || action == "app_lock_pin" || action == "app_lock_password") { app_lock_begin_pending = true }
 }
 HeaderField :: struct { key: [65]u8; at: s32 }
 header_fields: [64]HeaderField;
@@ -341,6 +346,7 @@ ReadPhoto :: (json: string, start: s32, photo: *Photo) -> s32 {
     return ifx at >= 0 && at < cast(s32)json.count && json[at] == 125 then at + 1 else -1
 }
 Tick :: () {
+    if app_lock_begin_pending { app_lock_begin_pending = false; app_lock_enabled = true; EnterAppLock() }
     ticks += 1;
     now := Clock.Milliseconds()
     if slide_active && (now < 0 || (slide_id[0] != 0 && now >= slide_valid_until)) {
@@ -366,6 +372,7 @@ Tick :: () {
         if Transport.error != "" { if guest_active { ClearGuestDisplay() } else if app_lock_enabled { EnterAppLock() }; Set(message[:], Transport.error); if slide_active { StopSlides() }; if editor == "collage" { RevokeCollage() }; if editor == "text" || editor == "qr" { CancelEditor() }; if playback_id[0] != 0 { StopPlayback() }; if appending { more_due = ticks + 300; appending = false }; return }
         json := Transport.Value()
         ReadHeader(json)
+        if Lookup(json,0,"app_lock_method") >= 0 { app_lock_method = Number(json,0,"app_lock_method"); if app_locked { editor_hint = AppLockHint() } }
         if Lookup(json,0,"guest_configured") >= 0 { guest_configured = Number(json,0,"guest_configured") > 0 }
         if guest_active && (Lookup(json,0,"guest_active") < 0 || (Number(json,0,"guest_active") == 0 && Number(json,0,"guest_exit_authorized") != 1)) {
             ClearGuestDisplay(); Set(message[:],"Guest view is unavailable; authenticate to leave"); return
@@ -376,6 +383,7 @@ Tick :: () {
             if guest_active { now = Clock.Milliseconds(); guest_poll = now+500; guest_valid_until = now+2500 }
         }
         if guest_active && Lookup(json,0,"error") >= 0 { ClearGuestDisplay() }
+        if guest_active && Lookup(json,0,"app_lock_enabled") >= 0 { app_lock_enabled = Number(json,0,"app_lock_enabled") > 0 }
         if !guest_active {
             // A query or heartbeat submitted before the access lease expired
             // cannot bring the private gallery back. Only a new auth response
@@ -562,7 +570,10 @@ Tick :: () {
     }
     if !loading && queued_view >= 0 { target := queued_view; queued_view = -1; Navigate(View(target)); return }
     if !loading && queued_request {
-        queued_request = false; SendRequest(TextUntilNul(queued_action[:]), TextUntilNul(queued_id[:]), TextUntilNul(queued_value[:])); return
+        action: [65]u8; identity: [65]u8; value: [8193]u8
+        Set(action[:],TextUntilNul(queued_action[:])); Set(identity[:],TextUntilNul(queued_id[:])); Set(value[:],TextUntilNul(queued_value[:]))
+        queued_request = false; Wipe(queued_value[:]); SendRequest(TextUntilNul(action[:]), TextUntilNul(identity[:]), TextUntilNul(value[:]))
+        Wipe(value[:]); return
     }
     if guest_active {
         now = Clock.Milliseconds()
@@ -713,10 +724,28 @@ Apply :: (action: string, value: string = "") {
 SaveEditor :: () {
     if loading && !app_lock_check_pending { return }
     if editor == "guest_exit" { Request("guest_exit","",TextUntilNul(edit_value[:])); Wipe(edit_value[:]); cursor = 0; anchor = 0; return }
+    if editor == "app_lock_pin" || editor == "app_lock_password" {
+        pin := editor == "app_lock_pin"
+        if pin {
+            size := cast(s32)TextUntilNul(edit_value[:]).count
+            valid := size >= 4 && size <= 12
+            for i: 0..size-1 { if edit_value[i] < 48 || edit_value[i] > 57 { valid = false } }
+            if !valid { Set(message[:],"Use an app PIN of 4 through 12 digits"); return }
+        } else {
+            chars: s32; i: s32
+            while i < 1024 && edit_value[i] != 0 { if (edit_value[i] & 192) != 128 { chars += 1 }; i += 1 }
+            if chars < 8 { Set(message[:],"Use at least 8 characters for your app password"); return }
+        }
+        for i: 0..1024 { vault_first[i] = edit_value[i] }
+        Wipe(edit_value[:]); BeginEdit(ifx pin then "app_lock_pin_confirm" else "app_lock_password_confirm",ifx pin then "Confirm app PIN" else "Confirm app password","","Type the same value again"); return
+    }
+    if editor == "app_lock_pin_confirm" || editor == "app_lock_password_confirm" {
+        if TextUntilNul(edit_value[:]) != TextUntilNul(vault_first[:]) { Set(message[:],"The confirmation does not match"); return }
+        action := ifx editor == "app_lock_pin_confirm" then "app_lock_pin" else "app_lock_password"
+        Request(action,"",TextUntilNul(edit_value[:])); Wipe(vault_first[:]); Wipe(edit_value[:]); cursor = 0; anchor = 0; return
+    }
     if StartsWithFoldASCII(editor,"app_lock_") {
-        enabling := editor == "app_lock_enable"
         Request(editor,"",TextUntilNul(edit_value[:])); Wipe(edit_value[:]); cursor = 0; anchor = 0
-        if enabling { app_lock_enabled = true; EnterAppLock() }
         return
     }
     if editor == "place_name" {
@@ -774,11 +803,18 @@ ResetGuest :: () {
     Wipe(app_lock_token[:])
 }
 EnterAppLock :: () {
-    if !app_locked { ResetGuest(); BeginEdit("app_lock_unlock","Unlock Photos","","Your local Hidden password") }
+    if !app_locked { ResetGuest(); BeginEdit("app_lock_unlock","Unlock Photos","",AppLockHint()) }
     else { ClearGuestDisplay() }
     app_locked = true; app_lock_valid_until = 0; Wipe(app_lock_token[:])
 }
 AppLockReady :: () -> bool { return !loading || app_lock_check_pending }
+AppLockHint :: () -> string { return ifx app_lock_method == 1 then "Your app PIN" else (ifx app_lock_method == 2 then "Your app password" else "Your local Hidden password") }
+AppLockSubmit :: () -> string {
+    if editor == "app_lock_pin" || editor == "app_lock_password" { return "Continue" }
+    if editor == "app_lock_pin_confirm" { return "Save PIN" }
+    if editor == "app_lock_password_confirm" { return "Save password" }
+    return ifx editor == "app_lock_enable" then "Enable app lock" else "Disable app lock"
+}
 LockApp :: () { if !AppLockReady() || !app_lock_enabled { return }; EnterAppLock(); Request("app_lock_lock") }
 BeginGuest :: () {
     if loading || view == "hidden" || view == "trash" { return }
@@ -788,7 +824,7 @@ BeginGuest :: () {
 }
 BeginGuestExit :: () {
     ClearGuestDisplay(); guest_valid_until = 0
-    BeginEdit("guest_exit","Leave Guest view","","Enter your local Hidden password")
+    BeginEdit("guest_exit","Leave Guest view","",ifx app_lock_enabled then AppLockHint() else "Enter your local Hidden password")
 }
 CancelGuestExit :: () { CancelEditor(); ClearGuestDisplay(); guest_poll = 0; Request() }
 GuestPage :: (direction: s32) {

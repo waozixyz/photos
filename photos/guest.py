@@ -6,7 +6,7 @@ import re
 import threading
 
 from .library import LibraryError, atomic, packed
-from . import decoding, query, vault
+from . import app_lock, decoding, query, vault
 
 # A mode change and every local RPC have one ordering. Background backup still
 # uses the library directly and retains its original pinned-node policy.
@@ -100,8 +100,8 @@ def page(library, value, request):
 
 
 def start(library, request):
-    if not vault.configured(library):
-        raise LibraryError('Create a Hidden password first; it protects leaving Guest view')
+    if not app_lock.enabled(library) and not vault.configured(library):
+        raise LibraryError('Set up App lock or a Hidden password first; it protects leaving Guest view')
     if library.db.in_transaction:
         raise LibraryError('Finish the current operation before starting Guest view')
     library.db.execute('BEGIN IMMEDIATE')
@@ -147,8 +147,11 @@ def route(library, request, config):
         return start(library, request) if action == 'guest_start' else None
     try:
         if action == 'guest_exit':
-            token = vault.authenticate(library, request.get('value'))
-            vault.lock(library, token)
+            if app_lock.enabled(library):
+                app_lock.authenticate(library, request.get('value'))
+            else:
+                token = vault.authenticate(library, request.get('value'))
+                vault.lock(library, token)
             path(library).unlink()
             # The caller builds a fresh owner gallery only after authentication.
             return dict(guest_active=0, guest_exit_authorized=1)

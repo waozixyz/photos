@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from PIL import Image
 from photos import app_lock, guest, vault
-from photos.library import Library, digest_file
+from photos.library import Library, LibraryError, digest_file
 from photos.worker import process
 from photos.sync import Client
 
@@ -23,6 +23,7 @@ class AppLockTest(unittest.TestCase):
         self.password = 'private-app-lock-password'
         self.hidden = vault.authenticate(self.library, self.password, setup=True)
         self.addCleanup(app_lock.revoke, self.library)
+        self.addCleanup(app_lock.failures.pop, str(self.library.root), None)
         self.addCleanup(vault.failures.pop, str(self.library.root), None)
         self.addCleanup(vault.lock, self.library, self.hidden)
 
@@ -119,3 +120,80 @@ class AppLockTest(unittest.TestCase):
         token = self.unlock()
         self.request(action='app_lock_disable', value=self.password, app_lock_token=token)
         self.assertEqual(outside.read_text(), 'Unrelated private data')
+
+    def test_separate_pin_works_without_hidden_keeps_leading_zeroes_and_guest_exit(self):
+        (self.library.root/'private/hidden-password.json').unlink()
+        key = (self.library.root/'private/identity.json').read_bytes()
+        result = self.request(action='app_lock_pin', value='0042')
+        self.assertEqual(result['app_locked'], 1); self.assertEqual(result['app_lock_method'], 1)
+        self.assertNotIn(b'0042', app_lock.path(self.library).read_bytes())
+        self.assertEqual(app_lock.path(self.library).stat().st_mode & 0o777, 0o600)
+        result = self.request(action='app_lock_unlock', value='0042')
+        self.assertEqual(result['app_locked'], 0); self.assertFalse(result['vault_unlocked'])
+        self.assertTrue(result['guest_configured']); self.assertFalse(result['vault_configured'])
+        token = result['app_lock_token']
+        self.assertEqual(self.request(action='guest_start', id=self.identity, app_lock_token=token)['guest_active'], 1)
+        self.assertIn('Incorrect PIN', self.request(action='guest_exit', value='1234')['error'])
+        result = self.request(action='guest_exit', value='0042')
+        self.assertEqual(result['guest_exit_authorized'], 1); self.assertEqual(result['app_locked'], 0)
+        self.assertFalse(result['vault_unlocked']); self.assertEqual(result['app_lock_method'], 1)
+        self.assertEqual(self.request(action='app_lock_disable', value='0042', app_lock_token=result['app_lock_token'])['total'], 1)
+        self.assertFalse(vault.configured(self.library))
+        self.assertEqual((self.library.root/'private/identity.json').read_bytes(), key)
+        self.assertEqual((self.source/'Photo.png').read_bytes(), self.original)
+
+    def test_separate_password_and_method_changes_revoke_sessions_without_changing_hidden(self):
+        marker = (self.library.root/'private/hidden-password.json').read_bytes()
+        result = self.request(action='app_lock_password', value='Separate app password')
+        self.assertEqual(result['app_lock_method'], 2)
+        self.assertIn('Incorrect password', self.request(action='app_lock_unlock', value=self.password)['error'])
+        result = self.request(action='app_lock_unlock', value='Separate app password'); token = result['app_lock_token']
+        self.assertEqual(self.request(action='app_lock_pin', value='0067')['app_locked'], 1)
+        result = self.request(action='app_lock_pin', value='0067', app_lock_token=token)
+        self.assertEqual(result['app_locked'], 1); self.assertEqual(result['app_lock_method'], 1)
+        self.assertFalse(app_lock.unlocked(self.library, token))
+        token = self.request(action='app_lock_unlock', value='0067')['app_lock_token']
+        result = self.request(action='app_lock_enable', value=self.password, app_lock_token=token)
+        self.assertEqual(result['app_lock_method'], 0); self.assertEqual(result['app_locked'], 1)
+        self.assertFalse(app_lock.unlocked(self.library, token)); self.unlock()
+        self.assertEqual((self.library.root/'private/hidden-password.json').read_bytes(), marker)
+
+    def test_invalid_credentials_rate_limit_and_failed_hash_never_replace_the_active_lock(self):
+        for value in ['123', '1'*13, '123a', '１２３４', None, True]:
+            result = self.request(action='app_lock_pin', value=value)
+            self.assertIn('error', result); self.assertFalse(app_lock.enabled(self.library))
+        for value in ['short', 'x'*1025, 'invalid\0password']:
+            self.assertIn('error', self.request(action='app_lock_password', value=value))
+        self.request(action='app_lock_pin', value='0000')
+        marker = app_lock.path(self.library).read_bytes()
+        for _ in range(5): self.assertIn('Incorrect PIN', self.request(action='app_lock_unlock', value='1111')['error'])
+        self.assertIn('Too many attempts', self.request(action='app_lock_unlock', value='0000')['error'])
+        app_lock.failures.pop(str(self.library.root), None)
+        token = self.request(action='app_lock_unlock', value='0000')['app_lock_token']
+        with patch('photos.vault.hash_password', side_effect=LibraryError('App authentication could not finish')):
+            self.assertIn('error', self.request(action='app_lock_password', value='New app password', app_lock_token=token))
+        self.assertEqual(app_lock.path(self.library).read_bytes(), marker)
+
+    def test_expiry_during_password_hashing_preserves_the_old_credential(self):
+        self.enable(); token = self.unlock(); marker = app_lock.path(self.library).read_bytes()
+        original = vault.hash_password
+        def expire(password, **options):
+            verifier = original(password, **options)
+            entry = app_lock.sessions[token]; app_lock.sessions[token] = (entry[0], 0, entry[2])
+            return verifier
+        with patch('photos.vault.hash_password', expire):
+            result = self.request(action='app_lock_password', value='New app password', app_lock_token=token)
+        self.assertEqual(result['app_locked'], 1); self.assertIn('App access ended', result['error'])
+        self.assertEqual(app_lock.path(self.library).read_bytes(), marker); self.unlock()
+
+    def test_native_pin_modes_are_bounded_and_do_not_weaken_hidden_password_rules(self):
+        import struct, subprocess
+        package = Path(vault.__file__).resolve().parents[1]
+        program = next(p for p in [package/'vault_auth', package/'build/vault-auth/vault_auth'] if p.is_file())
+        verifier = vault.hash_password('0042', pin=True)
+        self.assertEqual(vault.verify_password('0042', verifier, pin=True).returncode, 0)
+        for action, value in [('hash', b'0042'), ('pin-hash', '１２３４'.encode()), ('pin-hash', b'123'), ('pin-hash', b'1234567890123')]:
+            # All native failures remain silent; the secret never enters argv.
+            result = subprocess.run([str(program), action], input=struct.pack('!I',len(value))+value, capture_output=True)
+            self.assertEqual(result.returncode, 2); self.assertFalse(result.stdout); self.assertFalse(result.stderr)
+        with self.assertRaises(LibraryError): vault.authenticate(self.library, '0042')

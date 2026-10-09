@@ -16,18 +16,21 @@ Profile :: (hash: *u8, ops: u64, memory: usize) -> s32 #foreign sodium "crypto_p
 main :: (argc: s32, argv: **u8) -> s32 {
     if argc != 2 || Init() < 0 || HashBytes() > 128 { return 2 }
     action := TextFromCString(argv[1])
-    if action != "hash" && action != "verify" { return 2 }
+    pin := action == "pin-hash" || action == "pin-verify"
+    hashing := action == "hash" || action == "pin-hash"
+    if !pin && action != "hash" && action != "verify" { return 2 }
     input: [1153]u8; hash: [128]u8; size: s32
     defer { Wipe(*input[0], 1153); Wipe(*hash[0], 128) }
     while size < 1153 {
         read := Read(0, *input[size], cast(usize)(1153 - size))
         if read < 0 { return 2 }; if read == 0 { break }; size += cast(s32)read
     }
-    if size < 12 || size >= 1153 { return 2 }
+    if size < 8 || size >= 1153 { return 2 }
     length: s64
     for i: 0..3 { length = length * 256 + cast(s64)input[i] }
-    if length < 8 || length > 1024 || size < 4 + length { return 2 }
-    if action == "hash" {
+    if length < (ifx pin then 4 else 8) || length > (ifx pin then 12 else 1024) || size < 4 + length { return 2 }
+    if pin { for i: 0..length-1 { if input[4+i] < 48 || input[4+i] > 57 { return 2 } } }
+    if hashing {
         if size != 4 + length || Hash(*hash[0], *input[4], cast(u64)length, Ops(), Memory(), Algorithm()) != 0 { return 2 }
         print("%\n", TextFromCString(*hash[0])); return 0
     }

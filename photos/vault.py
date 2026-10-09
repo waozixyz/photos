@@ -53,8 +53,13 @@ def password_bytes(password):
     return password.encode()
 
 
-def verify_password(password, verifier=None):
-    encoded = password_bytes(password)
+def verify_password(password, verifier=None, *, pin=False):
+    if pin:
+        if not isinstance(password, str) or not 4 <= len(password) <= 12 or any(c not in '0123456789' for c in password):
+            raise LibraryError('Use an app PIN of 4 through 12 digits')
+        encoded = password.encode('ascii')
+    else:
+        encoded = password_bytes(password)
     package = Path(__file__).resolve().parents[1]
     candidates = [package / 'vault_auth', package / 'build/vault-auth/vault_auth', package / 'vault-auth/vault_auth']
     program = next((path for path in candidates if path.is_file()), None)
@@ -65,14 +70,15 @@ def verify_password(password, verifier=None):
         request += verifier.encode('ascii')
     environment = {k: v for k, v in os.environ.items() if k not in {'DISPLAY','WAYLAND_DISPLAY','XAUTHORITY','DBUS_SESSION_BUS_ADDRESS','SESSION_MANAGER'}}
     try:
-        return subprocess.run([str(program), 'hash' if verifier is None else 'verify'], input=request, env=environment,
+        mode = ('pin-hash' if verifier is None else 'pin-verify') if pin else ('hash' if verifier is None else 'verify')
+        return subprocess.run([str(program), mode], input=request, env=environment,
                               capture_output=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         raise LibraryError('Hidden authentication is unavailable; try again') from None
 
 
-def hash_password(password):
-    result = verify_password(password)
+def hash_password(password, *, pin=False):
+    result = verify_password(password, pin=pin)
     if result.returncode:
         raise LibraryError('Hidden authentication could not finish')
     try:
