@@ -220,8 +220,21 @@ captions, tags, albums and corrected dates apply to both components. Export and
 encrypted ThinkPad backup retain both original files and their pairing metadata.
 Separate files restores independent gallery items and survives rescans and sync.
 Incomplete pairs and inconsistent privacy updates stay out of galleries until
-both records agree. Embedded Android motion-photo extraction and native phone
-Live Photo capture remain unfinished.
+both records agree. Embedded Android Motion Photos also appear as one item.
+Modern JPEG XMP directories, legacy Google MicroVideo JPEGs, and modern HEIC/AVIF
+`mpvd` containers are recognized during import or source rescan. Play Live Photo
+extracts a private local playback asset while the entire combined original stays
+unchanged in backup and export. Separate files saves a video copy, preserving
+dates, captions, tags, albums and privacy; the original combined file remains
+intact and later rescans keep the separation. Raster edited copies contain only
+the still image. Clips from 0.05 through ten seconds and up to 128 MiB are accepted
+with local FFmpeg codecs. The Ziran reader checks namespaced XMP, byte ranges and
+complete MP4 boxes; stale flags, invalid ranges and malformed files stay ordinary
+retained photos. It uses libxml2 and libheif without external XML documents or
+network requests, following the
+[Android Motion Photo format](https://developer.android.com/media/platform/motion-photo-format).
+Older Samsung SEF containers without supported XMP, extended JPEG XMP packets,
+non-attribute XMP properties and native phone Live Photo capture remain unfinished.
 
 This version is a local photo library with sync, not complete Ente feature parity.
 
@@ -368,7 +381,7 @@ The remaining replacement work includes:
 
 - Mobile clients, permission-aware background camera backup and device space recovery.
 - Detailed maps, curated memories, automatic trip albums and richer face review/assignment controls.
-- Advanced photo editing, encrypted video streaming, animated editing previews, embedded Android motion photos, HDR display and broader codec/camera coverage.
+- Advanced photo editing, encrypted video streaming, animated editing previews, broader Motion Photo formats, HDR display and broader codec/camera coverage.
 - Private sharing, collaboration, public links, comments and account recovery.
   Any sharing design needs to honor the owner's ThinkPad-only sync restriction.
 - System authentication, Hidden password recovery and a deliberate deletion/retention policy.
@@ -415,6 +428,7 @@ make viewer-window-test viewer-portable-test
 make map-window-test map-portable-test
 make places-window-test places-portable-test
 make codec-window-test codec-portable-test
+make motion-window-test motion-portable-test
 make playback-window-test playback-portable-test
 make face-models people-window-test people-portable-test
 make slideshow-window-test slideshow-portable-test

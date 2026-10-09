@@ -140,6 +140,8 @@ def save(library, photo_id, value, authorize=None):
             # privacy state, album membership or recoverable Trash state.
             return new_id
         metadata = json.loads(photo['metadata'])
+        metadata.pop('photosMotion', None)
+        metadata.pop('photosMotionScan', None)
         if metadata.pop('photosLive', None):
             metadata['photosLiveSeparated'] = True
         metadata['photosEdit'] = dict(parent=photo_id, adjustments=adjustments)

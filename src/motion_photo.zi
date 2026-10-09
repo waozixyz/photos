@@ -1,0 +1,210 @@
+// Read bounded XMP and MP4 ranges without changing the combined original.
+// XML namespaces, not arbitrary prefixes, determine the metadata's meaning.
+#import "std/byte_text_linux"
+#import "std/c_string"
+c :: #system_library "c";
+xml :: #system_library "xml2";
+heif :: #system_library "heif";
+Error :: struct { code: s32; subcode: s32; message: *u8 }
+Context :: () -> *void #foreign heif "heif_context_alloc";
+FreeContext :: (context: *void) #foreign heif "heif_context_free";
+ReadHEIF :: (context: *void, path: *u8, options: *void) -> Error #foreign heif "heif_context_read_from_file";
+Primary :: (context: *void, handle: **void) -> Error #foreign heif "heif_context_get_primary_image_handle";
+ReleaseHandle :: (handle: *void) #foreign heif "heif_image_handle_release";
+MetadataCount :: (handle: *void, filter: *u8) -> s32 #foreign heif "heif_image_handle_get_number_of_metadata_blocks";
+MetadataIDs :: (handle: *void, filter: *u8, ids: *u32, count: s32) -> s32 #foreign heif "heif_image_handle_get_list_of_metadata_block_IDs";
+MetadataType :: (handle: *void, id: u32) -> *u8 #foreign heif "heif_image_handle_get_metadata_content_type";
+MetadataSize :: (handle: *void, id: u32) -> usize #foreign heif "heif_image_handle_get_metadata_size";
+Metadata :: (handle: *void, id: u32, data: *u8) -> Error #foreign heif "heif_image_handle_get_metadata";
+Open :: (path: *u8, mode: *u8) -> *void #foreign c "fopen";
+Close :: (file: *void) -> s32 #foreign c "fclose";
+Read :: (data: *u8, size: usize, count: usize, file: *void) -> usize #foreign c "fread";
+Write :: (data: *u8, size: usize, count: usize, file: *void) -> usize #foreign c "fwrite";
+Seek :: (file: *void, offset: s64, whence: s32) -> s32 #foreign c "fseeko";
+Tell :: (file: *void) -> s64 #foreign c "ftello";
+Reader :: (data: *u8, size: s32, url: *u8, encoding: *u8, options: s32) -> *void #foreign xml "xmlReaderForMemory";
+FreeReader :: (reader: *void) #foreign xml "xmlFreeTextReader";
+Next :: (reader: *void) -> s32 #foreign xml "xmlTextReaderRead";
+Type :: (reader: *void) -> s32 #foreign xml "xmlTextReaderNodeType";
+Depth :: (reader: *void) -> s32 #foreign xml "xmlTextReaderDepth";
+Local :: (reader: *void) -> *u8 #foreign xml "xmlTextReaderConstLocalName";
+Namespace :: (reader: *void) -> *u8 #foreign xml "xmlTextReaderConstNamespaceUri";
+Value :: (reader: *void) -> *u8 #foreign xml "xmlTextReaderConstValue";
+FirstAttribute :: (reader: *void) -> s32 #foreign xml "xmlTextReaderMoveToFirstAttribute";
+NextAttribute :: (reader: *void) -> s32 #foreign xml "xmlTextReaderMoveToNextAttribute";
+ToElement :: (reader: *void) -> s32 #foreign xml "xmlTextReaderMoveToElement";
+Camera :: "http://ns.google.com/photos/1.0/camera/";
+Container :: "http://ns.google.com/photos/1.0/container/";
+Item :: "http://ns.google.com/photos/1.0/container/item/";
+Number :: (value: string) -> s64 {
+    if value.count == 0 || value.count > 10 { return -1 }
+    result: s64
+    for byte: value { if byte < 48 || byte > 57 { return -1 }; result = result*10+cast(s64)byte-48 }
+    return result
+}
+Match :: (data: []u8, value: string) -> bool {
+    if data.count != value.count { return false }
+    for i: 0..value.count-1 { if data[i] != value[i] { return false } }; return true
+}
+Description :: struct { length: s64; padding: s64; secondary: s64; modern: bool; valid: bool }
+Parse :: (data: []u8) -> Description {
+    result: Description
+    // No DTDs, entity expansion, external documents, recovery or huge-tree mode.
+    reader := Reader(*data[0],cast(s32)data.count,null,null,2144)
+    if reader == null { return result }; defer { FreeReader(reader) }
+    modern: s64 = -1; legacy: s64 = -1; offset: s64 = -1
+    seenModern: bool; seenLegacy: bool; seenOffset: bool
+    directories: s32; directoryDepth: s32 = -1; items: s32; ended: bool
+    steps: s32; status := Next(reader)
+    while status == 1 {
+        steps += 1; if steps > 8192 || Depth(reader) > 32 { return result }
+        kind := Type(reader); name := TextFromCString(Local(reader)); ns := TextFromCString(Namespace(reader))
+        if kind == 5 || kind == 6 || kind == 10 { return result }
+        if kind == 15 && ns == Container && name == "Directory" { directoryDepth = -1; ended = true }
+        if kind == 1 {
+            if ns == Container && name == "Directory" {
+                directories += 1; if directories > 1 { return result }; directoryDepth = Depth(reader)
+            }
+            isItem := ns == Container && name == "Item" && directoryDepth >= 0 && Depth(reader) > directoryDepth
+            primary: bool; motion: bool; mime: bool; hasLength: bool
+            length: s64; padding: s64
+            attribute := FirstAttribute(reader)
+            while attribute == 1 {
+                key := TextFromCString(Local(reader)); namespace := TextFromCString(Namespace(reader)); value := TextFromCString(Value(reader))
+                if namespace == Camera {
+                    if key == "MotionPhoto" { if seenModern { return result }; seenModern = true; modern = Number(value) }
+                    if key == "MicroVideo" { if seenLegacy { return result }; seenLegacy = true; legacy = Number(value) }
+                    if key == "MicroVideoOffset" { if seenOffset { return result }; seenOffset = true; offset = Number(value) }
+                }
+                if isItem && namespace == Item {
+                    if key == "Semantic" { primary = value == "Primary"; motion = value == "MotionPhoto" }
+                    if key == "Mime" { mime = (items == 0 && (value == "image/jpeg" || value == "image/heic" || value == "image/avif")) || (items > 0 && (value == "video/mp4" || value == "video/quicktime")) }
+                    if key == "Length" { length = Number(value); hasLength = true }
+                    if key == "Padding" { padding = Number(value) }
+                }
+                attribute = NextAttribute(reader)
+            }
+            unused ToElement(reader)
+            if isItem {
+                if items >= 32 || padding < 0 || length < 0 || result.length > 0 { return result }
+                if items == 0 {
+                    if !primary || !mime || length != 0 { return result }; result.padding = padding
+                } else {
+                    if primary || !hasLength || padding != 0 { return result }
+                    result.secondary += length
+                    if motion { if !mime || length < 16 { return result }; result.length = length }
+                }
+                items += 1
+            }
+        }
+        status = Next(reader)
+    }
+    if status != 0 { return result }
+    if seenModern {
+        result.modern = true
+        result.valid = modern == 1 && directories == 1 && ended && items >= 2 && result.length >= 16
+    } else if seenLegacy && legacy == 1 && directories == 0 && offset >= 16 {
+        result.length = offset; result.secondary = offset; result.valid = true
+    }
+    if result.length > 134217728 || result.secondary > 1073741824 || result.padding > 1048576 { result.valid = false }
+    return result
+}
+Big :: (bytes: []u8) -> s64 { value: s64; for byte: bytes { value = value*256+cast(s64)byte }; return value }
+At :: (file: *void, at: s64, bytes: []u8) -> bool {
+    return Seek(file,at,0) == 0 && Read(*bytes[0],1,cast(usize)bytes.count,file) == cast(usize)bytes.count
+}
+HEIFDescription :: (path: *u8) -> Description {
+    result: Description
+    context := Context(); if context == null { return result }; defer { FreeContext(context) }
+    error := ReadHEIF(context,path,null); if error.code != 0 { return result }
+    handle: *void; error = Primary(context,*handle)
+    if error.code != 0 || handle == null { return result }; defer { ReleaseHandle(handle) }
+    count := MetadataCount(handle,null); if count < 1 || count > 32 { return result }
+    ids: [32]u32; if MetadataIDs(handle,null,*ids[0],count) != count { return result }
+    found: s32
+    for i: 0..count-1 {
+        if TextFromCString(MetadataType(handle,ids[i])) == "application/rdf+xml" {
+            found += 1; if found > 1 { result.valid = false; return result }
+            length := MetadataSize(handle,ids[i]); if length < 1 || length > 65536 { return result }
+            bytes: [65536]u8; error = Metadata(handle,ids[i],*bytes[0]); if error.code != 0 { return result }
+            result = Parse(bytes[:cast(s32)length])
+        }
+    }
+    return result
+}
+main :: (argc: s32, argv: **u8) -> s32 {
+    if argc != 2 && argc != 3 { return 2 }
+    mode: [4]u8 = .{114,98,0,0}
+    file := Open(argv[1],*mode[0]); if file == null { return 3 }; defer { unused Close(file) }
+    if Seek(file,0,2) != 0 { return 3 }; size := Tell(file)
+    if size < 32 || size > 8589934592 { return 4 }
+    head: [16]u8; if !At(file,0,head[:8]) { return 4 }
+    jpeg := head[0] == 255 && head[1] == 216
+    if !jpeg && !Match(head[4:8],"ftyp") { return 4 }
+    position: s64 = 2; segments: s32; xmp: s32; description: Description; imageStart: s64
+    while jpeg && position < size && position < 4194304 && segments < 1024 {
+        if !At(file,position,head[:2]) || head[0] != 255 { return 4 }
+        while head[1] == 255 { position += 1; if !At(file,position,head[:2]) { return 4 } }
+        marker := head[1]; position += 2
+        if marker == 218 { imageStart = position; break }
+        if marker == 217 || marker == 0 || marker == 216 { return 4 }
+        if marker == 1 || (marker >= 208 && marker <= 215) { continue }
+        if !At(file,position,head[:2]) { return 4 }; length := Big(head[:2])
+        if length < 2 || length > size-position { return 4 }
+        if marker == 225 && length > 31 {
+            bytes: [65536]u8
+            if !At(file,position+2,bytes[:cast(s32)length-2]) { return 4 }
+            if Match(bytes[:28],"http://ns.adobe.com/xap/1.0/") && bytes[28] == 0 {
+                xmp += 1; if xmp > 1 { return 4 }
+                description = Parse(bytes[29:cast(s32)length-2])
+            }
+        }
+        position += length; segments += 1
+    }
+    if !jpeg {
+        description = HEIFDescription(argv[1])
+        if !description.valid || !description.modern || description.secondary != description.length { return 4 }
+        position = 0
+        while position < size && segments < 4096 {
+            if !At(file,position,head[:8]) { return 4 }; length := Big(head[:4]); header: s64 = 8
+            if length == 1 { if !At(file,position+8,head[8:16]) { return 4 }; length = Big(head[8:16]); header = 16 }
+            if length < header || length > size-position { return 4 }
+            if Match(head[4:8],"mpvd") {
+                if position+length != size || length-header != description.length || description.padding != header { return 4 }
+                imageStart = position+header; break
+            }
+            position += length; segments += 1
+        }
+    }
+    if !description.valid || imageStart == 0 { return 4 }
+    start := size-description.length
+    if jpeg {
+        imageEnd := size-description.secondary-description.padding
+        if imageEnd < imageStart+2 || start < imageEnd || !At(file,imageEnd-2,head[:2]) || head[0] != 255 || head[1] != 217 { return 4 }
+    } else if start != imageStart { return 4 }
+    // Verify complete top-level MP4 boxes. No arbitrary 'ftyp' byte search.
+    if !At(file,start,head[:8]) || !Match(head[4:8],"ftyp") { return 4 }
+    at := start; boxes: s32; movie: bool; media: bool
+    while at < size && boxes < 4096 {
+        if !At(file,at,head[:8]) { return 4 }; length := Big(head[:4]); header: s64 = 8
+        if length == 1 { if !At(file,at+8,head[8:16]) { return 4 }; length = Big(head[8:16]); header = 16 }
+        if length == 0 { length = size-at }
+        if length < header || length > size-at { return 4 }
+        if Match(head[4:8],"moov") { movie = true }; if Match(head[4:8],"mdat") { media = true }
+        at += length; boxes += 1
+    }
+    if at != size || !movie || !media { return 4 }
+    if argc == 3 {
+        // Exclusive creation: callers provide a private, previously absent path.
+        writeMode: [4]u8 = .{119,98,120,0}
+        output := Open(argv[2],*writeMode[0]); if output == null { return 3 }; defer { unused Close(output) }
+        buffer: [65536]u8; remaining := description.length
+        if Seek(file,start,0) != 0 { return 3 }
+        while remaining > 0 {
+            count := cast(usize)(ifx remaining > 65536 then 65536 else remaining)
+            if Read(*buffer[0],1,count,file) != count || Write(*buffer[0],1,count,output) != count { return 3 }
+            remaining -= cast(s64)count
+        }
+    }
+    print("{\"version\":1,\"offset\":%,\"length\":%}\n",start,description.length); return 0
+}

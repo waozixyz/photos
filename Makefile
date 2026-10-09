@@ -1,4 +1,12 @@
 .DEFAULT_GOAL := build
+.PHONY: motion-engine
+motion-engine:
+	LDLIBS='-lxml2 -l:libheif.so.1' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry motion_photo:main --exe -o build/motion-photo src/motion_photo.zi
+.PHONY: motion-window-test motion-portable-test
+motion-window-test: build
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/motion_window.py
+motion-portable-test: bundle
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_MOTION_PORTABLE=1 $(PYTHON) tests/motion_window.py
 .PHONY: collage-window-test collage-portable-test
 collage-window-test: build
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/collage_window.py
@@ -58,13 +66,13 @@ vault-auth:
 	LDLIBS='-l:libsodium.so.23' "$$ziran_source/build/bin/ziran" build --root src --target=c --entry vault_auth:main --exe -o build/vault-auth src/vault_auth.zi
 library-query:
 	LDLIBS='-l:libsqlite3.so.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry library_query:main --exe -o build/library-query src/library_query.zi
-build: image-editor video-editor vault-auth library-query photo-decoder semantic-engine text-engine face-engine qr-engine
+build: image-editor video-editor vault-auth library-query photo-decoder semantic-engine text-engine face-engine qr-engine motion-engine
 	$(ZIRAN) build $(PACKAGE_FLAGS)
 	cp scripts/worker.py build/
 	cp -r photos build/
-bundle: image-editor video-editor vault-auth library-query photo-decoder semantic-engine text-engine face-engine qr-engine
+bundle: image-editor video-editor vault-auth library-query photo-decoder semantic-engine text-engine face-engine qr-engine motion-engine
 	$(ZIRAN) tool kryon build portable $(PACKAGE_FLAGS)
-test: image-editor video-editor vault-auth library-query photo-decoder semantic-engine text-engine face-engine qr-engine
+test: image-editor video-editor vault-auth library-query photo-decoder semantic-engine text-engine face-engine qr-engine motion-engine
 	$(PYTHON) -m unittest discover -s tests -v
 sync-test:
 	$(PYTHON) tests/sync_node.py

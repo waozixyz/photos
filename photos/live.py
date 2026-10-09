@@ -38,6 +38,9 @@ def pair(library, still_id, movie_id):
                 return False
         if still['kind'] != 'photo' or movie['kind'] != 'video':
             return False
+        from . import motion
+        if motion.descriptor(still) is not None:
+            return False
         albums = packed(sorted(set(json.loads(still['albums'])) | set(json.loads(movie['albums']))))
         states = {key: max(still[key], movie[key]) for key in ['hidden', 'trashed', 'archived', 'favorite']}
         for photo, link in [(still, dict(video=movie_id)), (movie, dict(photo=still_id))]:
@@ -78,6 +81,9 @@ def detect(library):
 
 
 def separate(library, photo_id, authorize):
+    from . import motion
+    if motion.descriptor(library.photo(photo_id)) is not None:
+        return motion.separate(library, photo_id, authorize)
     with library.db:
         library.db.execute('BEGIN IMMEDIATE')
         photos = components(library, library.photo(photo_id))

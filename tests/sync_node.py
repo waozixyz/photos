@@ -280,7 +280,32 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         assert json.loads(second.photo(collage_id)['metadata'])['photosCollage']==collage_spec
         assert Path(peer.materialize(collage_id)).read_bytes()==first.original(first.photo(collage_id)).read_bytes()
         assert second.query(album='Collages')['photos'][0]['id']==collage_id
-        print('Isolated Daochi v6: signed sync, byte-limited face-rich and compact semantic index batches, originals, editing, places, codecs, Live Photo privacy and separation round trip passed')
+        from motion_fixtures import jpeg as motion_jpeg, heif as motion_heif
+        from photos import motion, live
+        motion_folder=folder/'embedded/Camera';motion_folder.mkdir(parents=True)
+        clip=movie.read_bytes()
+        motion_jpeg(motion_folder/'EmbeddedMP.jpg',clip)
+        motion_heif(motion_folder/'EmbeddedMP.heic',clip)
+        motion_heif(motion_folder/'EmbeddedMP.avif',clip,4)
+        first.import_folders([motion_folder.parent])
+        while client.sync(): pass
+        assert peer.sync()==0
+        for path in motion_folder.iterdir():
+            embedded_id=digest_file(path)
+            assert motion.descriptor(first.photo(embedded_id))==motion.descriptor(second.photo(embedded_id))
+            assert Path(peer.materialize(embedded_id)).read_bytes()==path.read_bytes()
+            extracted,_=motion.extract(second,embedded_id,lambda p:not p['hidden'])
+            assert extracted.read_bytes()==clip
+        embedded_id=digest_file(motion_folder/'EmbeddedMP.jpg')
+        live.separate(second,embedded_id,lambda p:not p['hidden'])
+        while peer.sync(): pass
+        assert client.sync()==0
+        assert motion.descriptor(first.photo(embedded_id)) is None
+        assert json.loads(first.photo(embedded_id)['edits'])['live_separated']
+        assert first.original(first.photo(embedded_id)).read_bytes()==(motion_folder/'EmbeddedMP.jpg').read_bytes()
+        first.import_folders([motion_folder.parent])
+        assert motion.descriptor(first.photo(embedded_id)) is None
+        print('Isolated Daochi v6: signed sync, face/semantic indexes, unchanged originals, editing, places, Live Photo privacy, embedded JPEG/HEIC/AVIF motion and separation round trip passed')
     finally:
         process.terminate()
         process.wait(timeout=10)

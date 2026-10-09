@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.24
+
+- Browse Android Motion Photos with embedded video as one item, including modern JPEG, HEIC and AVIF files and legacy Google JPEGs.
+- Play the motion and audio locally while retaining the unchanged combined original in encrypted ThinkPad backup and folder exports.
+- Separate a motion clip into a video copy, keep captions, dates, albums and privacy settings, and preserve that choice during later imports.
+- Reject malformed motion metadata and clips while retaining originals, and revoke playback when Hidden or Trash access changes.
+
 ## 0.1.23
 
 - Create collages from two through six photos or Live Photo stills, choosing layouts and square, landscape or portrait shapes.

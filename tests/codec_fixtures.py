@@ -26,7 +26,7 @@ def dng(path, orientation=1):
     image.save(path, format='TIFF', tiffinfo=tags)
 
 
-def heic(path, orientation=1):
+def heic(path, orientation=1, xmp=None, codec=1):
     class Error(c.Structure):
         _fields_ = [('code', c.c_int), ('subcode', c.c_int), ('message', c.c_char_p)]
     class Options(c.Structure):
@@ -52,6 +52,7 @@ def heic(path, orientation=1):
     options_free = bind('heif_encoding_options_free', None, ptr)
     encode = bind('heif_context_encode_image', Error, ptr, ptr, ptr, ptr, c.POINTER(ptr))
     write = bind('heif_context_write_to_file', Error, ptr, c.c_char_p)
+    add_xmp = bind('heif_context_add_XMP_metadata', Error, ptr, ptr, ptr, c.c_int)
     release_image = bind('heif_image_release', None, ptr)
     release_encoder = bind('heif_encoder_release', None, ptr)
     release_handle = bind('heif_image_handle_release', None, ptr)
@@ -71,12 +72,16 @@ def heic(path, orientation=1):
             row = bytes(v for x in range(width) for v in
                         (210 if x < 48 else 35, 50 if y < 32 else 175, 80, 255 if x < 48 else 110))
             c.memmove(c.addressof(memory.contents) + y * stride.value, row, len(row))
-        check(encoder(context, 1, c.byref(enc)))
-        check(parameter(enc, b'x265:pools', b'none'))
-        check(parameter(enc, b'x265:frame-threads', b'1'))
+        check(encoder(context, codec, c.byref(enc)))
+        if codec == 1:
+            check(parameter(enc, b'x265:pools', b'none'))
+            check(parameter(enc, b'x265:frame-threads', b'1'))
         check(lossless(enc, 1))
         c.cast(opts, c.POINTER(Options)).contents.orientation = orientation
         check(encode(context, image, enc, opts, c.byref(handle)))
+        if xmp is not None:
+            metadata = c.create_string_buffer(xmp)
+            check(add_xmp(context,handle,c.cast(metadata,ptr),len(xmp)))
         check(write(context, str(path).encode()))
     finally:
         if handle: release_handle(handle)

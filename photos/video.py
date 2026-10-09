@@ -91,7 +91,7 @@ def environment():
         'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS', 'SESSION_MANAGER'}}
 
 
-def probe(path):
+def probe(path, motion=False):
     try:
         result = subprocess.run(['ffprobe', '-v', 'error', '-protocol_whitelist', 'file',
                                  '-show_streams', '-show_format', '-of', 'json', str(path)],
@@ -101,12 +101,12 @@ def probe(path):
         info = json.loads(result.stdout)
         stream = next(s for s in info['streams'] if s['codec_type'] == 'video')
         duration = float(stream.get('duration') or info['format']['duration'])
-        if not math.isfinite(duration) or not 1 <= duration <= 604800:
+        if not math.isfinite(duration) or not (0.05 if motion else 1) <= duration <= (10 if motion else 604800):
             raise ValueError()
         width, height = int(stream['width']), int(stream['height'])
         if not 2 <= width <= 16384 or not 2 <= height <= 16384:
             raise ValueError()
-        if stream.get('color_transfer') in {'smpte2084', 'arib-std-b67'} or stream.get('color_primaries') == 'bt2020':
+        if not motion and (stream.get('color_transfer') in {'smpte2084', 'arib-std-b67'} or stream.get('color_primaries') == 'bt2020'):
             raise LibraryError('HDR video editing needs color conversion support; your original is retained')
         return dict(duration_ms=int(duration * 1000), width=width, height=height,
                     audio=any(s.get('codec_type') == 'audio' for s in info['streams']))

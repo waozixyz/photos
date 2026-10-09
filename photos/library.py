@@ -93,6 +93,8 @@ class Library:
                 path TEXT PRIMARY KEY, size INTEGER, mtime INTEGER,
                 meta_stamp TEXT, photo_id TEXT REFERENCES photos(id));
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS motion_scans (
+                photo_id TEXT PRIMARY KEY, reader_version INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS semantic_embeddings (
                 photo_id TEXT PRIMARY KEY, model TEXT NOT NULL,
                 embedding BLOB, error TEXT NOT NULL DEFAULT '');
@@ -254,6 +256,11 @@ class Library:
                 photo = self.photo(cached['photo_id'])
                 self.preview(photo, self.original(photo))
                 self.db.commit()
+            from . import motion
+            try:
+                motion.detect(self, cached['photo_id'], unchanged=True)
+            except LibraryError:
+                return 'warning'
             return 'unchanged'
         photo_id = digest_file(path)
         existing = self.db.execute('SELECT * FROM photos WHERE id=?', (photo_id,)).fetchone()
@@ -295,6 +302,7 @@ class Library:
             self._ensure_album(name)
         combined = json.loads(existing['metadata']) if existing else {}
         combined.update(metadata)
+        combined.pop('photosMotionScan', None)
         if edits.get('live_separated'):
             combined.pop('photosLive', None)
             combined['photosLiveSeparated'] = True
@@ -352,6 +360,11 @@ class Library:
         self.db.execute('INSERT OR REPLACE INTO sources VALUES(?,?,?,?,?)',
                         (str(path), stat.st_size, stat.st_mtime_ns, stamp, photo_id))
         self.db.commit()
+        from . import motion
+        try:
+            motion.detect(self, photo_id)
+        except LibraryError:
+            warning = True
         return 'warning' if warning else ('merged' if existing else 'added')
 
     def import_folders(self, folders):
@@ -667,7 +680,8 @@ class Library:
         if self.setting('people_enabled',False) and people.member_visible(self,photo_id):
             names=[r[0] for r in self.db.execute('''SELECT DISTINCT g.name FROM person_photos f JOIN people g ON g.id=f.person_id
                 WHERE f.photo_id=? AND g.name<>'' AND g.ignored=0 ORDER BY g.name COLLATE NOCASE,g.id''',(photo_id,))]
-        return dict(id=photo_id, name=photo['name'], live=int(len(parts) == 2),
+        from . import motion
+        return dict(id=photo_id, name=photo['name'], live=int(len(parts) == 2 or motion.descriptor(photo) is not None),
                     caption=photo['caption'].encode()[:8192].decode('utf-8', 'ignore'),
                     tags=photo['tags'].encode()[:8192].decode('utf-8', 'ignore'),
                     people=('People: '+' · '.join(names)).encode()[:8192].decode('utf-8','ignore') if names else '',
@@ -737,7 +751,8 @@ class Library:
             from . import decoding
             asset = decoding.display_path(self, photo) if decoding.supported(photo['extension']) else self.original(photo)
             photo['display'] = str(asset) if asset.is_file() else ''
-            photo['live'] = int(bool(json.loads(photo['metadata']).get('photosLive', {}).get('video')))
+            from . import motion
+            photo['live'] = int(bool(json.loads(photo['metadata']).get('photosLive', {}).get('video')) or motion.descriptor(photo) is not None)
             photo['albums'] = json.loads(photo['albums'])
             photos.append(photo)
         albums = self.album_list('places' if view == 'places' else album_mode, album_sort, search if view in {'albums', 'places'} else '')

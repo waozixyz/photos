@@ -208,12 +208,13 @@ def library_request(library, request, config):
         return result
     if action == 'playback_check':
         photo = library.photo(request.get('id'))
-        from . import live
+        from . import live, motion as embedded_motion
+        embedded = embedded_motion.descriptor(photo) is not None
         parts = live.components(library, photo)
         for part in parts:
             require_access(part['id'])
         motion = parts[-1]
-        if motion['kind'] != 'video' or any(p['trashed'] for p in parts):
+        if (motion['kind'] != 'video' and not embedded) or any(p['trashed'] for p in parts):
             raise LibraryError('Choose a video outside Trash to play')
         if not library.original(motion).is_file():
             if not config.get('node'):
@@ -228,7 +229,11 @@ def library_request(library, request, config):
         result = vault.state(library, request.get('vault_token', ''))
         if any(library.photo(p['id'])['hidden'] for p in parts) and not result['vault_unlocked']:
             raise LibraryError('Hidden is locked; authenticate before playing hidden videos')
-        result.update(playback_id=photo['id'], playback_path=str(library.original(parts[-1])))
+        path = library.original(parts[-1])
+        if embedded:
+            path, _ = embedded_motion.extract(library, photo['id'], authorize)
+            require_access(photo['id'])
+        result.update(playback_id=photo['id'], playback_path=str(path))
         return result
     if action == 'memory_date':
         request = {**request, 'view': 'memories', 'memory_date': request.get('value', ''), 'offset': 0}

@@ -62,7 +62,7 @@ ApplyTerm :: (query: *Predicate, key: string, value: string) {
     if value.count == 0 { query.error = "A search filter needs a value"; return }
     if key == "" { TextMatch(query, value) }
     else if key == "type" {
-        if value == "live" { AddSQL(query, "json_extract(metadata,'$.photosLive.video') IS NOT NULL"); return }
+        if value == "live" { AddSQL(query, "(json_extract(metadata,'$.photosLive.video') IS NOT NULL OR (kind='photo' AND extension IN ('.jpg','.jpeg','.heic','.heif','.avif') AND json_type(metadata,'$.photosMotion.version')='integer' AND json_extract(metadata,'$.photosMotion.version')=1 AND json_type(metadata,'$.photosMotion.offset')='integer' AND json_type(metadata,'$.photosMotion.length')='integer' AND json_extract(metadata,'$.photosMotion.length') BETWEEN 16 AND 134217728 AND json_extract(metadata,'$.photosMotion.offset')>0 AND json_extract(metadata,'$.photosMotion.offset')+json_extract(metadata,'$.photosMotion.length')=size AND coalesce(json_extract(metadata,'$.photosLiveSeparated'),0)=0 AND coalesce(json_extract(edits,'$.live_separated'),0)=0))"); return }
         if value != "photo" && value != "image" && value != "video" { query.error = "Choose type:photo, type:video or type:live"; return }
         AddSQL(query, "kind=?"); Bind(query, ifx value == "image" then "photo" else value)
     } else if key == "favorite" || key == "archived" {

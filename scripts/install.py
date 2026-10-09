@@ -78,6 +78,12 @@ def main():
     qr = repo/'build/detect-qr/detect_qr'
     if not qr.is_file():
         parser.error('Build the Photos QR recognition engine before installing')
+    motion = repo/'build/motion-photo/motion_photo'
+    if not motion.is_file():
+        parser.error('Build the Photos Motion Photo reader before installing')
+    shutil.copyfile(motion,installed/'motion_photo.next')
+    os.chmod(installed/'motion_photo.next',0o755)
+    os.replace(installed/'motion_photo.next',installed/'motion_photo')
     shutil.copyfile(qr,installed/'detect_qr.next')
     os.chmod(installed/'detect_qr.next',0o755)
     os.replace(installed/'detect_qr.next',installed/'detect_qr')
