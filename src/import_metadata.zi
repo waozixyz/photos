@@ -159,6 +159,27 @@ ImportAlbum :: (database: *void, request: string) -> s32 {
     if !Execute(database,"COMMIT") { return Failure("Cannot finish the album import") }
     unused Send(ifx existing then "{\"saved\":1,\"added\":0}\n" else "{\"saved\":1,\"added\":1}\n"); return 0
 }
+AutoMembershipsValid :: (database: *void) -> bool {
+    statement: *void
+    sql := "SELECT json_type(data,'$.auto_memberships') IS NULL OR (json_type(data,'$.auto_memberships')='object' AND (SELECT count(*) FROM json_each(data,'$.auto_memberships'))<=128 AND NOT EXISTS(SELECT 1 FROM json_each(data,'$.auto_memberships') a WHERE a.type<>'array' OR json_array_length(CASE WHEN a.type='array' THEN a.value ELSE '[]' END)>64 OR EXISTS(SELECT 1 FROM json_each(CASE WHEN a.type='array' THEN a.value ELSE '[]' END) p WHERE p.type<>'text' OR length(p.value)<>64 OR length(CAST(p.value AS BLOB))<>64 OR p.value GLOB '*[^0-9a-f]*'))) FROM incoming"
+    if SqlitePrepareText(database,sql,-1,*statement,null) != SQLITE_OK { return false }
+    valid := SqliteStep(statement) == SQLITE_ROW && SqliteColumnInt(statement,0) == 1; unused SqliteFinalize(statement)
+    if !valid { return false }
+    if SqlitePrepareText(database,"SELECT a.key FROM incoming,json_each(data,'$.auto_memberships') a",-1,*statement,null) != SQLITE_OK { return false }
+    defer { unused SqliteFinalize(statement) }
+    while true {
+        status := SqliteStep(statement); if status == SQLITE_DONE { return true }; if status != SQLITE_ROW { return false }
+        name := TextFromBytes(BytesFromPointer(SqliteColumnText(statement,0),cast(u64)SqliteColumnBytes(statement,0)))
+        if !Album.NameValid(name) { return false }; content: bool
+        for byte: name { if byte != 32 { content = true } }; if !content { return false }
+    }
+}
+ImportAutoMemberships :: (database: *void) -> bool {
+    // Album identities come from the fresh writer snapshot. Only memberships
+    // present on the imported photo can receive automatic-rule provenance.
+    sql := "WITH selected AS (SELECT albums.id,a.value FROM incoming,json_each(data,'$.auto_memberships') a JOIN albums ON albums.name=a.key WHERE albums.name IN (SELECT name FROM merged_albums)), provenance AS (SELECT json_group_object(id,json((SELECT json_group_array(value) FROM (SELECT DISTINCT value FROM json_each(selected.value) ORDER BY value)))) AS value,count(*) AS total FROM selected) UPDATE photos SET edits=json_set(edits,'$.auto_albums',json((SELECT value FROM provenance))) WHERE id=(SELECT json_extract(data,'$.id') FROM incoming) AND (SELECT total FROM provenance)>0"
+    return Execute(database,sql)
+}
 main :: (argc: s32, argv: **u8) -> s32 {
     if argc != 2 { return Failure("Supply the private library database") }
     storage := Allocate(16777217); if storage == null { return Failure("Import metadata exceeds available memory") }
@@ -193,7 +214,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
     validation := "SELECT json_type(data)='object' AND json_type(data,'$.metadata')='object' AND json_type(data,'$.albums')='array' AND json_type(data,'$.id')='text' AND length(json_extract(data,'$.id'))=64 AND json_extract(data,'$.id') NOT GLOB '*[^0-9a-f]*' AND typeof(json_extract(data,'$.size'))='integer' AND json_extract(data,'$.size')>=0 AND typeof(json_extract(data,'$.mtime'))='integer' AND typeof(json_extract(data,'$.width'))='integer' AND typeof(json_extract(data,'$.height'))='integer' AND json_extract(data,'$.width')>=0 AND json_extract(data,'$.height')>=0 AND json_type(data,'$.taken') IN ('integer','real') AND json_type(data,'$.path')='text' AND length(json_extract(data,'$.path'))>0 AND json_type(data,'$.stamp')='text' AND json_type(data,'$.name')='text' AND json_type(data,'$.extension')='text' AND json_extract(data,'$.kind') IN ('photo','video') AND json_type(data,'$.caption')='text' AND json_type(data,'$.tags')='text' AND json_type(data,'$.favorite') IN ('true','false') AND json_type(data,'$.archived') IN ('true','false') AND json_type(data,'$.correct_date') IN ('true','false') AND json_type(data,'$.metadata.photosPeople') IS NULL AND json_type(data,'$.metadata.photosAutoAlbums') IS NULL AND NOT EXISTS(SELECT 1 FROM json_each(data,'$.albums') WHERE type<>'text' OR length(value)=0) FROM incoming"
     if SqlitePrepareText(database,validation,-1,*statement,null) != SQLITE_OK { return Failure("Choose valid import metadata") }
     valid = SqliteStep(statement) == SQLITE_ROW && SqliteColumnInt(statement,0) == 1; unused SqliteFinalize(statement)
-    if !valid { return Failure("Choose valid import metadata") }
+    if !valid || !AutoMembershipsValid(database) { return Failure("Choose valid import metadata and automatic album memberships") }
     if !Execute(database,"BEGIN IMMEDIATE") { return Failure("The library is busy; retry import") }
     defer { unused Execute(database,"ROLLBACK") }
     time: Timespec; if GetTime(0,*time) != 0 { return Failure("Cannot read the import time") }
@@ -247,6 +268,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if SqlitePrepareText(database,sql,-1,*statement,null) != SQLITE_OK { return Failure("Cannot store imported photo metadata") }
     valid = Bind(statement,1,combined) && SqliteBindDouble(statement,2,now) == SQLITE_OK && SqliteStep(statement) == SQLITE_DONE; unused SqliteFinalize(statement)
     if !valid { return Failure("Cannot store imported photo metadata") }
+    if !existing && !ImportAutoMemberships(database) { return Failure("Cannot store imported automatic album memberships") }
     if !Execute(database,"INSERT OR REPLACE INTO sources SELECT json_extract(data,'$.path'),json_extract(data,'$.size'),json_extract(data,'$.mtime'),json_extract(data,'$.stamp'),json_extract(data,'$.id') FROM incoming") { return Failure("Cannot store the import source") }
     if !Execute(database,"COMMIT") { return Failure("Cannot finish the import") }
     response := ifx existing then "{\"saved\":1,\"added\":0}\n" else "{\"saved\":1,\"added\":1}\n"

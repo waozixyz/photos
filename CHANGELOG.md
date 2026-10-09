@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.34
+
+- Retain automatic album memberships when importing folder exports without face indexes, including their original people rules.
+- Preserve later manual album changes during source rescans instead of reintroducing removed automatic memberships.
+- Keep photos, albums, automatic memberships and source records together if an import fails or is interrupted; invalid rules produce a warning while originals remain safe.
+
 ## 0.1.33
 
 - Import complete album definitions together, preserving descriptions, covers, pinning, archive state, saved searches and automatic people rules.

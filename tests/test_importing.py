@@ -244,6 +244,60 @@ class MetadataImportTest(unittest.TestCase):
             importing.merge(self.library, self.request())
         self.assertTrue(self.library.db.in_transaction); self.library.db.rollback()
 
+    def test_automatic_membership_native_import_uses_current_album_identity_and_keeps_edits(self):
+        request = self.request(auto_memberships={'Camera': ['b'*64, 'a'*64, 'b'*64],
+                                                'Absent album': ['c'*64]})
+        self.assertTrue(importing.merge(self.library, request))
+        album = self.library.album_details('Camera')
+        self.assertEqual(json.loads(self.library.photo(self.identity)['edits']),
+                         {'auto_albums': {album['id']: ['a'*64, 'b'*64]}})
+        self.assertFalse(self.library.db.execute('SELECT 1 FROM albums WHERE name=?', ('Absent album',)).fetchone())
+        self.library.edit(self.identity, 'album_add', 'Camera')
+        before = self.library.photo(self.identity)
+        self.assertNotIn(album['id'], json.loads(before['edits'])['auto_albums'])
+        self.assertFalse(importing.merge(self.library, request))
+        self.assertEqual(self.library.photo(self.identity), before)
+        self.assertEqual(self.path.read_bytes(), self.original)
+
+    def test_invalid_automatic_memberships_fail_before_native_publication(self):
+        for automatic in [None, [], {'': []}, {'Bad\0name': []}, {'Camera': 'invalid'},
+                          {'Camera': [True]}, {'Camera': ['a'*64+'\0']},
+                          {'Camera': ['a'*64]*65}, {str(i): [] for i in range(129)}]:
+            with self.subTest(automatic=automatic), self.assertRaises(LibraryError):
+                importing.merge(self.library, self.request(auto_memberships=automatic))
+            for table in ['photos', 'albums', 'sources']:
+                self.assertEqual(self.library.db.execute('SELECT count(*) FROM '+table).fetchone()[0], 0)
+        self.assertEqual(self.path.read_bytes(), self.original)
+
+    def test_automatic_provenance_failure_rolls_back_photo_album_and_source_together(self):
+        self.library.db.execute("CREATE TRIGGER fail_provenance BEFORE UPDATE OF edits ON photos BEGIN SELECT RAISE(ABORT,'fixture'); END")
+        self.library.db.commit()
+        with self.assertRaisesRegex(LibraryError, 'automatic album'):
+            importing.merge(self.library, self.request(auto_memberships={'Camera': ['a'*64]}))
+        for table in ['photos', 'albums', 'sources']:
+            self.assertEqual(self.library.db.execute('SELECT count(*) FROM '+table).fetchone()[0], 0)
+        self.assertEqual(self.path.read_bytes(), self.original)
+
+    def test_export_sidecar_without_faces_uses_native_provenance_and_invalid_rules_warn(self):
+        from photos.auto_albums import export_memberships
+        sidecar = self.path.with_name(self.path.name+'.json')
+        metadata = {'photosAutoAlbums': {' Camera ': ['b'*64, 'a'*64]}, 'unknown': None}
+        sidecar.write_text(packed(metadata)); original_sidecar = sidecar.read_bytes()
+        self.assertEqual(self.library.import_file(self.path, self.source), 'added')
+        photo = self.library.photo(self.identity)
+        self.assertEqual(export_memberships(self.library, photo), {'Camera': ['a'*64, 'b'*64]})
+        self.assertEqual(json.loads(photo['metadata']), {'unknown': None})
+        self.assertEqual(self.library.original(photo).read_bytes(), self.original)
+        self.assertEqual(sidecar.read_bytes(), original_sidecar)
+        self.library.edit(self.identity, 'album_remove', 'Camera')
+        sidecar.write_text(packed(metadata)+' ')
+        self.assertEqual(self.library.import_file(self.path, self.source), 'merged')
+        self.assertFalse(export_memberships(self.library, self.library.photo(self.identity)))
+        self.assertNotIn('Camera', json.loads(self.library.photo(self.identity)['albums']))
+        sidecar.write_text(packed({'photosAutoAlbums': {'Camera': ['bad']}}))
+        self.assertEqual(self.library.import_file(self.path, self.source), 'warning')
+        self.assertEqual(self.path.read_bytes(), self.original)
+
 
 class AlbumImportTest(unittest.TestCase):
     def setUp(self):

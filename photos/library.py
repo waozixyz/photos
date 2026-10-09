@@ -268,11 +268,19 @@ class Library:
             destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             from . import importing
             importing.copy(path, destination, photo_id, stat.st_size)
-        # Private face/provenance export imports retain their shared adapter
-        # transaction until those derived tables have a native writer too.
-        derived = any(key in metadata for key in ('photosPeople', 'photosAutoAlbums'))
+        # Private face export imports retain their shared adapter transaction
+        # until those derived tables have a native writer too.
+        derived = 'photosPeople' in metadata
         if not derived:
             from . import importing
+            automatic = metadata.pop('photosAutoAlbums', {})
+            try:
+                from .auto_albums import identities
+                if not isinstance(automatic, dict) or len(automatic) > 128:
+                    raise LibraryError('Invalid automatic album memberships')
+                automatic = {self.album_name(name): identities(selected) for name, selected in automatic.items()}
+            except LibraryError:
+                automatic = {}; warning = True
             exported_albums = metadata.get('albums', [])
             if not isinstance(exported_albums, list):
                 exported_albums = []
@@ -285,7 +293,7 @@ class Library:
                 archived=metadata.get('archived') is True, caption=str(metadata.get('description', '')),
                 tags=metadata.get('tags', '') if isinstance(metadata.get('tags', ''), str) else '',
                 correct_date=bool(metadata.get('photoTakenTime')), path=str(path),
-                mtime=stat.st_mtime_ns, stamp=stamp))
+                mtime=stat.st_mtime_ns, stamp=stamp, auto_memberships=automatic))
             if added:
                 photo = self.photo(photo_id)
                 self.preview(photo, self.original(photo))

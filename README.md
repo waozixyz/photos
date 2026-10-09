@@ -33,8 +33,12 @@ Album definitions publish in one native Ziran transaction, including their
 complete description, cover, pinning, archive state, saved search and automatic
 people rules. Existing definitions retain their later edits and backup stamps;
 failed or interrupted publication rolls back the whole definition.
-Imports carrying private face or automatic-album indexes still use the
-compatibility service; the complete importer port
+Automatic membership provenance for imports without face indexes joins the
+same native photo/album/source-cache transaction. It retains the current album
+identities, later manual membership changes and the people responsible for the
+original additions. Invalid rules warn without discarding the original.
+Imports carrying private face indexes still use the compatibility service;
+the complete importer port
 remains in progress. Some non-TIFF RAW camera formats still lack capture-field
 extraction even when their pixels can be viewed.
 
@@ -438,7 +442,8 @@ The remaining replacement work includes:
   engine, image processor, password verifier, photo/album-property writers,
   original copying, folder discovery, camera/provider/album-sidecar reading
   and ordinary import metadata/source-cache writes are Ziran/Kryon.
-  Album-definition import publication is native too. Private derived-index import writes,
+  Album-definition import publication and automatic-membership import writes
+  without face indexes are native too. Private face-index import writes,
   authorization adapter and encrypted sync worker remain Python.
 
 Choose Play video to watch a video in the Photos window. Pause/resume, Replay,
