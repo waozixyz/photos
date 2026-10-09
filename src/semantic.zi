@@ -1,6 +1,9 @@
 // Native cosine ranking over local normalized CLIP vectors. Never opens a
 // window or connects to a network; the gallery owns privacy filtering.
 #import "std/c_string"
+using SQLite :: #import "sqlite/SQLite";
+LivePhoto :: #import "live_photo";
+#import "std/text_buffer"
 sqlite :: #system_library "sqlite3";
 libc :: #system_library "c";
 Open :: (path: *u8, mode: *u8) -> *void #foreign libc "fopen";
@@ -16,7 +19,7 @@ ValueBlob :: (value: *void) -> *void #foreign sqlite "sqlite3_value_blob";
 Result :: (context: *void, value: float64) #foreign sqlite "sqlite3_result_double";
 vector: [512]float32;
 Model :: "clip-vit-b32-int8-v1";
-RankSQL :: "photos_semantic_score((SELECT embedding FROM semantic_embeddings WHERE photo_id=photos.id AND model='clip-vit-b32-int8-v1'))";
+RankSQL :: "photos_semantic_score((SELECT embedding FROM semantic_embeddings WHERE photo_id=photos.id AND model='clip-vit-b32-int8-v1' AND error=''))";
 Score :: (context: *void, argc: s32, argv: **void) {
     Result(context,-1.0)
     if argc != 1 || ValueType(argv[0]) != 4 || ValueBytes(argv[0]) != 2048 { return }
@@ -37,9 +40,25 @@ Register :: (database: *void, path: string) -> bool {
     file := Open(*bytes[0],*mode[0]); if file == null { return false }
     defer { unused Close(file) }
     if Read(cast(*void)*vector[0],1,2048,file) != 2048 || Get(file) != -1 { return false }
+    return Install(database)
+}
+Install :: (database: *void) -> bool {
     norm: float64
     for i: 0..511 { value := cast(float64)vector[i]; if value != value || value < -1.001 || value > 1.001 { return false }; norm += value * value }
     if norm < 0.99 || norm > 1.01 { return false }
     name: [32]u8; unused CopyCString("photos_semantic_score",name[:]); callback: Scalar = Score
     return Create(database,*name[0],1,0x200801,null,callback,null,null,null) == 0
+}
+RegisterPhoto :: (database: *void, identity: string) -> bool {
+    sql: Vec(u8)
+    BuilderPrint(*sql,"SELECT embedding FROM photos JOIN semantic_embeddings e ON e.photo_id=photos.id WHERE photos.id=? AND photos.kind='photo' AND photos.hidden=0 AND photos.trashed=0 AND e.model=? AND e.error='' AND %",LivePhoto.GallerySQL)
+    statement: *void
+    if SqlitePrepareText(database,BuilderFinish(sql),-1,*statement,null) != SQLITE_OK { return false }
+    defer { unused SqliteFinalize(statement) }
+    if SqliteBindTextString(statement,1,identity,-1) != SQLITE_OK || SqliteBindTextString(statement,2,Model,-1) != SQLITE_OK { return false }
+    if SqliteStep(statement) != SQLITE_ROW || SqliteColumnType(statement,0) != SQLITE_BLOB || SqliteColumnBytes(statement,0) != 2048 { return false }
+    bytes := SqliteColumnBlob(statement,0)
+    if bytes == null { return false }
+    unused Copy(cast(*void)*vector[0],cast(*void)bytes,2048)
+    return Install(database)
 }

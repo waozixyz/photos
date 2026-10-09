@@ -102,8 +102,13 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         import struct
         embedding = struct.pack('<512f', 1.0, *([0.0] * 511))
         first.db.execute('INSERT INTO semantic_embeddings VALUES(?,?,?,?)', (photo_id, semantic.MODEL, embedding, ''))
+        first.db.execute('INSERT INTO semantic_embeddings VALUES(?,?,?,?)', (large_id, semantic.MODEL, embedding, ''))
         first.db.commit()
+        first.set_setting('semantic_enabled',True)
+        first.set_setting('semantic_processing',False)
+        assert [p['id'] for p in first.query('similar',similar_id=photo_id)['photos']] == [large_id]
         first.edit(photo_id, 'favorite_set', '0')
+        first.edit(large_id, 'favorite_set', '0')
         assert client.sync() == 0
         second = Library(folder/'thinkpad')
         identity = second.root/'private/identity.json'
@@ -123,6 +128,10 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         assert second.photo(photo_id)['taken'] == -315521755
         assert semantic.encrypted_index(second, photo_id) == semantic.encrypted_index(first, photo_id)
         assert not second.setting('semantic_enabled', False)
+        second.set_setting('semantic_enabled',True)
+        second.set_setting('semantic_processing',False)
+        assert [p['id'] for p in second.query('similar',similar_id=photo_id)['photos']] == [large_id]
+        second.set_setting('semantic_enabled',False)
         original = Path(peer.materialize(photo_id))
         assert original.read_bytes() == (source/'fixture.jpg').read_bytes()
         # Recover the original account and content keys from an encrypted

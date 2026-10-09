@@ -60,7 +60,7 @@ LayoutFeed :: (cols: s32, height: float32) -> float32 {
     for i: 0..Model.count - 1 {
         group := i == 0
         if i > 0 { group = TextUntilNul(Model.photos[i].date[:]) != TextUntilNul(Model.photos[i-1].date[:]) }
-        if Model.view == "large" { group = false }
+        if Model.view == "large" || Model.view == "similar" { group = false }
         if group { if column > 0 { y += height }; column = 0; y += 42.0 }
         unused VecPush(item_y, y); unused VecPush(item_column, column); unused VecPush(group_start, group)
         column += 1; if column >= cols { column = 0; y += height }
@@ -748,6 +748,9 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
             if Action(session, 370, "Play Live Photo", .{x + 460.0, body.y, 144.0, 36.0}, ready && !photo.trashed) { Model.BeginPlayback() }
             if Action(session, 371, "Separate files", .{x + 614.0, body.y, 138.0, 36.0}, ready) { Model.Apply("live_separate") }
         }
+        if Action(session,669,ifx Model.semantic_enabled then "Find similar" else "Enable ML search",.{x+width-138.0,body.y,138.0,36.0},ready && TextUntilNul(photo.kind[:]) == "photo" && !photo.hidden && !photo.trashed) {
+            if Model.semantic_enabled { Model.SimilarPhotos() } else { Model.Navigate("semantic") }; return 0
+        }
         if Action(session, 215, "Edit image", .{x, body.y + 44.0, 126.0, 36.0}, ready && TextUntilNul(photo.kind[:]) == "photo" && !photo.trashed) { Model.BeginImageEdit() }
         if TextUntilNul(photo.kind[:]) == "video" {
             if Action(session, 330, "Edit video", .{x, body.y + 44.0, 126.0, 36.0}, ready && !photo.trashed) { Model.BeginVideoEdit() }
@@ -840,6 +843,11 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
             body.y += 44.0; body.height -= 44.0
         }
         if !Model.CatalogView() {
+            if Model.view == "similar" {
+                Label(session,670,"Similar photos · local ML matches",.{x,body.y,width,30.0},20)
+                Label(session,671,"Review matches individually · existing album and Trash actions are available",.{x,body.y+34.0,width,26.0},14)
+                body.y += 70.0; body.height -= 70.0
+            }
             if Model.view == "large" {
                 Label(session,665,"Large files · backed-up originals over 10 MiB",.{x,body.y,width,30.0},20)
                 choices: [3]string = .{"All files","Photos only","Videos only"}
@@ -911,7 +919,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                 }
             }
             if !Model.selecting {
-                if Action(session, 60, ifx Model.view == "large" then "Largest first" else (ifx Model.view == "semantic" then "Closest first" else (ifx Model.sort == "newest" then "Newest first" else "Oldest first")), .{x + width - 132.0, body.y, 132.0, 36.0}, !Model.loading && Model.view != "semantic" && Model.view != "large") { Model.ToggleSort() }
+                if Action(session, 60, ifx Model.view == "large" then "Largest first" else (ifx Model.view == "semantic" || Model.view == "similar" then "Closest first" else (ifx Model.sort == "newest" then "Newest first" else "Oldest first")), .{x + width - 132.0, body.y, 132.0, 36.0}, !Model.loading && Model.view != "semantic" && Model.view != "similar" && Model.view != "large") { Model.ToggleSort() }
             }
             body.y += 44.0; body.height -= 44.0
             if width < 620.0 && Model.JumpGallery() && !Model.selecting {

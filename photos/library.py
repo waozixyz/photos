@@ -501,20 +501,20 @@ class Library:
                     taken=datetime.fromtimestamp(photo['taken'], timezone.utc).isoformat(),
                     location=f"{geo[0]}, {geo[1]}" if geo else '')
 
-    def query(self, view='photos', search='', album='', offset=0, limit=60, sort='newest', album_mode='active', album_sort='name', memory_date='', hidden_access=True, map_bounds=None, map_gallery=False, person='', people_mode='active', lane_year=0, jump_day='', large_type='all'):
+    def query(self, view='photos', search='', album='', offset=0, limit=60, sort='newest', album_mode='active', album_sort='name', memory_date='', hidden_access=True, map_bounds=None, map_gallery=False, person='', people_mode='active', lane_year=0, jump_day='', large_type='all', similar_id=''):
         # Keep derived summaries and large-file byte totals consistent with
         # the rows hydrated below, including paired originals and privacy.
-        locked = view in {'map','people','lane','auto_people','large'} and not self.db.in_transaction
+        locked = view in {'map','people','lane','auto_people','large','similar'} and not self.db.in_transaction
         if locked:
             self.db.execute('BEGIN IMMEDIATE')
         try:
             return self._query(view, search, album, offset, limit, sort, album_mode, album_sort,
-                               memory_date, hidden_access, map_bounds, map_gallery, person, people_mode, lane_year, jump_day, large_type)
+                               memory_date, hidden_access, map_bounds, map_gallery, person, people_mode, lane_year, jump_day, large_type, similar_id)
         finally:
             if locked:
                 self.db.rollback()
 
-    def _query(self, view, search, album, offset, limit, sort, album_mode, album_sort, memory_date, hidden_access, map_bounds, map_gallery, person, people_mode, lane_year, jump_day, large_type):
+    def _query(self, view, search, album, offset, limit, sort, album_mode, album_sort, memory_date, hidden_access, map_bounds, map_gallery, person, people_mode, lane_year, jump_day, large_type, similar_id):
         from .query import page
         album_detail = self.db.execute('SELECT * FROM albums WHERE name=? AND deleted=0', (album,)).fetchone() if album else None
         smart_filter = album_detail['filter'] if album_detail else ''
@@ -522,7 +522,7 @@ class Library:
         request = dict(view=view, search=search, album=album, offset=max(0, int(offset)),
                         limit=max(1, min(100, int(limit))), sort=sort, memory_date=memory_date,
                         hidden_access=int(bool(hidden_access)), filter=smart_filter, map_gallery=int(bool(map_gallery)), person=person,
-                        lane_year=lane_year,jump_day=jump_day, large_type=large_type, **map_request)
+                        lane_year=lane_year,jump_day=jump_day, large_type=large_type, similar_id=similar_id, **map_request)
         if view=='lane':
             from . import people
             detail = people.group(self,person)
@@ -531,6 +531,8 @@ class Library:
         if view == 'semantic':
             from .semantic import search_page
             response = search_page(self, request, page)
+        elif view == 'similar' and not self.setting('semantic_enabled',False):
+            response = dict(count=0,ids=[])
         elif view=='people' and (not person or not self.setting('people_enabled',False)):
             response = dict(count=0,ids=[])
         else:
@@ -543,7 +545,7 @@ class Library:
             photo = dict(row)
             # Native ID paging and row hydration are separate reads. A photo
             # hidden by another request in between must not expose its paths.
-            if (photo['hidden'] and (not hidden_access or view in {'map', 'semantic','people','lane','large'})) or (view in {'map', 'semantic','people','lane','large'} and photo['trashed']):
+            if (photo['hidden'] and (not hidden_access or view in {'map', 'semantic','people','lane','large','similar'})) or (view in {'map', 'semantic','people','lane','large','similar'} and photo['trashed']):
                 continue
             if view == 'large': photo['storage_size'] = storage_sizes[photo['id']]
             from . import live
@@ -551,7 +553,7 @@ class Library:
                 parts = live.components(self, photo)
             except LibraryError:
                 continue
-            if any(p['hidden'] and (not hidden_access or view in {'map', 'semantic','people','lane','large'}) for p in parts):
+            if any(p['hidden'] and (not hidden_access or view in {'map', 'semantic','people','lane','large','similar'}) for p in parts):
                 continue
             if any(bool(p['trashed']) != bool(photo['trashed']) for p in parts):
                 continue

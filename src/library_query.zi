@@ -5,6 +5,7 @@ Search :: #import "search";
 Locations :: #import "locations";
 Geo :: #import "geo";
 Semantic :: #import "semantic";
+LivePhoto :: #import "live_photo";
 Presentation :: #import "presentation";
 Guest :: #import "guest_scope";
 Clock :: #import "std/date_time_linux";
@@ -93,7 +94,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
     }
     // Motion originals remain separate encrypted records, but only their still
     // is a gallery item. Incomplete or mismatched privacy updates fail closed.
-    Search.AddSQL(*query, " AND coalesce(json_extract(metadata,'$.photosLive.photo'),'')='' AND (json_extract(metadata,'$.photosLive.video') IS NULL OR EXISTS(SELECT 1 FROM photos motion WHERE motion.id=json_extract(photos.metadata,'$.photosLive.video') AND motion.kind='video' AND json_extract(motion.metadata,'$.photosLive.photo')=photos.id AND motion.hidden=photos.hidden AND (motion.trashed>0)=(photos.trashed>0)))")
+    Search.AddSQL(*query, " AND "); Search.AddSQL(*query,LivePhoto.GallerySQL)
     Guest.Predicate(*guest,*query)
     if !guest.active && album[0] != 0 && filter[0] == 0 { Search.AddSQL(*query," AND EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=?)"); Search.Bind(*query,TextUntilNul(album[:])) }
     if name == "people" || name == "lane" {
@@ -145,6 +146,18 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if !Guest.Populate(*guest,database) { return Failure("Cannot read Guest view selection") }
     if SqliteExecText(database,"BEGIN") != SQLITE_OK { return Failure("Cannot open a gallery snapshot") }
     defer { unused SqliteExecText(database,"ROLLBACK") }
+    similar_ready: bool
+    if name == "similar" {
+        seed: [65]u8
+        if !Decode(json,"similar_id",seed[:]) || TextUntilNul(seed[:]).count != 64 { return Failure("Choose a photo to find similar images") }
+        for i: 0..63 { byte := seed[i]; if !(byte >= 48 && byte <= 57 || byte >= 97 && byte <= 102) { return Failure("Choose a photo to find similar images") } }
+        Search.AddSQL(*query," AND kind='photo' AND hidden=0 AND trashed=0 AND id<>?"); Search.Bind(*query,TextUntilNul(seed[:]))
+        similar_ready = Semantic.RegisterPhoto(database,TextUntilNul(seed[:]))
+        if similar_ready {
+            Search.AddSQL(*query," AND "); Search.AddSQL(*query,Semantic.RankSQL); Search.AddSQL(*query," >= 0.90")
+        } else { Search.AddSQL(*query," AND 0") }
+        if jump[0] != 0 { return Failure("Similar photos are ordered by similarity; open the timeline to jump to a date") }
+    }
     lane_years: [256]s32; lane_count: s32; lane_year := Number(json,"lane_year",0)
     if name == "lane" {
         copy: Vec(u8); for i: 0..query.sql.count-1 { unused VecPush(copy,query.sql[i]) }
@@ -195,7 +208,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
     BuilderPrint(*rows," ORDER BY ")
     if guest.active && guest.selection { BuilderPrint(*rows,"(SELECT ordinal FROM guest_selection g WHERE g.id=photos.id) ASC,") }
     if slideshow && Number(json,"slide_shuffle",0) == 1 { BuilderPrint(*rows,"photos_order(id,%) ASC,",Number(json,"slide_seed",1)) }
-    if name == "semantic" { BuilderPrint(*rows,"% DESC,",Semantic.RankSQL) }
+    if name == "semantic" || (name == "similar" && similar_ready) { BuilderPrint(*rows,"% DESC,",Semantic.RankSQL) }
     if name == "large" { BuilderPrint(*rows,"% DESC,",Storage.LargeBytesSQL) }
     BuilderPrint(*rows,"taken %,id LIMIT % OFFSET %",ifx order == "newest" || name == "large" then "DESC" else "ASC",limit,page)
     rows_sql := BuilderFinish(rows)

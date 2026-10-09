@@ -661,3 +661,21 @@ retain originals; this view does not permanently reclaim node storage.
 This follows Ente's [large-file review](https://ente.photos/help/photos/features/albums-and-organization/storage-optimization#view-large-files)
 within the ThinkPad-only policy. Mobile space recovery, cache management and
 similar-image review remain unfinished.
+
+Similar photos
+--------------
+
+After enabling local Semantic search and indexing your photos, open a photo
+and choose Find similar. Photos compares its existing image vector with other
+indexed photos in the native Ziran gallery engine, returning cosine scores of
+at least 0.90 with the closest matches first. This uses the image index directly
+and does not run a new text query or contact an external service.
+
+Archived photos are included. The reference photo, videos, Hidden, Trash and
+invalid or failed indexes are excluded; paired Live Photo privacy applies to
+both reference and candidates. If the reference becomes private or loses its
+index, refreshing clears the matches. Existing selection, album and recoverable
+Trash actions are available. Machine learning remains opt-in.
+
+This is per-photo similarity review. Whole-library similar-image groups and
+the album-preserving cleanup workflow in Ente remain unfinished.

@@ -1,0 +1,2 @@
+// A paired Live Photo is one gallery item only when both originals agree.
+GallerySQL :: "coalesce(json_extract(photos.metadata,'$.photosLive.photo'),'')='' AND (json_extract(photos.metadata,'$.photosLive.video') IS NULL OR EXISTS(SELECT 1 FROM photos motion WHERE motion.id=json_extract(photos.metadata,'$.photosLive.video') AND motion.kind='video' AND json_extract(motion.metadata,'$.photosLive.photo')=photos.id AND motion.hidden=photos.hidden AND (motion.trashed>0)=(photos.trashed>0)))";

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.52
+
+- Find similar photos from the viewer using existing local image indexes, with the closest matches first.
+- Review, select and organize matches or move them to recoverable Trash while retaining their original bytes.
+- Exclude Hidden, Trash and invalid indexes, and clear derived matches when their reference photo becomes private.
+
 ## 0.1.51
 
 - Review backed-up originals larger than 10 MiB, ordered from largest to smallest with photo and video filters.

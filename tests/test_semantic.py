@@ -131,8 +131,9 @@ class SemanticTest(unittest.TestCase):
         try:semantic.prepare()
         except LibraryError:self.skipTest('Local models are optional; run make semantic-models to verify actual inference')
         red=Image.new('RGB',(300,200),(255,0,0));blue=Image.new('RGB',(300,200),(0,0,255))
-        source=self.root/'real';source.mkdir();red.save(source/'red.png');blue.save(source/'blue.png');self.library.import_folders([source])
-        for path in [source/'red.png',source/'blue.png']:
+        source=self.root/'real';source.mkdir();red.save(source/'red.png');blue.save(source/'blue.png')
+        red.save(source/'red-twin.png',compress_level=0);self.library.import_folders([source])
+        for path in [source/'red.png',source/'blue.png',source/'red-twin.png']:
             photo=self.library.photo(digest_file(path));blob=semantic.infer(self.library,'image',semantic.image_tensor(self.library,photo))
             self.library.db.execute('INSERT OR REPLACE INTO semantic_embeddings VALUES(?,?,?,?)',(photo['id'],semantic.MODEL,blob,''))
         self.library.db.commit()
@@ -140,6 +141,9 @@ class SemanticTest(unittest.TestCase):
         values=struct.unpack('<512f',text)
         def dot(path):return sum(a*b for a,b in zip(values,struct.unpack('<512f',self.library.db.execute('SELECT embedding FROM semantic_embeddings WHERE photo_id=?',(digest_file(path),)).fetchone()[0])))
         self.assertGreater(dot(source/'red.png'),dot(source/'blue.png'))
+        similar = self.library.query('similar',similar_id=digest_file(source/'red.png'))
+        self.assertEqual(similar['photos'][0]['id'],digest_file(source/'red-twin.png'))
+        self.assertNotIn(digest_file(source/'red.png'),[p['id'] for p in similar['photos']])
         self.assertEqual(len(semantic.text_tensor('cat '*120)),616)
         for text in ['',[],True,'a\0b','a'*513]:
             with self.assertRaises(LibraryError):semantic.text_tensor(text)
