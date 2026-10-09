@@ -6,7 +6,7 @@ import re
 import threading
 
 from .library import LibraryError, atomic, packed
-from . import decoding, live, query, vault
+from . import decoding, query, vault
 
 # A mode change and every local RPC have one ordering. Background backup still
 # uses the library directly and retains its original pinned-node policy.
@@ -46,45 +46,19 @@ def scope(library):
         return dict(kind='invalid')
 
 
-def visible(library, photo_id):
-    try:
-        photo = library.photo(photo_id)
-        parts = live.components(library, photo)
-        link = json.loads(photo['metadata']).get('photosLive', {})
-        return not link.get('photo') and all(not p['hidden'] and not p['trashed'] for p in parts)
-    except (LibraryError, ValueError, TypeError, AttributeError):
-        return False
-
-
 def selected(library, value, offset=0, limit=60):
-    if value['kind'] == 'selection':
-        ids = [identity for identity in value['ids'] if visible(library, identity)]
-        return dict(ids=ids[offset:offset+limit], count=len(ids))
-    if value['kind'] == 'album':
-        album = library.db.execute('SELECT name FROM albums WHERE id=? AND deleted=0', (value['id'],)).fetchone()
-        if album is None:
-            return dict(ids=[], count=0)
-        # Retain the original smart-album rule even if a separate owner client
-        # later edits its definition. A rename follows the stable album ID.
-        return query.page(library, view='photos', album=album['name'], filter=value['filter'],
-                          hidden_access=0, offset=offset, limit=limit, sort='newest')
-    return dict(ids=[], count=0)
+    if value['kind'] == 'invalid':
+        return dict(ids=[], count=0)
+    # One read-only native snapshot applies selection order, stable album
+    # identities, frozen smart rules and paired-component privacy together.
+    return query.page(library, guest_scope=value, offset=offset, limit=limit)
 
 
 def allowed(library, value, photo_id):
-    if not isinstance(photo_id, str) or not HASH.fullmatch(photo_id) or not visible(library, photo_id):
+    if not isinstance(photo_id, str) or not HASH.fullmatch(photo_id) or value['kind'] == 'invalid':
         return False
-    if value['kind'] == 'selection':
-        return photo_id in value['ids']
-    if value['kind'] == 'album':
-        album = library.db.execute('SELECT name FROM albums WHERE id=? AND deleted=0', (value['id'],)).fetchone()
-        if album:
-            # Use the same native predicate for the exact item, including smart
-            # rules and Live Photo visibility, rather than trusting a client ID.
-            result = query.page(library, view='photos', album=album['name'], filter=value['filter'],
-                                hidden_access=0, offset=0, limit=1, sort='newest', photo_id=photo_id)
-            return photo_id in result['ids']
-    return False
+    result = query.page(library, guest_scope=value, offset=0, limit=1, photo_id=photo_id)
+    return photo_id in result['ids']
 
 
 def empty(message='Guest view · authenticate to leave'):
@@ -118,7 +92,7 @@ def page(library, value, request):
         result = empty()
         result.update(count=selection['count'], total=selection['count'],
                       photos=[photo(library, identity, request.get('gallery_format') == 2)
-                              for identity in selection['ids'] if visible(library, identity)])
+                              for identity in selection['ids']])
         return result
     finally:
         if owns_transaction:
@@ -148,9 +122,9 @@ def start(library, request):
                     not isinstance(i, str) or not HASH.fullmatch(i) for i in ids):
                 raise LibraryError('Choose between 1 and 1000 photos or videos for Guest view')
             ids = list(dict.fromkeys(ids))
-            if any(not visible(library, identity) for identity in ids):
-                raise LibraryError('Restore and unhide every selected item before starting Guest view')
             value = dict(version=1, kind='selection', ids=ids)
+            if selected(library, value, limit=1)['count'] != len(ids):
+                raise LibraryError('Restore and unhide every selected item before starting Guest view')
         atomic(path(library), packed(value).encode())
         directory = os.open(path(library).parent, os.O_RDONLY | os.O_DIRECTORY)
         try: os.fsync(directory)

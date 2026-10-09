@@ -170,3 +170,51 @@ class GuestTest(unittest.TestCase):
             with self.assertRaises(OSError): self.start()
         self.assertIsNone(guest.scope(self.library))
         self.assertFalse(self.library.db.in_transaction); self.originals_safe()
+
+    def test_native_scope_validates_every_identity_and_rejects_malformed_rules(self):
+        good = dict(version=1, kind='selection', ids=self.ids[:2])
+        malformed = [None, False, {}, {**good, 'version': '1'}, {**good, 'version': True},
+                     {**good, 'kind': 'selection\0ignored'}, {**good, 'ids': []},
+                     {**good, 'ids': self.ids[:1]*2}, {**good, 'ids': self.ids[:1]*1001},
+                     {**good, 'ids': [True]}, {**good, 'ids': ['a'*63]},
+                     {**good, 'ids': ['a'*64+'\0']}, {**good, 'ids': ['../outside']},
+                     dict(version=1, kind='album', id='a'*64, filter=None),
+                     dict(version=1, kind='album', id='a'*64, filter='a'*513),
+                     dict(version=1, kind='album', id='a'*64, filter='type:photo\0type:video')]
+        before = [tuple(row) for row in self.library.db.execute('SELECT * FROM photos ORDER BY id')]
+        for value in malformed:
+            with self.subTest(value=str(value)[:100]), self.assertRaises(LibraryError):
+                query.page(self.library, guest_scope=value)
+        self.assertEqual([tuple(row) for row in self.library.db.execute('SELECT * FROM photos ORDER BY id')], before)
+        self.originals_safe()
+
+    def test_native_thousand_identity_scope_keeps_order_paging_and_no_library_table(self):
+        import hashlib
+        ids = list(reversed(self.ids)) + [hashlib.sha256(f'absent {i}'.encode()).hexdigest() for i in range(928)]
+        value = dict(version=1, kind='selection', ids=ids)
+        self.assertGreater(len(packed(dict(guest_scope=value)).encode()), 65536)
+        first = query.page(self.library, guest_scope=value, limit=60)
+        second = query.page(self.library, guest_scope=value, offset=60, limit=60)
+        self.assertEqual(first['count'], 72); self.assertEqual(first['ids'], ids[:60])
+        self.assertEqual(second['count'], 72); self.assertEqual(second['ids'], ids[60:72])
+        self.assertIsNone(self.library.db.execute("SELECT name FROM sqlite_master WHERE name='guest_selection'").fetchone())
+        self.assertFalse(query.page(self.library, guest_scope=value, photo_id=ids[-1])['ids'])
+        self.originals_safe()
+
+    def test_native_guest_scope_overrides_owner_parameters_and_rechecks_live_privacy(self):
+        value = dict(version=1, kind='selection', ids=self.ids[:2])
+        result = query.page(self.library, guest_scope=value, view='hidden', hidden_access=1,
+                            album='Other', search='is:favorite', filter='type:video', sort='oldest',
+                            slideshow=1, slide_albums=[dict(name='Other', filter='')],
+                            jump_day='2020-01-01')
+        self.assertEqual(result['ids'], self.ids[:2]); self.assertEqual(result['count'], 2)
+        self.assertNotIn('jump_offset', result); self.assertNotIn('slide_offset', result)
+        self.assertFalse(query.page(self.library, guest_scope=value, photo_id=self.ids[3])['ids'])
+        movie = self.source/'Privacy.mp4'; movie.write_bytes(b'Synthetic paired video')
+        self.library.import_folders([self.source.parent]); movie_id = digest_file(movie)
+        live.pair(self.library, self.ids[0], movie_id)
+        self.assertEqual(query.page(self.library, guest_scope=value)['count'], 2)
+        self.library.db.execute('UPDATE photos SET hidden=1 WHERE id=?', (movie_id,)); self.library.db.commit()
+        self.assertEqual(query.page(self.library, guest_scope=value)['ids'], self.ids[1:2])
+        self.assertFalse(query.page(self.library, guest_scope=value, photo_id=self.ids[0])['ids'])
+        self.originals_safe()

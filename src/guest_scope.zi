@@ -1,0 +1,93 @@
+// Read-only presentation permissions. Only the private gallery snapshot decides
+// which selected items or current album members may be handed to the viewer.
+using SQLite :: #import "sqlite/SQLite";
+Search :: #import "search";
+#import "std/json_scan"
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+
+Identity :: struct { bytes: [65]u8 }
+Scope :: struct {
+    active: bool
+    selection: bool
+    ids: [1000]Identity
+    count: s32
+    album: [65]u8
+    filter: [513]u8
+    error: string
+}
+
+ReadIdentity :: (json: string, at: s32, bytes: []u8) -> bool {
+    if ReadStringText(json,at,bytes) != 64 { return false }
+    for i: 0..63 {
+        byte := bytes[i]
+        if !((byte >= 48 && byte <= 57) || (byte >= 97 && byte <= 102)) { return false }
+    }
+    bytes[64] = 0; return true
+}
+
+ReadScope :: (json: string, scope: *Scope) {
+    at := FieldAt(json,0,"guest_scope"); if at < 0 { return }
+    scope.active = true; scope.error = "Choose a valid Guest view scope"
+    if json[at] != 123 { return }
+    version := ReadNumber(json,FieldAt(json,at,"version"))
+    if !version.valid || version.value != 1.0 { return }
+    kind: [16]u8
+    kind_size := ReadStringText(json,FieldAt(json,at,"kind"),kind[:])
+    if kind_size < 1 || kind_size >= 16 { return }
+    for i: 0..kind_size-1 { if kind[i] == 0 { return } }
+    kind[kind_size] = 0
+    name := TextUntilNul(kind[:])
+    if name == "selection" {
+        scope.selection = true
+        array := FieldAt(json,at,"ids"); if array < 0 || json[array] != 91 { return }
+        item := Space(json,array+1)
+        while item >= 0 && item < cast(s32)json.count && json[item] != 93 {
+            if scope.count >= 1000 || !ReadIdentity(json,item,scope.ids[scope.count].bytes[:]) { return }
+            id := TextUntilNul(scope.ids[scope.count].bytes[:])
+            for i: 0..scope.count-1 { if id == TextUntilNul(scope.ids[i].bytes[:]) { return } }
+            scope.count += 1
+            item = Space(json,ValueEnd(json,item,0))
+            if item >= 0 && item < cast(s32)json.count && json[item] == 44 { item = Space(json,item+1) } else { break }
+        }
+        if scope.count == 0 || item < 0 || item >= cast(s32)json.count || json[item] != 93 { return }
+    } else if name == "album" {
+        if !ReadIdentity(json,FieldAt(json,at,"id"),scope.album[:]) { return }
+        size := ReadStringText(json,FieldAt(json,at,"filter"),scope.filter[:])
+        if size < 0 || size > 512 { return }
+        for i: 0..size-1 { if scope.filter[i] == 0 { return } }
+        scope.filter[size] = 0
+    } else { return }
+    scope.error = ""
+}
+
+Predicate :: (scope: *Scope, query: *Search.Predicate) {
+    if !scope.active { return }
+    if scope.selection {
+        Search.AddSQL(query," AND EXISTS(SELECT 1 FROM guest_selection g WHERE g.id=photos.id)")
+    } else {
+        Search.AddSQL(query," AND EXISTS(SELECT 1 FROM albums a WHERE a.id=? AND a.deleted=0)")
+        Search.Bind(query,TextUntilNul(scope.album[:]))
+        if scope.filter[0] == 0 {
+            Search.AddSQL(query," AND EXISTS(SELECT 1 FROM json_each(photos.albums) j JOIN albums a ON a.name=j.value WHERE a.id=? AND a.deleted=0)")
+            Search.Bind(query,TextUntilNul(scope.album[:]))
+        } else { Search.Parse(query,TextUntilNul(scope.filter[:])) }
+    }
+}
+
+Populate :: (scope: *Scope, database: *void) -> bool {
+    if !scope.active || !scope.selection { return true }
+    // The main database is opened read-only. Temporary identities stay in
+    // memory and disappear with this helper; they never enter library backup.
+    if SqliteExecText(database,"PRAGMA temp_store=MEMORY") != SQLITE_OK ||
+        SqliteExecText(database,"CREATE TEMP TABLE guest_selection(id TEXT PRIMARY KEY,ordinal INTEGER NOT NULL)") != SQLITE_OK { return false }
+    statement: *void
+    if SqlitePrepareText(database,"INSERT INTO guest_selection VALUES(?,?)",-1,*statement,null) != SQLITE_OK { return false }
+    defer { unused SqliteFinalize(statement) }
+    for i: 0..scope.count-1 {
+        if SqliteBindTextString(statement,1,TextUntilNul(scope.ids[i].bytes[:]),-1) != SQLITE_OK ||
+            SqliteBindInt64(statement,2,cast(s64)i) != SQLITE_OK || SqliteStep(statement) != SQLITE_DONE ||
+            SqliteReset(statement) != SQLITE_OK || SqliteClearBindings(statement) != SQLITE_OK { return false }
+    }
+    return true
+}

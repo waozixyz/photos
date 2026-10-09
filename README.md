@@ -37,9 +37,11 @@ Automatic membership provenance for imports without face indexes joins the
 same native photo/album/source-cache transaction. It retains the current album
 identities, later manual membership changes and the people responsible for the
 original additions. Invalid rules warn without discarding the original.
-Imports carrying private face indexes still use the compatibility service;
-the complete importer port
-remains in progress. Some non-TIFF RAW camera formats still lack capture-field
+Private face groups, names, birthdays, corrections and manual tags publish in
+that same native transaction, including their automatic membership provenance.
+Later person edits and completed scans survive rescans; malformed indexes warn
+while retaining originals. The complete library-service port remains in progress.
+Some non-TIFF RAW camera formats still lack capture-field
 extraction even when their pixels can be viewed.
 
 The owner's merged desktop library is `/mnt/storage/Photos`, imported from
@@ -298,6 +300,13 @@ excluded. Later privacy or album membership changes revoke access, and an
 unavailable local service clears the displayed items within a short access lease.
 The scope survives app and service restarts. Smart albums retain the search rule
 chosen when Guest view starts; renames follow the album's identity.
+The read-only Ziran gallery engine checks selected identities, current memberships,
+saved rules and both Live Photo components in one snapshot. Selections retain
+their chosen order across pages, including selections of 1000 items. Temporary
+selection identities stay in memory and never become library tables or backup
+records. Native checks reject malformed scopes and ignore owner-gallery filters
+that could broaden guest access. The local adapter still stores the scope,
+checks passwords and dispatches permitted viewing requests.
 Create a local Hidden password first, then use Leave Guest view and that password
 to return to the library. The password stays masked and does not appear in app
 inspection state, process arguments or logs. Entering Guest view locks all local

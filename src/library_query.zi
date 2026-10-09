@@ -6,6 +6,7 @@ Locations :: #import "locations";
 Geo :: #import "geo";
 Semantic :: #import "semantic";
 Presentation :: #import "presentation";
+Guest :: #import "guest_scope";
 Clock :: #import "std/date_time_linux";
 #import "std/date_parse"
 #import "std/byte_text_linux"
@@ -36,23 +37,25 @@ Prepare :: (database: *void, sql: string, query: *Search.Predicate, statement: *
 }
 main :: (argc: s32, argv: **u8) -> s32 {
     if argc != 2 { return Failure("Supply the private library database") }
-    input: [65537]u8; length: s32
-    while length < 65536 {
-        amount := Read(0, *input[length], cast(usize)(65536 - length))
+    input: [131073]u8; length: s32
+    while length < 131072 {
+        amount := Read(0, *input[length], cast(usize)(131072 - length))
         if amount < 0 { return Failure("Cannot read gallery request") }; if amount == 0 { break }; length += cast(s32)amount
     }
-    if length == 0 || length >= 65536 { return Failure("Gallery request exceeds its limit") }
+    if length == 0 || length >= 131072 { return Failure("Gallery request exceeds its limit") }
     json := TextFromBytes(input[:length])
     if Space(json, ValueEnd(json, 0, 0)) != length || json[0] != 123 { return Failure("Choose a valid gallery request") }
+    guest: Guest.Scope; Guest.ReadScope(json,*guest)
+    if guest.error != "" { return Failure(guest.error) }
     view: [32]u8; search: [513]u8; album: [513]u8; sort: [16]u8; memory: [11]u8; filter: [513]u8; person: [65]u8; birth: [11]u8; jump: [11]u8
     if !Decode(json,"view",view[:]) || !Decode(json,"search",search[:]) || !Decode(json,"album",album[:]) ||
         !Decode(json,"sort",sort[:]) || !Decode(json,"memory_date",memory[:]) || !Decode(json,"filter",filter[:]) || !Decode(json,"person",person[:]) || !Decode(json,"birth",birth[:]) || !Decode(json,"jump_day",jump[:]) { return Failure("Gallery value exceeds its limit") }
-    order := TextUntilNul(sort[:]); page := Number(json, "offset", 0); limit := Number(json, "limit", 60)
+    order := ifx guest.active then "newest" else TextUntilNul(sort[:]); page := Number(json, "offset", 0); limit := Number(json, "limit", 60)
     if order != "newest" && order != "oldest" { return Failure("Choose newest first or oldest first") }
     if limit < 1 { limit = 1 }; if limit > 100 { limit = 100 }
     query: Search.Predicate
-    slideshow := Number(json,"slideshow",0) == 1
-    name := TextUntilNul(view[:]); hidden := Number(json,"hidden_access",0) == 1
+    slideshow := !guest.active && Number(json,"slideshow",0) == 1
+    name := ifx guest.active then "photos" else TextUntilNul(view[:]); hidden := !guest.active && Number(json,"hidden_access",0) == 1
     if name == "trash" { Search.AddSQL(*query, "trashed>0"); if !hidden { Search.AddSQL(*query, " AND hidden=0") } }
     else if name == "hidden" { Search.AddSQL(*query, ifx hidden then "trashed=0 AND hidden=1" else "0") }
     else {
@@ -61,7 +64,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
         else if name == "videos" { Search.AddSQL(*query," AND kind='video'") }
         else if name == "archive" { Search.AddSQL(*query," AND (archived=1 OR EXISTS(SELECT 1 FROM json_each(photos.albums) j JOIN albums a ON a.name=j.value WHERE a.archived=1 AND a.deleted=0))") }
         else if name == "uncategorized" { Search.AddSQL(*query," AND json_array_length(albums)=0") }
-        else if name == "photos" && album[0] == 0 && search[0] == 0 && filter[0] == 0 || name == "memories" || name == "lane" {
+        else if !guest.active && name == "photos" && album[0] == 0 && search[0] == 0 && filter[0] == 0 || name == "memories" || name == "lane" {
             Search.AddSQL(*query," AND archived=0 AND NOT EXISTS(SELECT 1 FROM json_each(photos.albums) j JOIN albums a ON a.name=j.value WHERE a.archived=1 AND a.deleted=0)")
         }
     }
@@ -80,7 +83,8 @@ main :: (argc: s32, argv: **u8) -> s32 {
     // Motion originals remain separate encrypted records, but only their still
     // is a gallery item. Incomplete or mismatched privacy updates fail closed.
     Search.AddSQL(*query, " AND coalesce(json_extract(metadata,'$.photosLive.photo'),'')='' AND (json_extract(metadata,'$.photosLive.video') IS NULL OR EXISTS(SELECT 1 FROM photos motion WHERE motion.id=json_extract(photos.metadata,'$.photosLive.video') AND motion.kind='video' AND json_extract(motion.metadata,'$.photosLive.photo')=photos.id AND motion.hidden=photos.hidden AND (motion.trashed>0)=(photos.trashed>0)))")
-    if album[0] != 0 && filter[0] == 0 { Search.AddSQL(*query," AND EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=?)"); Search.Bind(*query,TextUntilNul(album[:])) }
+    Guest.Predicate(*guest,*query)
+    if !guest.active && album[0] != 0 && filter[0] == 0 { Search.AddSQL(*query," AND EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=?)"); Search.Bind(*query,TextUntilNul(album[:])) }
     if name == "people" || name == "lane" {
         Search.AddSQL(*query," AND hidden=0 AND trashed=0 AND EXISTS(SELECT 1 FROM person_photos WHERE person_photos.photo_id=photos.id AND person_photos.person_id=?)")
         Search.Bind(*query,TextUntilNul(person[:]))
@@ -104,7 +108,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
         Search.AddSQL(*query," AND strftime('%m-%d',taken,'unixepoch')=? AND taken<?")
         Search.Bind(*query,TextUntilNul(memory[5:11])); Search.BindNumber(*query,UtcSeconds(DateNumber(TextUntilNul(memory[:]),0,4),1,1,0,0,0))
     }
-    Search.Parse(*query,TextUntilNul(filter[:])); Search.Parse(*query,TextUntilNul(search[:]))
+    if !guest.active { Search.Parse(*query,TextUntilNul(filter[:])); Search.Parse(*query,TextUntilNul(search[:])) }
     if slideshow {
         Search.AddSQL(*query," AND kind='photo' AND hidden=0 AND trashed=0")
         Presentation.Albums(*query,json)
@@ -128,6 +132,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
         Search.AddSQL(*query,Semantic.RankSQL); Search.AddSQL(*query," >= 0.20")
     }
     unused SqliteBusyTimeout(database,10000)
+    if !Guest.Populate(*guest,database) { return Failure("Cannot read Guest view selection") }
     if SqliteExecText(database,"BEGIN") != SQLITE_OK { return Failure("Cannot open a gallery snapshot") }
     defer { unused SqliteExecText(database,"ROLLBACK") }
     lane_years: [256]s32; lane_count: s32; lane_year := Number(json,"lane_year",0)
@@ -163,7 +168,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if SqliteStep(statement) != SQLITE_ROW { unused SqliteFinalize(statement); return Failure("Cannot count gallery matches") }
     matches := SqliteColumnInt64(statement,0); unused SqliteFinalize(statement); statement = null
     if slideshow { page = ifx matches > 0 then cast(s32)(cast(s64)page % matches) else 0; limit = 1 }
-    if jump[0] != 0 {
+    if !guest.active && jump[0] != 0 {
         day := Search.Date(TextUntilNul(jump[:]))
         if day < 0 || name == "semantic" || name == "map" || name == "lane" { return Failure("Choose a gallery date in YYYY-MM-DD format") }
         jump_sql: Vec(u8); BuilderPrint(*jump_sql,"SELECT count(*) FROM photos WHERE % AND taken%?",where,ifx order == "newest" then ">=" else "<")
@@ -178,6 +183,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if slideshow && !Decode(json,"slide_id",check[:]) { return Failure("Choose a valid slideshow photo") }
     if check[0] != 0 { BuilderPrint(*rows," AND id=?"); Search.Bind(*query,TextUntilNul(check[:])); page = 0 }
     BuilderPrint(*rows," ORDER BY ")
+    if guest.active && guest.selection { BuilderPrint(*rows,"(SELECT ordinal FROM guest_selection g WHERE g.id=photos.id) ASC,") }
     if slideshow && Number(json,"slide_shuffle",0) == 1 { BuilderPrint(*rows,"photos_order(id,%) ASC,",Number(json,"slide_seed",1)) }
     if name == "semantic" { BuilderPrint(*rows,"% DESC,",Semantic.RankSQL) }
     BuilderPrint(*rows,"taken %,id LIMIT % OFFSET %",ifx order == "newest" then "DESC" else "ASC",limit,page)
@@ -197,7 +203,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
     }
     BuilderPrint(*output,"]")
     if slideshow { BuilderPrint(*output,",\"slide_offset\":%",page) }
-    if jump[0] != 0 { BuilderPrint(*output,",\"jump_offset\":%",page) }
+    if !guest.active && jump[0] != 0 { BuilderPrint(*output,",\"jump_offset\":%",page) }
     if name == "lane" {
         current: [11]u8; unused WriteIsoDay(Clock.UnixNow(),current[:])
         BuilderPrint(*output,",\"lane_year\":%,\"current_year\":%,\"lane_years\":[",lane_year,DateNumber(TextUntilNul(current[:]),0,4))

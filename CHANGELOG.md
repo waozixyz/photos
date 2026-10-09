@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.37
+
+- Keep large Guest view selections in their chosen order across pages, including selections of 1000 photos and videos.
+- Check album identity, saved search rules and paired Live Photo privacy together, so later renames keep working and privacy changes revoke viewing.
+- Reject malformed guest scopes and prevent gallery options from widening guest access while preserving originals and backup records.
+
 ## 0.1.36
 
 - Hand over Photos in Guest view with only a chosen photo, selection or album available, without exposing the rest of your library or editing actions.
