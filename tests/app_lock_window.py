@@ -181,7 +181,7 @@ with tempfile.TemporaryDirectory() as temporary:
             if not portable: assert not state()['app_locked']
             background()
             wait(lambda: result('app_lock_lock',since), 'The background deadline did not revoke app access')
-            assert not any(entry[0] == str(library.root) for entry in app_lock.sessions.values())
+            assert not app_lock.unlocked(library,result('app_lock_delay')['app_lock_token'])
             if not portable:
                 wait(lambda: state()['app_locked'] and state()['nodes'] == 0, 'Background expiry retained owner photos')
             foreground(); shoot('app-lock-background-'+suffix+'.png'); unlock()

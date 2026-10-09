@@ -80,6 +80,10 @@ collage-window-test: build
 collage-portable-test: bundle
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_COLLAGE_PORTABLE=1 $(PYTHON) tests/collage_window.py
 ZIRAN ?= ziran
+access-sessions:
+	LDLIBS='-l:libsodium.so.23' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry access_sessions:main --exe -o build/access-sessions src/access_sessions.zi
+build bundle test: access-sessions
+.PHONY: access-sessions
 PYTHON ?= build/venv/bin/python
 PREFIX ?= $(HOME)/.local
 PACKAGE_FLAGS := $(if $(wildcard ziran.local.toml),,--locked)

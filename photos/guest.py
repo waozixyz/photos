@@ -130,10 +130,7 @@ def start(library, request):
         try: os.fsync(directory)
         finally: os.close(directory)
         # A prior Hidden token cannot be used to bypass presentation mode.
-        with vault.guard:
-            for token, entry in list(vault.sessions.items()):
-                if entry[0] == str(library.root):
-                    vault.sessions.pop(token, None)
+        vault.revoke_all(library)
     finally:
         library.db.rollback()
     return page(library, value, {**request, 'offset': 0})

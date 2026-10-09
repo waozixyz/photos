@@ -73,7 +73,12 @@ class VaultTest(unittest.TestCase):
         with self.assertRaisesRegex(LibraryError,'Incorrect password'):
             self.request('vault_unlock',value='Another wrong password')
         token=self.request('vault_unlock',value=self.password)['vault_token']
-        with patch('photos.vault.time.monotonic',return_value=time.monotonic()+601):
+        from photos import access_sessions
+        shortened = access_sessions.Registry(session_ms=30)
+        self.addCleanup(shortened.close)
+        with patch('photos.access_sessions.registry',shortened):
+            token=self.request('vault_unlock',value=self.password)['vault_token']
+            time.sleep(.05)
             result=self.request('open',id=self.hidden,view='hidden',vault_token=token)
         self.assertIn('error',result);self.assertEqual(result['photos'],[])
         self.assertFalse(result['vault_unlocked'])
@@ -91,8 +96,9 @@ class VaultTest(unittest.TestCase):
                 self.request('vault_unlock',value='A wrong test password')
         with self.assertRaisesRegex(LibraryError,'Too many attempts'):
             self.request('vault_unlock',value=self.password)
-        with patch('photos.vault.time.monotonic',return_value=time.monotonic()+61):
-            self.assertTrue(self.request('vault_unlock',value=self.password)['vault_unlocked'])
+        from photos import access_sessions
+        access_sessions.clear_attempts(self.library, access_sessions.HIDDEN)
+        self.assertTrue(self.request('vault_unlock',value=self.password)['vault_unlocked'])
         for password in ['short','x'*1025,'nul\0password']:
             with self.assertRaises(LibraryError):self.request('vault_unlock',value=password)
 

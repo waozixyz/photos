@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.47
+
+- Keep app and Hidden access separate, with local unlocks ending after their access limit, credential changes or service restart.
+- Preserve private viewing restrictions when background work finishes, and keep failed login limits independent for each library and app credential.
+- Retain local passwords, app PINs, original photos and encrypted backup keys through the access-session upgrade.
+
 ## 0.1.46
 
 - Drag horizontally after selecting a photo to select or unselect a range, and reverse the gesture to restore items outside that range.

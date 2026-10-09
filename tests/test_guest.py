@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from PIL import Image
-from photos import guest, live, vault, query
+from photos import guest, live, vault, query, access_sessions
 from photos.library import Library, LibraryError, digest_file, packed
 from photos.worker import process
 
@@ -22,7 +22,7 @@ class GuestTest(unittest.TestCase):
         self.library.import_folders([self.source.parent]); self.config = dict(root=str(self.library.root))
         self.password = 'guest-test-password'
         self.owner_token = vault.authenticate(self.library, self.password, setup=True)
-        self.addCleanup(vault.failures.pop, str(self.library.root), None)
+        self.addCleanup(access_sessions.clear_attempts, self.library, access_sessions.HIDDEN)
         self.addCleanup(vault.lock, self.library, self.owner_token)
 
     def request(self, **values):

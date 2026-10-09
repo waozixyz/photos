@@ -2,15 +2,11 @@
 import hashlib
 import json
 import os
-import secrets
-import time
 
 from .library import LibraryError, atomic, packed
 from . import vault
+from . import access_sessions
 
-sessions = {}
-failures = {}
-SESSION_SECONDS = 600
 AUTO_LOCK_SECONDS = {0, 5, 15, 60, 300, 1800}
 
 
@@ -68,33 +64,19 @@ def fingerprint(library):
 
 
 def revoke(library):
-    for token, entry in list(sessions.items()):
-        if entry[0] == str(library.root):
-            sessions.pop(token, None)
+    access_sessions.revoke(library, access_sessions.APP)
 
 
 def unlocked(library, token, renew=False):
-    entry = sessions.get(token) if isinstance(token, str) else None
     stamp = fingerprint(library)
-    if entry and stamp and entry[0] == str(library.root) and entry[1] > time.monotonic() and entry[2] == stamp:
-        if renew:
-            sessions[token] = (entry[0], time.monotonic()+SESSION_SECONDS, stamp)
-        return True
-    if entry:
-        sessions.pop(token, None)
-    return False
+    return bool(stamp and access_sessions.deadline(library, access_sessions.APP, token, stamp, renew) > 0)
 
 
 def grant(library):
     stamp = fingerprint(library)
     if not stamp:
         raise LibraryError('Local password settings need recovery; originals and backup keys remain intact')
-    token = secrets.token_hex(32)
-    for existing, entry in list(sessions.items()):
-        if entry[1] <= time.monotonic():
-            sessions.pop(existing, None)
-    sessions[token] = (str(library.root), time.monotonic()+SESSION_SECONDS, stamp)
-    return token
+    return access_sessions.grant(library, access_sessions.APP, stamp)
 
 
 def state(library, token='', renew=False):
@@ -117,27 +99,21 @@ def authenticate(library, password):
         token = vault.authenticate(library, password)
         vault.lock(library, token)
         return
-    key = str(library.root); now = time.monotonic()
-    attempt = failures.get(key, (now, 0))
-    if now - attempt[0] >= 60: attempt = (now, 0)
-    if attempt[1] >= 5:
-        raise LibraryError('Too many attempts; wait one minute before trying again')
+    access_sessions.check_attempts(library, access_sessions.APP)
     try:
         result = vault.verify_password(password, config['verifier'], pin=config['method'] == 'pin')
     except LibraryError:
-        failures[key] = (attempt[0], attempt[1]+1)
+        access_sessions.failed_attempt(library, access_sessions.APP)
         raise
     if result.returncode:
-        failures[key] = (attempt[0], attempt[1]+1)
+        access_sessions.failed_attempt(library, access_sessions.APP)
         raise LibraryError('Incorrect PIN' if config['method'] == 'pin' and result.returncode == 1 else
                            ('Incorrect password' if result.returncode == 1 else 'App authentication could not finish'))
-    failures.pop(key, None)
+    access_sessions.clear_attempts(library, access_sessions.APP)
 
 
 def lock_hidden(library):
-    with vault.guard:
-        for existing, entry in list(vault.sessions.items()):
-            if entry[0] == str(library.root): vault.sessions.pop(existing, None)
+    vault.revoke_all(library)
 
 
 def route(library, request):
@@ -194,7 +170,7 @@ def route(library, request):
                 raise LibraryError('App access ended; unlock before changing its settings')
             atomic(path(library), packed(config).encode())
             revoke(library)
-            lock_hidden(library); failures.pop(str(library.root), None)
+            lock_hidden(library); access_sessions.clear_attempts(library, access_sessions.APP)
             return dict(empty(library, 'App lock disabled' if action == 'app_lock_disable' else 'App lock enabled'),
                         app_lock_changed=1)
         except LibraryError as error:

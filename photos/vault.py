@@ -3,18 +3,14 @@ import fcntl
 import json
 import os
 from pathlib import Path
-import secrets
 import struct
 import subprocess
 import threading
-import time
 
 from .library import LibraryError, atomic, packed
+from . import access_sessions
 
-sessions = {}
-failures = {}
 guard = threading.RLock()
-SESSION_SECONDS = 600
 
 
 def configured(library):
@@ -23,24 +19,22 @@ def configured(library):
 
 def unlocked(library, token):
     with guard:
-        state = sessions.get(token) if isinstance(token, str) else None
-        if state and state[0] == str(library.root) and state[1] > time.monotonic():
-            return True
-        if state:
-            sessions.pop(token, None)
-    return False
+        return access_sessions.deadline(library, access_sessions.HIDDEN, token) > 0
 
 
 def lock(library, token):
     with guard:
-        if isinstance(token, str) and sessions.get(token, ('',))[0] == str(library.root):
-            sessions.pop(token, None)
+        access_sessions.lock(library, access_sessions.HIDDEN, token)
+
+
+def revoke_all(library):
+    with guard:
+        access_sessions.revoke(library, access_sessions.HIDDEN)
 
 
 def deadline(library, token):
     with guard:
-        entry = sessions.get(token) if isinstance(token, str) else None
-        return entry[1] if entry and entry[0] == str(library.root) else 0
+        return access_sessions.deadline(library, access_sessions.HIDDEN, token)
 
 
 def state(library, token=''):
@@ -102,14 +96,11 @@ def change_password(library, token, password):
         # Password hashing can outlast an unlock. Check and revoke under the
         # same guard so a concurrent lock cannot authorize the replacement.
         with guard:
-            entry = sessions.get(token)
-            if not entry or entry[0] != str(library.root) or entry[1] <= time.monotonic():
+            if not unlocked(library, token):
                 raise LibraryError('Unlock Hidden before changing its password')
             atomic(private / 'hidden-password.json', packed(dict(verifier=verifier)).encode())
-            for existing, state in list(sessions.items()):
-                if state[0] == str(library.root):
-                    sessions.pop(existing, None)
-            failures.pop(str(library.root), None)
+            revoke_all(library)
+            access_sessions.clear_attempts(library, access_sessions.HIDDEN)
 
 
 def authenticate(library, password, setup=False):
@@ -118,14 +109,8 @@ def authenticate(library, password, setup=False):
     with (private / '.hidden-password.lock').open('a') as file:
         os.chmod(file.name, 0o600)
         fcntl.flock(file, fcntl.LOCK_EX)
-        key = str(library.root)
-        now = time.monotonic()
         with guard:
-            attempt = failures.get(key, (now, 0))
-            if now - attempt[0] >= 60:
-                attempt = (now, 0)
-            if attempt[1] >= 5:
-                raise LibraryError('Too many attempts; wait one minute before trying again')
+            access_sessions.check_attempts(library, access_sessions.HIDDEN)
         path = private / 'hidden-password.json'
         if setup and path.exists():
             raise LibraryError('Hidden already has a password; unlock with the existing password')
@@ -143,21 +128,16 @@ def authenticate(library, password, setup=False):
         result = verify_password(password, verifier)
         if result.returncode:
             with guard:
-                failures[key] = (attempt[0], attempt[1] + 1)
+                access_sessions.failed_attempt(library, access_sessions.HIDDEN)
             raise LibraryError('Incorrect password' if not setup and result.returncode == 1 else 'Hidden authentication could not finish')
         if setup:
             verifier = result.stdout.decode('ascii').strip()
             if not verifier.startswith('$argon2id$') or len(verifier) >= 128:
                 raise LibraryError('Hidden authentication could not finish')
             atomic(path, packed(dict(verifier=verifier)).encode())
-        token = secrets.token_hex(32)
         with guard:
-            failures.pop(key, None)
-            for existing, entry in list(sessions.items()):
-                if entry[1] <= now:
-                    sessions.pop(existing, None)
-            sessions[token] = (key, time.monotonic() + SESSION_SECONDS)
-        return token
+            access_sessions.clear_attempts(library, access_sessions.HIDDEN)
+            return access_sessions.grant(library, access_sessions.HIDDEN)
 
 
 def protected(library, request):

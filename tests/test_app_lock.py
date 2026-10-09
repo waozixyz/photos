@@ -1,11 +1,12 @@
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
 from PIL import Image
-from photos import app_lock, guest, vault
+from photos import app_lock, guest, vault, access_sessions
 from photos.library import Library, LibraryError, digest_file
 from photos.worker import process
 from photos.sync import Client
@@ -23,8 +24,8 @@ class AppLockTest(unittest.TestCase):
         self.password = 'private-app-lock-password'
         self.hidden = vault.authenticate(self.library, self.password, setup=True)
         self.addCleanup(app_lock.revoke, self.library)
-        self.addCleanup(app_lock.failures.pop, str(self.library.root), None)
-        self.addCleanup(vault.failures.pop, str(self.library.root), None)
+        self.addCleanup(access_sessions.clear_attempts, self.library, access_sessions.APP)
+        self.addCleanup(access_sessions.clear_attempts, self.library, access_sessions.HIDDEN)
         self.addCleanup(vault.lock, self.library, self.hidden)
 
     def request(self, **values):
@@ -75,22 +76,23 @@ class AppLockTest(unittest.TestCase):
         self.enable(); token = self.unlock()
         app_lock.revoke(self.library)
         self.assertEqual(self.request(action='query', app_lock_token=token)['app_locked'], 1)
-        token = self.unlock(); entry = app_lock.sessions[token]
-        app_lock.sessions[token] = (entry[0], 0, entry[2])
-        self.assertEqual(self.request(action='app_lock_check', app_lock_token=token)['app_locked'], 1)
+        shortened = access_sessions.Registry(session_ms=30); self.addCleanup(shortened.close)
+        with patch('photos.access_sessions.registry',shortened):
+            token = self.unlock(); time.sleep(.05)
+            self.assertEqual(self.request(action='app_lock_check', app_lock_token=token)['app_locked'], 1)
         token = self.unlock()
         hidden = vault.authenticate(self.library, self.password)
         vault.change_password(self.library, hidden, 'replacement-private-password')
         self.assertEqual(self.request(action='query', app_lock_token=token)['app_locked'], 1)
         self.password = 'replacement-private-password'; self.unlock()
 
-    def test_expiry_during_owner_operation_returns_no_photo_or_derived_path(self):
+    def test_access_ending_during_owner_operation_returns_no_photo_or_derived_path(self):
         self.enable(); token = self.unlock()
         import photos.worker as worker
         original = worker.library_request
         def expire(library, request, config):
             result = original(library, request, config)
-            entry = app_lock.sessions[token]; app_lock.sessions[token] = (entry[0], 0, entry[2])
+            access_sessions.lock(library, access_sessions.APP, token)
             return result
         with patch.object(worker, 'library_request', expire):
             result = self.request(action='open', id=self.identity, app_lock_token=token)
@@ -168,18 +170,18 @@ class AppLockTest(unittest.TestCase):
         marker = app_lock.path(self.library).read_bytes()
         for _ in range(5): self.assertIn('Incorrect PIN', self.request(action='app_lock_unlock', value='1111')['error'])
         self.assertIn('Too many attempts', self.request(action='app_lock_unlock', value='0000')['error'])
-        app_lock.failures.pop(str(self.library.root), None)
+        access_sessions.clear_attempts(self.library, access_sessions.APP)
         token = self.request(action='app_lock_unlock', value='0000')['app_lock_token']
         with patch('photos.vault.hash_password', side_effect=LibraryError('App authentication could not finish')):
             self.assertIn('error', self.request(action='app_lock_password', value='New app password', app_lock_token=token))
         self.assertEqual(app_lock.path(self.library).read_bytes(), marker)
 
-    def test_expiry_during_password_hashing_preserves_the_old_credential(self):
+    def test_access_ending_during_password_hashing_preserves_the_old_credential(self):
         self.enable(); token = self.unlock(); marker = app_lock.path(self.library).read_bytes()
         original = vault.hash_password
         def expire(password, **options):
             verifier = original(password, **options)
-            entry = app_lock.sessions[token]; app_lock.sessions[token] = (entry[0], 0, entry[2])
+            access_sessions.lock(self.library, access_sessions.APP, token)
             return verifier
         with patch('photos.vault.hash_password', expire):
             result = self.request(action='app_lock_password', value='New app password', app_lock_token=token)

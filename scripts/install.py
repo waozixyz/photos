@@ -45,6 +45,12 @@ def main():
             parser.error('Install the signed Photos bundle through Harmony before registering its catalog entry')
     installed = args.prefix/'lib/photos'
     installed.mkdir(parents=True,exist_ok=True,mode=0o700)
+    sessions = repo/'build/access-sessions/access_sessions'
+    if not sessions.is_file():
+        parser.error('Build native Photos access sessions before installing')
+    shutil.copyfile(sessions,installed/'access_sessions.next')
+    os.chmod(installed/'access_sessions.next',0o755)
+    os.replace(installed/'access_sessions.next',installed/'access_sessions')
     service_broker = repo/'build/photos-service/photos_service'
     if not service_broker.is_file():
         parser.error('Build the native Photos local service before installing')

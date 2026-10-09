@@ -58,7 +58,11 @@ class VideoTest(unittest.TestCase):
         token = vault.authenticate(self.library,'Synthetic video password',setup=True)
         request = dict(action='playback_check',id=self.photo_id,view='hidden',vault_token=token)
         self.assertIn('playback_path',process(request,self.config))
-        with patch('photos.vault.time.monotonic',return_value=time.monotonic()+601):
+        from photos import access_sessions
+        shortened = access_sessions.Registry(session_ms=30); self.addCleanup(shortened.close)
+        with patch('photos.access_sessions.registry',shortened):
+            token=vault.authenticate(self.library,'Synthetic video password')
+            request['vault_token']=token; time.sleep(.05)
             result = process(request,self.config)
         self.assertIn('error',result)
         self.assertNotIn('playback_path',result)

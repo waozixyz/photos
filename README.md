@@ -358,8 +358,15 @@ delay stays on this device and survives restart and app credential changes.
 Guest view keeps its restricted gallery when focus changes and still requires
 authentication to leave. System authentication and phone app-switcher hiding
 remain unfinished compared with [Ente app lock](https://ente.com/help/photos/features/account/app-lock).
-The screen and its access-expiry decisions are Ziran/Kryon; the local session
-adapter still uses Python and the existing native Argon2id verifier.
+The screen and its access-expiry decisions are Ziran/Kryon. Local access tokens,
+ten-minute monotonic expiry, app renewal, scoped revocation and failed-attempt
+windows now run in a private native Ziran process alongside the existing
+Argon2id verifier. Tokens stay in memory and are bound to this library and app
+or Hidden access; app tokens also retain the current credential fingerprint.
+Losing the native process invalidates its old tokens. It accepts at most 256
+active tokens and 128 failed-attempt windows; reaching a limit retains existing
+access instead of replacing it. The local credential-file and request adapter
+still uses Python.
 
 This version is a local photo library with sync, not complete Ente feature parity.
 
@@ -376,8 +383,9 @@ XChaCha20-Poly1305 backup format and content keys. An altered tag, account,
 address, key or nonce returns no plaintext. A missing or interrupted helper
 pauses that operation and preserves originals and keys. Ed25519 device seed
 generation, public keys and transaction signatures also run in Ziran and retain
-existing device identities. Post-quantum account signing, network
-transport/checkpoints and the library/session adapter still use Python.
+existing device identities. Account signing and loopback HTTP transport also
+run in native helpers. Pinned-node checks, sync checkpoints and the remaining
+library/credential-file adapter still use Python.
 
 Create collage combines two through six visible photos or Live Photo stills.
 Select them in a gallery, then choose Create collage. Switch between balanced
@@ -533,7 +541,9 @@ The remaining replacement work includes:
   Album-definition import publication, automatic-membership import writes and
   private face-index import writes are native too. Local peer authentication,
   socket framing, connection limits and deadlines also run in Ziran. The remaining
-  automatic index mutations and app/Hidden session adapter use Python. Sync content
+  automatic index mutations and credential-file/request adapter use Python.
+  App/Hidden token generation, expiry, renewal, revocation and failed-attempt
+  windows run in a private headless Ziran helper. Sync content
   encryption/decryption, chunk/metadata nonces and Ed25519 device identities/signatures
   run in Ziran. Post-quantum account key generation and ML-DSA-44 signatures
   use the pinned Oqs package through a private native helper, retaining existing
