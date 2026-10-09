@@ -1,5 +1,7 @@
 """Opt-in local semantic indexing; native Ziran owns inference and ranking."""
 import fcntl
+import base64
+import binascii
 import importlib.util
 import json
 import math
@@ -257,18 +259,28 @@ def encrypted_index(library, photo_id):
     row = library.db.execute('SELECT embedding FROM semantic_embeddings WHERE photo_id=? AND model=?', (photo_id, MODEL)).fetchone()
     if not row or not valid_embedding(row[0]):
         return None
-    return dict(model=MODEL, values=list(struct.unpack('<512f', row[0])))
+    # Keep the exact float32 bytes compact inside the encrypted record. Decimal
+    # arrays could push a normal 50-photo sync batch above the node's body limit.
+    return dict(model=MODEL, vector=base64.b64encode(row[0]).decode('ascii'))
 
 
 def accept_index(library, photo_id, value):
     if value is None:
         library.db.execute('DELETE FROM semantic_embeddings WHERE photo_id=?', (photo_id,))
         return
-    if not isinstance(value, dict) or value.get('model') != MODEL or not isinstance(value.get('values'), list) or len(value['values']) != 512:
+    if not isinstance(value, dict) or value.get('model') != MODEL:
         raise ValueError('Invalid semantic search index')
-    if not all(type(v) in {int, float} and math.isfinite(v) and abs(v) <= 1.001 for v in value['values']):
-        raise ValueError('Invalid semantic search index')
-    blob = struct.pack('<512f', *value['values'])
+    if isinstance(value.get('vector'), str) and len(value['vector']) == 2732:
+        try:
+            blob = base64.b64decode(value['vector'], validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError('Invalid semantic search index') from None
+    else:
+        # Accept the initial local release's encrypted decimal representation.
+        values = value.get('values')
+        if not isinstance(values, list) or len(values) != 512 or not all(type(v) in {int, float} and math.isfinite(v) and abs(v) <= 1.001 for v in values):
+            raise ValueError('Invalid semantic search index')
+        blob = struct.pack('<512f', *values)
     if not valid_embedding(blob):
         raise ValueError('Invalid semantic search index')
     library.db.execute('INSERT OR REPLACE INTO semantic_embeddings VALUES(?,?,?,?)', (photo_id, MODEL, blob, ''))

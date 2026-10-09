@@ -111,6 +111,22 @@ class SemanticTest(unittest.TestCase):
             with self.assertRaises(ValueError):semantic.accept_index(peer,self.ids[0],value)
         self.assertIsNotNone(semantic.encrypted_index(peer,self.ids[0]))
 
+    def test_compact_real_embeddings_fit_normal_sync_batches(self):
+        import random
+        from photos.library import packed
+        generator = random.Random(1)
+        values = [generator.uniform(-1,1) for _ in range(512)]
+        norm = math.sqrt(sum(v*v for v in values))
+        blob = struct.pack('<512f', *(v/norm for v in values))
+        self.library.db.execute('UPDATE semantic_embeddings SET embedding=? WHERE photo_id=?', (blob,self.ids[0]))
+        self.library.db.commit()
+        sender = Client(self.library,dict(node='http://127.0.0.1:18080',node_id='a'*64))
+        record = sender.record(self.library.photo(self.ids[0]),manifest={})
+        self.assertLess(len(packed(dict(records=[record]*50)).encode()), 900000)
+        restored = Library(self.root/'compact'); self.addCleanup(restored.db.close)
+        semantic.accept_index(restored,self.ids[0],semantic.encrypted_index(self.library,self.ids[0]))
+        self.assertEqual(restored.db.execute('SELECT embedding FROM semantic_embeddings').fetchone()[0],blob)
+
     def test_real_native_model_color_search_and_text_bounds(self):
         try:semantic.prepare()
         except LibraryError:self.skipTest('Local models are optional; run make semantic-models to verify actual inference')

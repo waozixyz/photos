@@ -206,7 +206,29 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         assert first.photo(motion_id)['hidden']==1 and first.query(search='type:live')['count']==0
         second.edit(still_id,'hidden_set','0');live.separate(second,still_id,lambda p:True);peer.sync();client.sync()
         assert first.query(search='type:live')['count']==0 and len(live.components(first,first.photo(still_id)))==1
-        print('Isolated Daochi v6: signed baseline/editor sync, named-place creation/update/rename/deletion, HEIC/RAW/full motion originals, pairing, privacy and separation round trip passed')
+        # Exercise a full-sized index upload against the node's default 1-MiB
+        # request bound, rather than only a one-photo embedding round trip.
+        batch = folder/'semantic-batch/Batch'; batch.mkdir(parents=True)
+        batch_ids = []
+        import random, math
+        generator = random.Random(1)
+        values = [generator.uniform(-1,1) for _ in range(512)]
+        norm = math.sqrt(sum(v*v for v in values))
+        vector = struct.pack('<512f', *(v/norm for v in values))
+        for index in range(52):
+            path = batch/f'Image {index}.png'
+            Image.new('RGB',(10+index,10),(index,150,100)).save(path)
+            batch_ids.append(digest_file(path))
+        first.import_folders([batch.parent])
+        for media_id in batch_ids:
+            first.db.execute('INSERT INTO semantic_embeddings VALUES(?,?,?,?)', (media_id,semantic.MODEL,vector,''))
+        first.db.commit()
+        assert client.sync() == 2 and client.sync() == 0 and peer.sync() == 0
+        assert second.query(album='Batch')['count'] == 52
+        for media_id in batch_ids:
+            assert second.db.execute('SELECT embedding FROM semantic_embeddings WHERE photo_id=?',(media_id,)).fetchone()[0] == vector
+        assert Path(peer.materialize(batch_ids[0])).read_bytes() == (batch/'Image 0.png').read_bytes()
+        print('Isolated Daochi v6: signed sync, full 50-photo compact semantic index batch, originals, editing, places, codecs, Live Photo privacy and separation round trip passed')
     finally:
         process.terminate()
         process.wait(timeout=10)
