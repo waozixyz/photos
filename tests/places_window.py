@@ -141,7 +141,9 @@ with tempfile.TemporaryDirectory() as directory:
             print(('Portable' if portable else 'Native') + ' Places: photo/manual creation, radius validation and updates, private matches, rename/search/catalog/delete and original preservation passed')
         finally:
             if sys.exc_info()[0] is not None:
-                shoot('places-failed-portable.png' if portable else 'places-failed-native.png')
+                if 'shoot' in locals() and child.poll() is None:
+                    try: shoot('places-failed-portable.png' if portable else 'places-failed-native.png')
+                    except (OSError, subprocess.SubprocessError): pass
                 print('Last synthetic requests:', [(q.get('action'), q.get('view'), q.get('search'), r.get('error')) for q,r in calls[-5:]])
             child.terminate()
             try: child.wait(timeout=5)
