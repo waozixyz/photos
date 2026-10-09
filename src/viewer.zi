@@ -1,0 +1,68 @@
+// Photo magnification uses the public ImageProps source rectangle. The asset
+// decoder supplies oriented dimensions; no original or pixel buffer is changed.
+using UI :: #import "kryon/Widgets";
+Input :: #import "kryon/tree_input";
+zoom: float32 = 1.0;
+center_x: float32 = 0.5;
+center_y: float32 = 0.5;
+dragging: bool;
+drag_x: float32;
+drag_y: float32;
+expanded: bool;
+
+Reset :: () { zoom = 1.0; center_x = 0.5; center_y = 0.5; dragging = false; expanded = false }
+Fit :: () { zoom = 1.0; center_x = 0.5; center_y = 0.5; dragging = false }
+ChangeZoom :: (factor: float32) {
+    zoom *= factor
+    if zoom < 0.001 { zoom = 0.001 }; if zoom > 64.0 { zoom = 64.0 }
+    dragging = false
+}
+ClampCenter :: (width: float32, height: float32, visible_width: float32, visible_height: float32) {
+    half_x := visible_width / width / 2.0; half_y := visible_height / height / 2.0
+    if center_x < half_x { center_x = half_x }; if center_x > 1.0 - half_x { center_x = 1.0 - half_x }
+    if center_y < half_y { center_y = half_y }; if center_y > 1.0 - half_y { center_y = 1.0 - half_y }
+}
+PixelSize :: (path: string, bounds: Rectangle) {
+    image: ImageProps; image.asset_path = path; dimensions := ImageTextureFor(image)
+    if dimensions.width <= 0 || dimensions.height <= 0 || bounds.width <= 0.0 || bounds.height <= 0.0 { return }
+    scale := bounds.width / cast(float32)dimensions.width
+    if bounds.height / cast(float32)dimensions.height < scale { scale = bounds.height / cast(float32)dimensions.height }
+    zoom = 1.0 / scale; dragging = false
+}
+OriginalResolution :: (path: string, width: s32, height: s32) -> bool {
+    image: ImageProps; image.asset_path = path; dimensions := ImageTextureFor(image)
+    return width <= 0 || height <= 0 || cast(s64)dimensions.width * cast(s64)dimensions.height == cast(s64)width * cast(s64)height
+}
+Draw :: (session: Session, key: u64, path: string, alt: string, bounds: Rectangle) {
+    if path == "" || bounds.width <= 0.0 || bounds.height <= 0.0 { return }
+    image: ImageProps; image.key = key; image.asset_path = path; image.alt_text = alt; image.bounds = bounds
+    dimensions := ImageTextureFor(image)
+    if dimensions.width <= 0 || dimensions.height <= 0 { Image(session, image); return }
+    width := cast(float32)dimensions.width; height := cast(float32)dimensions.height
+    fit_scale := bounds.width / width
+    if bounds.height / height < fit_scale { fit_scale = bounds.height / height }
+    scale := fit_scale * zoom
+    pointer := Input.PointerSample(session)
+    wheel := PointerWheelTake(session, bounds)
+    if wheel != 0.0 {
+        // Keep the point under the pointer fixed while magnifying.
+        dx := pointer.x - bounds.x - bounds.width / 2.0; dy := pointer.y - bounds.y - bounds.height / 2.0
+        point_x := center_x + dx / scale / width; point_y := center_y + dy / scale / height
+        ChangeZoom(ifx wheel > 0.0 then 1.25 else 0.8); scale = fit_scale * zoom
+        center_x = point_x - dx / scale / width; center_y = point_y - dy / scale / height
+    }
+    shown_width := width * scale; shown_height := height * scale
+    if shown_width > bounds.width { shown_width = bounds.width }; if shown_height > bounds.height { shown_height = bounds.height }
+    visible_width := shown_width / scale; visible_height := shown_height / scale
+    ClampCenter(width, height, visible_width, visible_height)
+    shown := Rectangle.{bounds.x + (bounds.width - shown_width) / 2.0, bounds.y + (bounds.height - shown_height) / 2.0, shown_width, shown_height}
+    if pointer.pressed && Input.PointInBounds(pointer.x, pointer.y, shown) { dragging = true; drag_x = pointer.x; drag_y = pointer.y }
+    if dragging && (pointer.down || pointer.released) {
+        center_x -= (pointer.x - drag_x) / scale / width; center_y -= (pointer.y - drag_y) / scale / height
+        drag_x = pointer.x; drag_y = pointer.y; ClampCenter(width, height, visible_width, visible_height)
+    }
+    if pointer.released || !pointer.down { dragging = false }
+    image.bounds = shown; image.fit = ImageFit.ImageFitStretch
+    image.source = .{center_x * width - visible_width / 2.0, center_y * height - visible_height / 2.0, visible_width, visible_height}
+    Image(session, image)
+}

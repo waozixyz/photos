@@ -48,6 +48,26 @@ def digest_file(path):
     return value.hexdigest()
 
 
+def exif_location(exif):
+    """Read camera GPS without fabricating (0, 0) for absent coordinates."""
+    try:
+        gps = exif.get_ifd(34853)
+        def degrees(value, reference, positive, negative, maximum):
+            if reference not in (positive, negative) or len(value) != 3:
+                raise ValueError('Invalid GPS coordinate')
+            parts = [float(v) for v in value]
+            if not all(math.isfinite(v) and v >= 0 for v in parts) or parts[1] >= 60 or parts[2] >= 60:
+                raise ValueError('Invalid GPS coordinate')
+            coordinate = parts[0] + parts[1] / 60 + parts[2] / 3600
+            if coordinate > maximum:
+                raise ValueError('Invalid GPS coordinate')
+            return -coordinate if reference == negative else coordinate
+        return dict(latitude=degrees(gps[2], gps[1], 'N', 'S', 90),
+                    longitude=degrees(gps[4], gps[3], 'E', 'W', 180))
+    except (AttributeError, KeyError, TypeError, ValueError, ZeroDivisionError, OverflowError):
+        return None
+
+
 class Library:
     def __init__(self, root):
         self.root = Path(root).expanduser().resolve()
@@ -188,6 +208,9 @@ class Library:
                 with Image.open(path) as image:
                     width, height = image.size
                     exif = image.getexif()
+                    gps = exif_location(exif)
+                    if gps is not None and 'geoDataExif' not in metadata:
+                        metadata['geoDataExif'] = gps
                     date = exif.get(36867) or exif.get(306)
                     if date:
                         taken = datetime.strptime(str(date), '%Y:%m:%d %H:%M:%S').replace(tzinfo=timezone.utc).timestamp()
@@ -535,21 +558,36 @@ class Library:
                     taken=datetime.fromtimestamp(photo['taken'], timezone.utc).isoformat(),
                     location=f"{geo.get('latitude', '')}, {geo.get('longitude', '')}" if isinstance(geo, dict) and 'latitude' in geo else '')
 
-    def query(self, view='photos', search='', album='', offset=0, limit=60, sort='newest', album_mode='active', album_sort='name', memory_date='', hidden_access=True):
+    def query(self, view='photos', search='', album='', offset=0, limit=60, sort='newest', album_mode='active', album_sort='name', memory_date='', hidden_access=True, map_bounds=None, map_gallery=False):
+        # Map summaries contain coordinates rather than IDs to hydrate. Hold
+        # the writer lock until they are returned, so concurrent Hidden/Trash
+        # changes cannot overtake the native query and publish private markers.
+        locked = view == 'map' and not self.db.in_transaction
+        if locked:
+            self.db.execute('BEGIN IMMEDIATE')
+        try:
+            return self._query(view, search, album, offset, limit, sort, album_mode, album_sort,
+                               memory_date, hidden_access, map_bounds, map_gallery)
+        finally:
+            if locked:
+                self.db.rollback()
+
+    def _query(self, view, search, album, offset, limit, sort, album_mode, album_sort, memory_date, hidden_access, map_bounds, map_gallery):
         from .query import page
         album_detail = self.db.execute('SELECT * FROM albums WHERE name=? AND deleted=0', (album,)).fetchone() if album else None
         smart_filter = album_detail['filter'] if album_detail else ''
+        map_request = dict(map_bounds=map_bounds) if map_bounds is not None else {}
         response = page(self, view=view, search=search, album=album, offset=max(0, int(offset)),
                         limit=max(1, min(100, int(limit))), sort=sort, memory_date=memory_date,
-                        hidden_access=int(bool(hidden_access)), filter=smart_filter)
+                        hidden_access=int(bool(hidden_access)), filter=smart_filter, map_gallery=int(bool(map_gallery)), **map_request)
         count = response['count']
-        rows = [self.photo(photo_id) for photo_id in response['ids']]
+        rows = [self.photo(photo_id) for photo_id in response['ids']] if view != 'map' or map_gallery else []
         photos = []
         for row in rows:
             photo = dict(row)
             # Native ID paging and row hydration are separate reads. A photo
             # hidden by another request in between must not expose its paths.
-            if photo['hidden'] and not hidden_access:
+            if (photo['hidden'] and (not hidden_access or view == 'map')) or (view == 'map' and photo['trashed']):
                 continue
             photo['thumbnail'] = str(self.thumbnail(photo['id'])) if self.thumbnail(photo['id']).exists() else ''
             photo['date'] = datetime.fromtimestamp(photo['taken'], timezone.utc).strftime('%Y-%m-%d')
@@ -563,6 +601,9 @@ class Library:
                     status=self.setting('status', 'Local library · ThinkPad sync only'), importing=self.setting('import', {}))
         if view == 'memories':
             result['memory_date'] = response['memory_date']
+        if view == 'map':
+            result['markers'] = response.get('markers', [])
+            result['map_image'] = str(Path(__file__).resolve().parents[1] / 'assets/world.png')
         if album:
             row = self.db.execute('SELECT * FROM albums WHERE name=? AND deleted=0', (album,)).fetchone()
             if row:

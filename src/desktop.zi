@@ -1,6 +1,8 @@
 // Inspect and publish only the native window Kryon created for this app.
 Desktop :: #import "kryon/Desktop";
 Model :: #import "model";
+Viewer :: #import "viewer";
+Map :: #import "map";
 #import "std/text"
 #import "std/byte_text_linux"
 SDL :: #system_library "SDL2";
@@ -12,15 +14,15 @@ WindowInfo :: (window: *void, info: *WMInfo) -> s32 #foreign SDL "SDL_GetWindowW
 Atom :: (connection: *void, name: *u8, existing: s32) -> u64 #foreign X11 "XInternAtom";
 Property :: (connection: *void, window: u64, atom: u64, kind: u64, format: s32, mode: s32, bytes: *u8, count: s32) -> s32 #foreign X11 "XChangeProperty";
 Flush :: (connection: *void) -> s32 #foreign X11 "XFlush";
-control_ids: [64]s32;
-control_labels: [64][513]u8;
-control_bounds: [64][4]float32;
-control_enabled: [64]bool;
+control_ids: [512]s32;
+control_labels: [512][513]u8;
+control_bounds: [512][4]float32;
+control_enabled: [512]bool;
 control_count: s32;
 frames: s32;
 
 Record :: (id: s32, label: string, x: float32, y: float32, width: float32, height: float32, enabled: bool) {
-    if control_count>=64 { return }; i:=control_count; control_count+=1
+    if control_count>=512 { return }; i:=control_count; control_count+=1
     control_ids[i]=id; Model.Set(control_labels[i][:],label); control_bounds[i]=.{x,y,width,height}; control_enabled[i]=enabled
 }
 Publish :: () {
@@ -37,6 +39,8 @@ Publish :: () {
     BuilderPrint(*out,",\"vault_unlocked\":%",Model.vault_unlocked)
     BuilderPrint(*out,",\"playback_state\":%,\"playback_position\":%,\"playback_duration\":%,\"playback_speed\":%,\"playback_volume\":%",Model.PlaybackState(),Model.PlaybackPosition(),Model.PlaybackDuration(),Model.playback_speed,Model.playback_volume)
     BuilderPrint(*out,",\"crop\":[%,%,%,%]",Model.crop_candidate[0],Model.crop_candidate[1],Model.crop_candidate[2],Model.crop_candidate[3])
+    BuilderPrint(*out,",\"photo_zoom\":%,\"photo_center\":[%,%],\"photo_expanded\":%",Viewer.zoom,Viewer.center_x,Viewer.center_y,Viewer.expanded)
+    BuilderPrint(*out,",\"map_level\":%,\"map_gallery\":%,\"map_markers\":%,\"map_bounds\":[%,%,%,%]",Map.level,Map.gallery,Map.count,Map.bounds[0],Map.bounds[1],Map.bounds[2],Map.bounds[3])
     BuilderPrint(*out,",\"scroll\":%,\"nodes\":%,\"selection_count\":%,\"selected\":%,\"controls\":[",Model.scroll,Model.count,Model.picked_count,Model.selected)
     for i: 0..control_count-1 {
         BuilderPrint(*out,"%{\"control\":\"%\",\"role\":1,\"enabled\":%,\"x\":%,\"y\":%,\"width\":%,\"height\":%,\"label\":",ifx i==0 then "" else ",",control_ids[i],control_enabled[i],control_bounds[i][0],control_bounds[i][1],control_bounds[i][2],control_bounds[i][3])

@@ -44,6 +44,15 @@ original, capture time, dimensions, file size, caption, tags, albums and locatio
 Use the dedicated editors to change captions, tags, file names and capture dates.
 Dates without an explicit time-zone offset use UTC. Left/right arrows browse
 photos and Escape returns to the grid when no text field has focus.
+Zoom + and Zoom - magnify photos, and the mouse wheel zooms around the pointer.
+Drag the image to pan. Fit restores the fitted view; 1:1 displays original pixels
+at one screen pixel each, using the decoder's oriented image dimensions.
+Linux hosts retain original decoded pixels up to 67 megapixels within their
+image memory budget. Larger images use a reduced preview, labelled Preview 1:1;
+full-resolution tiled viewing for those originals remains unfinished.
+Expand fills the Photos window, with Previous/Next and arrow-key browsing.
+Escape returns to the normal viewer first, then to the gallery. Opening another
+photo resets zoom and pan. These controls only change the view of the original.
 
 Edit image opens a native editor with rotation, horizontal and vertical flips,
 centered square/4:3/16:9 crops, brightness, contrast and saturation. Preview and
@@ -82,6 +91,18 @@ from the same capture day in earlier years, using UTC, and Choose day lets you
 browse another day. Hidden, Trash and individually or album-archived photos stay
 excluded. This is an on-this-day gallery; face-based Memory Lane and curated
 stories remain unfinished.
+
+Map shows GPS locations on a bundled offline world map. Zoom with buttons or
+the wheel, drag to pan, and choose a numbered cluster or View photos to browse
+that area. Back to map restores the previous viewport. Album map limits the
+map to the current regular or smart album; the search field also filters markers.
+All matching locations are clustered locally, including photos beyond the loaded
+gallery page. Hidden and Trash are always excluded, even while Hidden is unlocked.
+Zero coordinates and date-line edges are retained. Camera GPS is read on import;
+location corrections and removals remain authoritative during later rescans.
+The map makes no tile or geocoding requests. Its coarse Natural Earth land outlines
+provide orientation; street detail, named radius-based location tags and geographic
+trip curation remain unfinished.
 
 Use Select, Ctrl-click or Shift-click to select up to 1000 items. Select loaded
 selects the photos already loaded into the feed, including those outside the
@@ -155,7 +176,7 @@ and [export behavior](https://ente.com/help/photos/features/backup-and-sync/expo
 The remaining replacement work includes:
 
 - Mobile clients, permission-aware background camera backup and device space recovery.
-- On-device face grouping, semantic search, maps, curated memories and automatically curated trip/people albums.
+- On-device face grouping, semantic search, detailed maps and radius-based location tags, curated memories and automatically curated trip/people albums.
 - Advanced photo editing, encrypted video streaming, animated editing previews, Live Photo pairing and broader HEIC/RAW previews.
 - Private sharing, collaboration, public links, comments and account recovery.
   Any sharing design needs to honor the owner's ThinkPad-only sync restriction.
@@ -193,6 +214,8 @@ ziran lock
 make build test window-test
 make video-window-test video-portable-test
 make crop-window-test crop-portable-test
+make viewer-window-test viewer-portable-test
+make map-window-test map-portable-test
 make playback-window-test playback-portable-test
 PHOTOS_DAOCHI=/path/to/daochi make sync-test
 ```

@@ -89,7 +89,7 @@ with tempfile.TemporaryDirectory() as directory:
                 shot = ROOT / 'build/screenshots/hosted.png'
                 def color(expected):
                     assert child.poll() is None, log_path.read_text()
-                    subprocess.run(['import', '-window', window, str(shot)], check=True, stdout=subprocess.DEVNULL)
+                    subprocess.run(['import', '-window', window, str(shot)], check=True, stdout=subprocess.DEVNULL, timeout=5)
                     with Image.open(shot) as image:
                         return image.width > 20 and image.height > 600 and image.convert('RGB').getpixel((20, 600)) == expected
                 wait(lambda: color((20, 30, 40)), 'Portable Photos did not inherit the dark host theme')

@@ -2,6 +2,7 @@
 // windows or network connections; SQLite supplies one consistent WAL snapshot.
 using SQLite :: #import "sqlite/SQLite";
 Search :: #import "search";
+Locations :: #import "locations";
 Clock :: #import "std/date_time_linux";
 #import "std/date_parse"
 #import "std/byte_text_linux"
@@ -72,6 +73,11 @@ main :: (argc: s32, argv: **u8) -> s32 {
         Search.Bind(*query,TextUntilNul(memory[5:11])); Search.BindNumber(*query,UtcSeconds(DateNumber(TextUntilNul(memory[:]),0,4),1,1,0,0,0))
     }
     Search.Parse(*query,TextUntilNul(filter[:])); Search.Parse(*query,TextUntilNul(search[:]))
+    map_bounds: Locations.Bounds = .{-180000000, -90000000, 180000000, 90000000}
+    if name == "map" {
+        if !Locations.ReadBounds(json, *map_bounds) { return Failure("Choose valid map bounds in microdegrees") }
+        Locations.Filter(*query, map_bounds)
+    }
     if query.error != "" { return Failure(query.error) }
     if name == "validate" { print("{\"valid\":1}\n"); return 0 }
     database: *void
@@ -101,5 +107,20 @@ main :: (argc: s32, argv: **u8) -> s32 {
         for byte: id { if !(byte >= 48 && byte <= 57 || byte >= 97 && byte <= 102) { return Failure("Gallery contains an invalid photo identity") } }
         BuilderPrint(*output,"%\"%\"",ifx count == 0 then "" else ",",id); count += 1
     }
-    BuilderPrint(*output,"]}"); response := BuilderFinish(output); print("%\n",response); return 0
+    BuilderPrint(*output,"]")
+    if name == "map" && Number(json, "map_gallery", 0) == 0 {
+        unused SqliteFinalize(statement); statement = null
+        cluster_sql := Locations.ClusterSQL(where, map_bounds)
+        if !Prepare(database, cluster_sql, *query, *statement) { return Failure("Cannot prepare map locations") }
+        BuilderPrint(*output,",\"markers\":["); marker_count: s32
+        while true {
+            result := SqliteStep(statement)
+            if result == SQLITE_DONE { break }
+            if result != SQLITE_ROW || marker_count >= 96 { return Failure("Cannot read map locations") }
+            BuilderPrint(*output,"%{\"count\":%,\"longitude\":%,\"latitude\":%,\"bounds\":[%,%,%,%]}",ifx marker_count == 0 then "" else ",",SqliteColumnInt64(statement,0),SqliteColumnInt64(statement,1),SqliteColumnInt64(statement,2),SqliteColumnInt64(statement,3),SqliteColumnInt64(statement,4),SqliteColumnInt64(statement,5),SqliteColumnInt64(statement,6))
+            marker_count += 1
+        }
+        BuilderPrint(*output,"]")
+    }
+    BuilderPrint(*output,"}"); response := BuilderFinish(output); print("%\n",response); return 0
 }

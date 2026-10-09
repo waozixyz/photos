@@ -1,0 +1,11 @@
+world.png is an offline equirectangular map generated from Natural Earth's
+1:110m land polygons (ne_110m_land.geojson), version 5.1.1.
+Natural Earth map data is public domain.
+
+Source: https://github.com/nvkelso/natural-earth-vector/blob/master/geojson/ne_110m_land.geojson
+Terms: https://www.naturalearthdata.com/about/terms-of-use/
+Generator: scripts/map_image.py
+
+The coarse land outlines are for geographic orientation, not navigation.
+Photo locations are rendered locally over this static background. No tiles,
+geocoding or library metadata are requested from a network map service.

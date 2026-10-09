@@ -97,6 +97,9 @@ def main():
     icon = args.prefix/'share/icons/hicolor/scalable/apps/photos.svg'
     icon.parent.mkdir(parents=True,exist_ok=True)
     shutil.copyfile(repo/'assets/photos.svg',icon)
+    (installed/'assets').mkdir(exist_ok=True)
+    for name in ['world.png', 'MAP-LICENSE.txt']:
+        shutil.copyfile(repo/'assets'/name, installed/'assets'/name)
     if args.harmony:
         catalog_path = Path.home()/'.config/harmony/apps.json'
         catalog = json.loads(catalog_path.read_bytes()) if catalog_path.is_file() else {}

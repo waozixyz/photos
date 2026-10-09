@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.13
+
+- Magnify photos with zoom controls or the mouse wheel, drag to pan, fit the image or inspect it at its original pixel size.
+- Expand photos to fill the Photos window and keep browsing photos with Previous, Next or the arrow keys; Escape returns to the normal view.
+- Keep zoom and pan bounded to the image and reset them when opening another photo, without changing original files.
+- Browse photo locations on an offline world map, zoom and drag to explore, and open clustered markers or the visible area as a gallery.
+- Filter maps by album or search, include camera GPS on import and keep Hidden and Trash locations off the map.
+- Return from a photo with Back without closing the application.
+
 ## 0.1.12
 
 - Drag a custom crop area in the photo or video editor, preview it and save a separate copy while preserving the original.

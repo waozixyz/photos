@@ -1,6 +1,8 @@
 Transport :: #import "transport";
 Playback :: #import "playback";
 Crop :: #import "crop";
+Viewer :: #import "viewer";
+Map :: #import "map";
 playback_id: [65]u8;
 playback_path: [4097]u8;
 playback_started: bool;
@@ -162,6 +164,10 @@ SendRequest :: (action: string, id: string, value: string) {
     Property(*out, "edit_session", TextUntilNul(edit_session[:]))
     Property(*out, "vault_token", TextUntilNul(vault_token[:]))
     Property(*out, "video_job", TextUntilNul(video_job[:]))
+    if view == "map" {
+        region := ifx Map.gallery then Map.gallery_bounds else Map.bounds
+        BuilderPrint(*out, ",\"map_bounds\":[%,%,%,%],\"map_gallery\":%", region[0], region[1], region[2], region[3], ifx Map.gallery then 1 else 0)
+    }
     mutation = action != "query" && action != "open" && action != "sync" && action != "import" && action != "image_preview" && action != "video_preview" && action != "video_begin" && action != "video_save" && action != "video_status" && action != "video_cancel" && action != "playback_check"
     if mutation && picked_count > 0 && (action == "album_add" || action == "album_remove" || !StartsWithFoldASCII(action, "album_")) {
         BuilderPrint(*out, ",\"ids\":[")
@@ -228,6 +234,7 @@ Tick :: () {
             if saved[0] != 0 && (editor == "video" || editor == "video_trim") { editor = ""; edit_preview[0] = 0; edit_session[0] = 0 }
         }
         Decode(json, 0, "error", message[:]); if message[0] != 0 { if appending { more_due = ticks + 300; appending = false }; return }
+        if view == "map" { Map.Load(json) }
         total = Number(json, 0, "total"); matches = Number(json, 0, "count"); pending = Number(json, 0, "pending")
         Decode(json, 0, "status", message[:])
         if FieldAt(json, 0, "edit_preview") >= 0 {
@@ -245,7 +252,7 @@ Tick :: () {
         if FieldAt(json, 0, "search") >= 0 { Decode(json, 0, "search", search[:]); search_cursor = 0; search_anchor = 0 }
         if FieldAt(json, 0, "view") >= 0 {
             fresh_view: [32]u8; Decode(json, 0, "view", fresh_view[:])
-            for i: 0..cast(s32)9 { if View(i) == TextUntilNul(fresh_view[:]) { view = View(i) } }
+            for i: 0..cast(s32)10 { if View(i) == TextUntilNul(fresh_view[:]) { view = View(i) } }
         }
         album_detail := FieldAt(json, 0, "album_detail")
         album_description[0] = 0; album_filter[0] = 0; album_pinned = false; album_archived = false
@@ -302,20 +309,24 @@ Tick :: () {
     if !loading && ticks > next_refresh && ((scroll == 0 && selected < 0) || (view == "hidden" && vault_unlocked)) { if selected < 0 { offset = 0 }; Request() }
 }
 Navigate :: (target: string) {
+    Viewer.Reset()
     StopPlayback()
     queued_request = false
-    if loading { for i: 0..cast(s32)9 { if View(i) == target { queued_view = i } }; return }
+    if loading { for i: 0..cast(s32)10 { if View(i) == target { queued_view = i } }; return }
     if view == "hidden" && target != "hidden" && vault_token[0] != 0 {
-        for i: 0..cast(s32)9 { if View(i) == target { queued_view = i } }
+        for i: 0..cast(s32)10 { if View(i) == target { queued_view = i } }
         vault_unlocked = false; selected = -1; ClearSelection(); editor = ""; Wipe(edit_value[:]); Wipe(vault_first[:]); Wipe(edit_preview[:])
         Request("vault_lock"); Wipe(vault_token[:]); return
     }
     Wipe(vault_first[:]); if Secret() { Wipe(edit_value[:]) }
+    if target == "map" { Map.Reset() }
     ClearSelection(); editor = ""; view = target; appending = false; feed_base = 0; album[0] = 0; selected = -1; offset = 0; scroll = 0; Request()
 }
 Choose :: (index: s32) {
     if busy || index < 0 || index >= count { return }
     StopPlayback()
+    was_expanded := Viewer.expanded
+    Viewer.Reset(); Viewer.expanded = was_expanded && TextUntilNul(photos[index].kind[:]) == "photo"
     selected = index
     detail_id[0] = 0
     detail_caption[0] = 0; detail_tags[0] = 0; detail_albums[0] = 0; detail_taken[0] = 0; detail_location[0] = 0; detail_size = 0
@@ -532,4 +543,11 @@ More :: () {
     offset = count + feed_base; appending = true; Request()
 }
 
-View :: (index: s32) -> string { names: [10]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized", "memories"}; return names[index] }
+RefreshMap :: () { if loading { return }; ClearSelection(); selected = -1; offset = 0; scroll = 0; Request() }
+OpenMap :: () { if loading { return }; CancelEditor(); Map.Reset(); view = "map"; RefreshMap() }
+MapGallery :: (index: s32 = -1) {
+    if loading { return }
+    Map.OpenGallery(index); RefreshMap()
+}
+MapBack :: () { if loading { return }; Map.gallery = false; Map.dragged = false; RefreshMap() }
+View :: (index: s32) -> string { names: [11]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized", "memories", "map"}; return names[index] }

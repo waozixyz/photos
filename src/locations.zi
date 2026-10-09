@@ -1,0 +1,41 @@
+// Local location queries use microdegrees, including zero and the date line.
+// The map never makes network requests or receives Hidden/Trash coordinates.
+Search :: #import "search";
+#import "std/json_scan"
+#import "std/text_buffer"
+
+Longitude :: "CAST(round(coalesce(json_extract(metadata,'$.geoData.longitude'),json_extract(metadata,'$.geoDataExif.longitude'))*1000000) AS INTEGER)";
+Latitude :: "CAST(round(coalesce(json_extract(metadata,'$.geoData.latitude'),json_extract(metadata,'$.geoDataExif.latitude'))*1000000) AS INTEGER)";
+Bounds :: struct { west: s32; south: s32; east: s32; north: s32 }
+ReadBounds :: (json: string, bounds: *Bounds) -> bool {
+    at := FieldAt(json, 0, "map_bounds")
+    if at < 0 { return true }
+    if json[at] != 91 { return false }; at = Space(json, at + 1)
+    values: [4]s32
+    for i: 0..3 {
+        value := ReadNumber(json, at)
+        if !value.valid || value.value < -180000000.0 || value.value > 180000000.0 { return false }
+        integer := cast(s32)value.value
+        if cast(float64)integer != value.value { return false }
+        values[i] = integer; at = Space(json, ValueEnd(json, at, 0))
+        if i < 3 { if at < 0 || json[at] != 44 { return false }; at = Space(json, at + 1) }
+    }
+    if at < 0 || json[at] != 93 || values[0] > values[2] || values[1] > values[3] || values[1] < -90000000 || values[3] > 90000000 { return false }
+    bounds.* = .{values[0], values[1], values[2], values[3]}; return true
+}
+Filter :: (query: *Search.Predicate, bounds: Bounds) {
+    Search.AddSQL(query, " AND trashed=0 AND hidden=0 AND ")
+    Search.AddSQL(query, "coalesce(nullif(json_type(metadata,'$.geoData.longitude'),'null'),json_type(metadata,'$.geoDataExif.longitude')) IN ('integer','real') AND ")
+    Search.AddSQL(query, "coalesce(nullif(json_type(metadata,'$.geoData.latitude'),'null'),json_type(metadata,'$.geoDataExif.latitude')) IN ('integer','real') AND ")
+    Search.AddSQL(query, Longitude); Search.AddSQL(query, " BETWEEN ? AND ? AND ")
+    Search.BindNumber(query, cast(s64)bounds.west); Search.BindNumber(query, cast(s64)bounds.east)
+    Search.AddSQL(query, Latitude); Search.AddSQL(query, " BETWEEN ? AND ?")
+    Search.BindNumber(query, cast(s64)bounds.south); Search.BindNumber(query, cast(s64)bounds.north)
+}
+ClusterSQL :: (where: string, bounds: Bounds) -> string {
+    width := bounds.east - bounds.west; height := bounds.north - bounds.south
+    if width < 1 { width = 1 }; if height < 1 { height = 1 }
+    out: Vec(u8)
+    BuilderPrint(*out,"WITH points AS (SELECT % AS lon,% AS lat FROM photos WHERE %) SELECT count(*),cast(avg(lon) AS INTEGER),cast(avg(lat) AS INTEGER),min(lon),min(lat),max(lon),max(lat) FROM points GROUP BY min(11,cast((lon-(%))*12.0/% AS INTEGER)),min(7,cast((lat-(%))*8.0/% AS INTEGER)) ORDER BY min(lon),min(lat)",Longitude,Latitude,where,bounds.west,width,bounds.south,height)
+    return BuilderFinish(out)
+}

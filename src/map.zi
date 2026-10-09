@@ -1,0 +1,106 @@
+// Offline equirectangular browsing. Land is a bundled asset; markers come
+// from the local Ziran query engine. No tile or geocoding service is used.
+using UI :: #import "kryon/Widgets";
+Input :: #import "kryon/tree_input";
+#import "std/json_scan"
+#import "std/text"
+#import "std/text_buffer"
+
+Marker :: struct { count: s32; longitude: s32; latitude: s32; bounds: [4]s32 }
+markers: [96]Marker;
+count: s32;
+image_path: [4097]u8;
+bounds: [4]s32 = .{-180000000, -90000000, 180000000, 90000000};
+gallery_bounds: [4]s32;
+gallery: bool;
+level: s32;
+center_lon: float64;
+center_lat: float64;
+dragging: bool;
+dragged: bool;
+drag_x: float32;
+drag_y: float32;
+
+Reset :: () { level = 0; center_lon = 0.0; center_lat = 0.0; gallery = false; dragging = false; dragged = false; count = 0; UpdateBounds() }
+UpdateBounds :: () {
+    width: float64 = 360000000.0; for i: 0..level - 1 { width /= 2.0 }
+    height := width / 2.0
+    if center_lon < -180000000.0 + width / 2.0 { center_lon = -180000000.0 + width / 2.0 }
+    if center_lon > 180000000.0 - width / 2.0 { center_lon = 180000000.0 - width / 2.0 }
+    if center_lat < -90000000.0 + height / 2.0 { center_lat = -90000000.0 + height / 2.0 }
+    if center_lat > 90000000.0 - height / 2.0 { center_lat = 90000000.0 - height / 2.0 }
+    bounds = .{cast(s32)(center_lon - width / 2.0), cast(s32)(center_lat - height / 2.0), cast(s32)(center_lon + width / 2.0), cast(s32)(center_lat + height / 2.0)}
+}
+Zoom :: (inside: bool) {
+    if inside && level < 18 { level += 1 }; if !inside && level > 0 { level -= 1 }
+    UpdateBounds()
+}
+ReadInteger :: (json: string, at: s32, key: string) -> s32 {
+    value := ReadNumber(json, FieldAt(json, at, key)); return ifx value.valid then cast(s32)value.value else 0
+}
+Load :: (json: string) {
+    at := FieldAt(json, 0, "map_image")
+    if at >= 0 {
+        length := ReadStringText(json, at, image_path[:]); if length < 0 || length >= 4097 { image_path[0] = 0 } else { image_path[length] = 0 }
+    }
+    array := FieldAt(json, 0, "markers")
+    if array < 0 { return }; at = Space(json, array + 1); count = 0
+    while at >= 0 && at < cast(s32)json.count && json[at] != 93 && count < 96 {
+        marker := *markers[count]
+        marker.count = ReadInteger(json, at, "count"); marker.longitude = ReadInteger(json, at, "longitude"); marker.latitude = ReadInteger(json, at, "latitude")
+        position := Space(json, FieldAt(json, at, "bounds") + 1)
+        for i: 0..3 {
+            value := ReadNumber(json, position); marker.bounds[i] = ifx value.valid then cast(s32)value.value else 0
+            position = Space(json, ValueEnd(json, position, 0)); if i < 3 { position = Space(json, position + 1) }
+        }
+        count += 1; at = Space(json, ValueEnd(json, at, 0)); if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json, at + 1) }
+    }
+}
+Picture :: (body: Rectangle) -> Rectangle {
+    height := body.width / 2.0; width := body.width
+    if height > body.height { height = body.height; width = height * 2.0 }
+    return .{body.x + (body.width - width) / 2.0, body.y + (body.height - height) / 2.0, width, height}
+}
+MarkerCount :: (index: s32) -> s32 { return markers[index].count }
+OpenGallery :: (index: s32) {
+    gallery_bounds = bounds
+    if index >= 0 && index < count { gallery_bounds = markers[index].bounds }
+    gallery = true
+}
+MarkerPoint :: (index: s32, picture: Rectangle) -> Vector2 {
+    marker := markers[index]
+    return .{picture.x + cast(float32)(marker.longitude - bounds[0]) / cast(float32)(bounds[2] - bounds[0]) * picture.width,
+             picture.y + cast(float32)(bounds[3] - marker.latitude) / cast(float32)(bounds[3] - bounds[1]) * picture.height}
+}
+Draw :: (session: Session, picture: Rectangle, enabled: bool) -> bool {
+    changed: bool
+    pointer := Input.PointerSample(session)
+    if enabled {
+        wheel := PointerWheelTake(session, picture)
+        if wheel != 0.0 {
+            dx := cast(float64)((pointer.x - picture.x) / picture.width - 0.5)
+            dy := cast(float64)(0.5 - (pointer.y - picture.y) / picture.height)
+            longitude := center_lon + dx * cast(float64)(bounds[2] - bounds[0])
+            latitude := center_lat + dy * cast(float64)(bounds[3] - bounds[1])
+            Zoom(wheel > 0.0)
+            center_lon = longitude - dx * cast(float64)(bounds[2] - bounds[0]); center_lat = latitude - dy * cast(float64)(bounds[3] - bounds[1]); UpdateBounds(); changed = true
+        }
+        if pointer.pressed && Input.PointInBounds(pointer.x, pointer.y, picture) { dragging = true; dragged = false; drag_x = pointer.x; drag_y = pointer.y }
+        if dragging && (pointer.down || pointer.released) {
+            dx := pointer.x - drag_x; dy := pointer.y - drag_y
+            if dx != 0.0 || dy != 0.0 {
+                center_lon -= cast(float64)(dx / picture.width) * cast(float64)(bounds[2] - bounds[0])
+                center_lat += cast(float64)(dy / picture.height) * cast(float64)(bounds[3] - bounds[1]); UpdateBounds(); dragged = true
+            }
+            drag_x = pointer.x; drag_y = pointer.y
+        }
+        if dragging && pointer.released && dragged { changed = true }
+    }
+    if pointer.released || !pointer.down || !enabled { dragging = false }
+    image: ImageProps; image.key = 6200000; image.asset_path = TextUntilNul(image_path[:]); image.alt_text = "Offline world map of photo locations"; image.bounds = picture; image.fit = ImageFit.ImageFitStretch
+    image.source = .{cast(float32)(bounds[0] + 180000000) / 360000000.0 * 4096.0,
+                     cast(float32)(90000000 - bounds[3]) / 180000000.0 * 2048.0,
+                     cast(float32)(bounds[2] - bounds[0]) / 360000000.0 * 4096.0,
+                     cast(float32)(bounds[3] - bounds[1]) / 180000000.0 * 2048.0}
+    Image(session, image); return changed
+}

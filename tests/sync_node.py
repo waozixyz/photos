@@ -124,6 +124,8 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         assert peer.sync() == 0; assert client.sync() == 0
         assert first.details(photo_id)['location'] == '-25.3, -57.6'
         assert first.details(copy_id)['location'] == '-25.3, -57.6'
+        mapped = first.query('map', album='Renamed fixture')
+        assert mapped['count'] == 2 and sum(marker['count'] for marker in mapped['markers']) == 2
         assert json.loads(first.photo(copy_id)['metadata'])['photosEdit']['parent'] == photo_id
         restored = Path(client.materialize(copy_id))
         assert digest_file(restored) == copy_id
@@ -133,6 +135,7 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         assert (source/'fixture.jpg').read_bytes() == original.read_bytes()
         second.edit(photo_id, 'location', ''); peer.sync(); client.sync()
         assert first.details(photo_id)['location'] == ''
+        assert first.query('map', album='Renamed fixture')['count'] == 1
         first.edit_album('', 'smart_create', 'Dynamic favorites', search='is:favorite year:2024')
         assert client.sync() == 0; assert peer.sync() == 0
         assert second.album_details('Dynamic favorites')['filter']=='is:favorite year:2024'

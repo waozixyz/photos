@@ -31,7 +31,8 @@ def ui_query(library, request):
     result = library.query(request.get('view', 'photos'), request.get('search', ''),
                            request.get('album', ''), request.get('offset', 0), sort=request.get('sort', 'newest'),
                            album_mode=request.get('album_mode', 'active'), album_sort=request.get('album_sort', 'name'),
-                           memory_date=request.get('memory_date', ''), hidden_access=vault.unlocked(library, request.get('vault_token', '')))
+                           memory_date=request.get('memory_date', ''), hidden_access=vault.unlocked(library, request.get('vault_token', '')),
+                           map_bounds=request.get('map_bounds'), map_gallery=request.get('map_gallery', False))
     result.update(vault.state(library, request.get('vault_token', '')))
     # A native page or slow catalog query may outlast the unlock. Recheck
     # before returning any Hidden paths to the caller.
