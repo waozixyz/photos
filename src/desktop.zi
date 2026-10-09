@@ -4,6 +4,7 @@ Model :: #import "model";
 Viewer :: #import "viewer";
 Map :: #import "map";
 TextDetection :: #import "text_detection";
+QRDetection :: #import "qr_detection";
 #import "std/text"
 #import "std/byte_text_linux"
 SDL :: #system_library "SDL2";
@@ -39,6 +40,7 @@ Publish :: () {
     Model.Property(*out,"sort",Model.sort)
     BuilderPrint(*out,",\"vault_unlocked\":%",Model.vault_unlocked)
     BuilderPrint(*out,",\"detected_words\":%",TextDetection.count)
+    BuilderPrint(*out,",\"detected_codes\":%,\"chosen_code\":%",QRDetection.count,QRDetection.chosen)
     BuilderPrint(*out,",\"slideshow_active\":%,\"slideshow_paused\":%,\"slideshow_offset\":%,\"slideshow_count\":%,\"slideshow_interval\":%,\"slideshow_albums\":%",Model.slide_active,Model.slide_paused,Model.slide_offset,Model.slide_count,Model.slide_intervals[Model.slide_interval],Model.slide_album_count)
     BuilderPrint(*out,",\"playback_state\":%,\"playback_position\":%,\"playback_duration\":%,\"playback_speed\":%,\"playback_volume\":%",Model.PlaybackState(),Model.PlaybackPosition(),Model.PlaybackDuration(),Model.playback_speed,Model.playback_volume)
     BuilderPrint(*out,",\"crop\":[%,%,%,%]",Model.crop_candidate[0],Model.crop_candidate[1],Model.crop_candidate[2],Model.crop_candidate[3])

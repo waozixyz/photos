@@ -4,6 +4,7 @@ Crop :: #import "crop";
 Viewer :: #import "viewer";
 Map :: #import "map";
 TextDetection :: #import "text_detection";
+QRDetection :: #import "qr_detection";
 #if #defined(POSIX_THREADS) {
     Clock :: #import "kryon/ClockLinux";
 } else {
@@ -13,6 +14,10 @@ text_request: bool;
 text_check_pending: bool;
 text_poll: s64;
 text_valid_until: s64;
+qr_request: bool;
+qr_check_pending: bool;
+qr_poll: s64;
+qr_valid_until: s64;
 playback_id: [65]u8;
 playback_path: [4097]u8;
 playback_started: bool;
@@ -214,6 +219,8 @@ SendRequest :: (action: string, id: string, value: string) {
     slide_checking = action == "slide_check"
     text_check_pending = action == "text_check"
     text_request = action == "detect_text" || action == "text_check"
+    qr_check_pending = action == "qr_check"
+    qr_request = action == "detect_qr" || action == "qr_check"
     playback_request = action == "playback_check"
     if action != "query" && !slide_request { offset = ifx selected >= 0 then feed_base + selected / 60 * 60 else feed_base; appending = false }
     out: Vec(u8)
@@ -238,7 +245,7 @@ SendRequest :: (action: string, id: string, value: string) {
         region := ifx Map.gallery then Map.gallery_bounds else Map.bounds
         BuilderPrint(*out, ",\"map_bounds\":[%,%,%,%],\"map_gallery\":%", region[0], region[1], region[2], region[3], ifx Map.gallery then 1 else 0)
     }
-    mutation = action != "text_check" && action != "detect_text" && action != "query" && action != "open" && action != "sync" && action != "import" && action != "image_preview" && action != "video_preview" && action != "video_begin" && action != "video_save" && action != "video_status" && action != "video_cancel" && action != "playback_check"
+    mutation = !qr_request && action != "text_check" && action != "detect_text" && action != "query" && action != "open" && action != "sync" && action != "import" && action != "image_preview" && action != "video_preview" && action != "video_begin" && action != "video_save" && action != "video_status" && action != "video_cancel" && action != "playback_check"
     if action == "album_auto_people" || action == "album_auto_people_remove" || (mutation && picked_count > 0 && (action == "album_add" || action == "album_remove" || !StartsWithFoldASCII(action, "album_"))) {
         BuilderPrint(*out, ",\"ids\":[")
         for i: 0..picked_count - 1 { if i > 0 { BuilderPrint(*out, ",") }; Quoted(*out, TextUntilNul(picked[i].id[:])) }
@@ -249,7 +256,7 @@ SendRequest :: (action: string, id: string, value: string) {
     loading = Transport.Start(request)
     Release(request)
     if !loading { Set(message[:], Transport.error); if appending { more_due = ticks + 300; appending = false } }
-    busy = loading && action != "query" && action != "playback_check" && action != "text_check" && !slide_request; next_refresh = ticks + 300
+    busy = loading && action != "query" && action != "playback_check" && action != "text_check" && !slide_request && !qr_request; next_refresh = ticks + 300
 }
 HeaderField :: struct { key: [65]u8; at: s32 }
 header_fields: [64]HeaderField;
@@ -318,6 +325,7 @@ Tick :: () {
         StopSlides(); Set(message[:],"Slideshow access ended; reopen the gallery to retry")
     }
     if editor == "text" && TextDetection.active && ticks > text_valid_until { CancelEditor(); Set(message[:], "Text access ended; reopen the photo to retry") }
+    if editor == "qr" && QRDetection.active && (now < 0 || now >= qr_valid_until) { CancelEditor(); Set(message[:], "QR access ended; reopen the photo to retry") }
     if playback_id[0] != 0 {
         valid := editor == "playback" && selected >= 0 && selected < count
         if valid { valid = TextUntilNul(photos[selected].id[:]) == TextUntilNul(playback_id[:]) && !photos[selected].trashed && (!photos[selected].hidden || vault_unlocked) }
@@ -330,7 +338,7 @@ Tick :: () {
     if !initialized { initialized = true; Request() }
     if Transport.Poll() {
         loading = false; busy = false
-        if Transport.error != "" { Set(message[:], Transport.error); if slide_active { StopSlides() }; if editor == "text" { CancelEditor() }; if playback_id[0] != 0 { StopPlayback() }; if appending { more_due = ticks + 300; appending = false }; return }
+        if Transport.error != "" { Set(message[:], Transport.error); if slide_active { StopSlides() }; if editor == "text" || editor == "qr" { CancelEditor() }; if playback_id[0] != 0 { StopPlayback() }; if appending { more_due = ticks + 300; appending = false }; return }
         json := Transport.Value()
         ReadHeader(json)
         if slide_request {
@@ -367,6 +375,14 @@ Tick :: () {
             if message[0] != 0 || TextUntilNul(fresh_id[:]) != TextUntilNul(photos[selected].id[:]) { TextDetection.Clear(); editor = ""; return }
             if Lookup(json, 0, "text_words") >= 0 { TextDetection.LoadLanguages(json); TextDetection.Load(json); Decode(json, 0, "status", message[:]) }
             text_poll = ticks + 30; text_valid_until = ticks + 150; return
+        }
+        if qr_request {
+            qr_request = false
+            Decode(json,0,"error",message[:]); fresh_id: [65]u8; Decode(json,0,"qr_photo",fresh_id[:])
+            if editor != "qr" || selected < 0 || selected >= count { QRDetection.Clear(); return }
+            if message[0] != 0 || TextUntilNul(fresh_id[:]) != TextUntilNul(photos[selected].id[:]) { CancelEditor(); return }
+            if Lookup(json,0,"qr_codes") >= 0 { QRDetection.Load(json); Decode(json,0,"status",message[:]) }
+            now = Clock.Milliseconds(); qr_poll = now+500; qr_valid_until = now+2500; return
         }
         if playback_request {
             playback_request = false
@@ -496,12 +512,14 @@ Tick :: () {
     }
     if !loading && playback_id[0] != 0 && ticks >= playback_poll { playback_poll = ticks + 30; Request("playback_check", TextUntilNul(playback_id[:])); return }
     if !loading && editor == "text" && TextDetection.active && selected >= 0 && selected < count && ticks >= text_poll { text_poll = ticks + 30; Request("text_check", TextUntilNul(photos[selected].id[:])); return }
+    if !loading && editor == "qr" && QRDetection.active && selected >= 0 && selected < count && now >= qr_poll { qr_poll = now+500; Request("qr_check",TextUntilNul(photos[selected].id[:])); return }
     if !loading && video_job[0] != 0 && ticks >= video_poll { video_poll = ticks + 60; Request("video_status"); return }
     if !loading && ticks > next_refresh && ((scroll == 0 && selected < 0) || (view == "hidden" && vault_unlocked)) { if selected < 0 && view != "people" { offset = ifx date_jumped then feed_base else 0 }; Request() }
 }
 Navigate :: (target: string) {
     StopSlides(); slide_picking = false; VecClear(slide_albums); slide_album_count = 0
     TextDetection.Clear()
+    QRDetection.Clear()
     Viewer.Reset()
     StopPlayback()
     queued_request = false
@@ -551,6 +569,7 @@ SlideAlbumToggle :: (name: string) {
 Choose :: (index: s32) {
     if busy || index < 0 || index >= count { return }
     TextDetection.Clear()
+    QRDetection.Clear()
     StopPlayback()
     was_expanded := Viewer.expanded
     Viewer.Reset(); Viewer.expanded = was_expanded && TextUntilNul(photos[index].kind[:]) == "photo"
@@ -657,7 +676,12 @@ PlaybackState :: () -> s32 { return Playback.State() }
 PlaybackPosition :: () -> s64 { return Playback.Position() }
 PlaybackDuration :: () -> s64 { return Playback.Duration() }
 Secret :: () -> bool { return StartsWithFoldASCII(editor, "vault_") }
-CancelEditor :: () { TextDetection.Clear(); editor = ""; focused = false; Wipe(edit_value[:]); Wipe(vault_first[:]) }
+CancelEditor :: () { TextDetection.Clear(); QRDetection.Clear(); editor = ""; focused = false; Wipe(edit_value[:]); Wipe(vault_first[:]) }
+BeginQR :: () {
+    if loading || selected < 0 || selected >= count || photos[selected].trashed || TextUntilNul(photos[selected].kind[:]) != "photo" { return }
+    StopPlayback(); TextDetection.Clear(); QRDetection.Clear(); editor = "qr"; focused = false; search_focused = false
+    Request("detect_qr",TextUntilNul(photos[selected].id[:]))
+}
 BeginText :: () {
     if (loading && !text_check_pending) || selected < 0 || selected >= count || photos[selected].trashed { return }
     StopPlayback(); TextDetection.Clear(); editor = "text"; focused = false; search_focused = false

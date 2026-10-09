@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.21
+
+- Detect QR codes in photos, screenshots and Live Photo stills locally, select each code and copy its complete contents.
+- Keep multiline and Unicode contents intact, recognize rotated images and clear QR results when privacy access expires or the library becomes unavailable.
+- Leave originals unchanged and keep decoded QR contents out of library search and encrypted backup.
+
 ## 0.1.20
 
 - Play photos and Live Photo stills from one or several albums as a slideshow, without duplicating photos that belong to multiple selected albums.

@@ -1,0 +1,57 @@
+// Only the active viewer owns QR payloads. They are never inspection properties.
+using UI :: #import "kryon/Widgets";
+Input :: #import "kryon/tree_input";
+#import "std/json_scan"
+#import "std/text"
+#import "std/text_buffer"
+#import "std/byte_text_linux"
+Code :: struct { text: [8193]u8; x: s32; y: s32; width: s32; height: s32 }
+codes: Vec(Code);
+count: s32;
+width: s32;
+height: s32;
+chosen: s32 = -1;
+active: bool;
+Clear :: () {
+    for i: 0..count-1 { for byte: 0..8192 { codes[i].text[byte] = 0 } }
+    VecClear(codes); count = 0; chosen = -1; active = false; width = 0; height = 0
+}
+Number :: (json: string, at: s32, key: string) -> s32 {
+    value := ReadNumber(json,FieldAt(json,at,key)); return ifx value.valid then cast(s32)value.value else 0
+}
+Load :: (json: string) {
+    Clear(); width = Number(json,0,"qr_width"); height = Number(json,0,"qr_height")
+    at := FieldAt(json,0,"qr_codes"); if at < 0 || json[at] != 91 { return }; at = Space(json,at+1)
+    while at >= 0 && at < cast(s32)json.count && json[at] != 93 && count < 32 {
+        code: Code; size := ReadStringText(json,FieldAt(json,at,"text"),code.text[:])
+        if size < 1 || size >= 8193 { Clear(); return }; code.text[size] = 0
+        code.x = Number(json,at,"x"); code.y = Number(json,at,"y")
+        code.width = Number(json,at,"width"); code.height = Number(json,at,"height")
+        if code.x < 0 || code.y < 0 || code.width <= 0 || code.height <= 0 || code.x+code.width > 10000 || code.y+code.height > 10000 { Clear(); return }
+        if !VecPush(codes,code) { Clear(); return }; count += 1
+        at = Space(json,ValueEnd(json,at,0)); if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json,at+1) } else { break }
+    }
+    active = width > 0 && width <= 4096 && height > 0 && height <= 4096
+    if count > 0 { chosen = 0 }
+}
+Selected :: () -> string { if chosen < 0 || chosen >= count || !active { return "" }; return TextUntilNul(codes[chosen].text[:]) }
+Move :: (delta: s32) { if count > 0 { chosen = (chosen+count+delta)%count } }
+Copy :: () -> bool { value := Selected(); return value.count > 0 && SystemClipboardSet(value) }
+Draw :: (session: Session, image: string, canvas: Rectangle, enabled: bool) {
+    if !active || width <= 0 || height <= 0 || canvas.width <= 0.0 || canvas.height <= 0.0 { return }
+    scale := canvas.width/cast(float32)width
+    if canvas.height/cast(float32)height < scale { scale = canvas.height/cast(float32)height }
+    shown := Rectangle.{canvas.x+(canvas.width-cast(float32)width*scale)/2.0,
+        canvas.y+(canvas.height-cast(float32)height*scale)/2.0,cast(float32)width*scale,cast(float32)height*scale}
+    props: ImageProps; props.key = 5500000; props.asset_path = image; props.alt_text = "Select a detected QR code in photo"; props.bounds = shown
+    props.fit = ImageFit.ImageFitContain; Image(session,props)
+    pointer := Input.PointerSample(session)
+    for i: 0..count-1 {
+        code := *codes[i]
+        bounds := Rectangle.{shown.x+shown.width*cast(float32)code.x/10000.0,shown.y+shown.height*cast(float32)code.y/10000.0,
+            shown.width*cast(float32)code.width/10000.0,shown.height*cast(float32)code.height/10000.0}
+        if enabled && pointer.pressed && Input.PointInBounds(pointer.x,pointer.y,bounds) { chosen = cast(s32)i }
+        box: BoxProps; box.key = cast(u64)(5500100+i); box.bounds = bounds; box.border = Color.{70,150,240,220}
+        box.fill = ifx chosen == i then Color.{70,150,240,90} else Color.{0,0,0,0}; Box(session,box)
+    }
+}

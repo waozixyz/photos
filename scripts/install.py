@@ -75,6 +75,12 @@ def main():
     text = repo/'build/detect-text/detect_text'
     if not text.is_file():
         parser.error('Build the Photos text recognition engine before installing')
+    qr = repo/'build/detect-qr/detect_qr'
+    if not qr.is_file():
+        parser.error('Build the Photos QR recognition engine before installing')
+    shutil.copyfile(qr,installed/'detect_qr.next')
+    os.chmod(installed/'detect_qr.next',0o755)
+    os.replace(installed/'detect_qr.next',installed/'detect_qr')
     shutil.copyfile(text,installed/'detect_text.next')
     os.chmod(installed/'detect_text.next',0o755)
     os.replace(installed/'detect_text.next',installed/'detect_text')

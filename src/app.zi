@@ -6,6 +6,7 @@ Crop :: #import "crop";
 Viewer :: #import "viewer";
 Map :: #import "map";
 TextDetection :: #import "text_detection";
+QRDetection :: #import "qr_detection";
 #if #defined(POSIX_THREADS) {
     Window :: #import "desktop";
     HostTheme :: #import "kryon/SystemThemeHostLinux";
@@ -368,7 +369,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if key == Input.KeyRight { Model.PlaybackSeek(Playback.Position() + 5000) }
         if Model.playback_expanded { PlaybackViewer(session, .{viewport.x + 12.0, viewport.y + 12.0, viewport.width - 24.0, viewport.height - 24.0}); return 0 }
     }
-    if Model.editor == "text" && key == Input.KeyEscape { Model.CancelEditor(); key = 0 }
+    if (Model.editor == "text" || Model.editor == "qr") && key == Input.KeyEscape { Model.CancelEditor(); key = 0 }
     if (Model.editor == "image_crop" || Model.editor == "video_crop") && key == Input.KeyEscape { Model.FinishCrop(false) }
     if !Model.focused && !Model.search_focused && Model.editor == "" {
         if key == Input.KeyEscape { if Viewer.expanded { Viewer.expanded = false } else if Model.selected >= 0 { Model.selected = -1; Viewer.Reset() } else { Model.ClearSelection() } }
@@ -402,7 +403,26 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, 44, "Sync", .{x + width - 78.0, y, 78.0, 39.0}) { Model.Request("sync") }
     }
     body := Rectangle.{x, y + 52.0, width, viewport.height - 216.0}
-    if Model.editor == "text" {
+    if Model.editor == "qr" {
+        if Model.selected < 0 || Model.selected >= Model.count { Model.CancelEditor(); return 0 }
+        photo := *Model.photos[Model.selected]
+        Label(session,510,"QR codes",.{x,body.y,width,32.0},24)
+        ready := QRDetection.active && (!Model.loading || Model.qr_check_pending)
+        step := (width-24.0)/3.0
+        if Action(session,511,"Previous code",.{x,body.y+42.0,step,36.0},ready && QRDetection.count>1) { QRDetection.Move(-1) }
+        if Action(session,512,"Copy contents",.{x+step+12.0,body.y+42.0,step,36.0},ready && QRDetection.count>0) {
+            Model.Set(Model.message[:],ifx QRDetection.Copy() then "QR contents copied" else "Clipboard unavailable; try again")
+        }
+        if Action(session,513,"Next code",.{x+2.0*(step+12.0),body.y+42.0,step,36.0},ready && QRDetection.count>1) { QRDetection.Move(1) }
+        if Action(session,514,"Back",.{x,body.y+86.0,100.0,36.0}) { Model.CancelEditor(); return 0 }
+        caption: Vec(u8); BuilderPrint(*caption,"Code % of % · select a box · scanning stays on this device",QRDetection.chosen+1,QRDetection.count)
+        value := BuilderFinish(caption); Label(session,515,value,.{x+112.0,body.y+86.0,width-112.0,36.0},14); Model.Release(value)
+        image := ifx photo.display[0] != 0 then TextUntilNul(photo.display[:]) else TextUntilNul(photo.thumbnail[:])
+        canvas := Rectangle.{x,body.y+136.0,width,body.height-316.0}
+        QRDetection.Draw(session,image,canvas,ready); Record(516,"Detected QR area",canvas,ready)
+        preview: TextProps; preview.key = 517; preview.bounds = .{x,body.y+body.height-168.0,width,140.0}; preview.font = 15
+        preview.text = QRDetection.Selected(); preview.wrap = TextWrap.TextWrapAuto; Text(session,preview)
+    } else if Model.editor == "text" {
         if Model.selected < 0 || Model.selected >= Model.count { Model.CancelEditor(); return 0 }
         photo := *Model.photos[Model.selected]
         Label(session, 435, "Detect text", .{x, body.y, width, 32.0}, 24)
@@ -500,8 +520,10 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, 216, "Edit location", .{x + 138.0, body.y + 44.0, 138.0, 36.0}, ready) { Model.BeginEdit("location", "Edit photo location", TextUntilNul(Model.detail_location[:]), "Latitude, longitude; leave empty to remove location") }
         if TextUntilNul(photo.kind[:]) == "photo" { Viewer.Draw(session, 3000, image, TextUntilNul(photo.name[:]), .{x, body.y + 92.0, width, body.height - 364.0}) }
         else { ImageAt(session, 3000, image, TextUntilNul(photo.name[:]), .{x, body.y + 92.0, width, body.height - 364.0}) }
-        Label(session, 75, TextUntilNul(photo.name[:]), .{x, body.y + body.height - 262.0, width - 138.0, 24.0}, 17)
+        name_width := width - (ifx TextUntilNul(photo.kind[:]) == "photo" then 270.0 else 138.0)
+        Label(session, 75, TextUntilNul(photo.name[:]), .{x, body.y + body.height - 262.0, name_width, 24.0}, 17)
         if TextUntilNul(photo.kind[:]) == "photo" {
+            if Action(session,518,"Detect QR",.{x+width-258.0,body.y+body.height-270.0,122.0,32.0},ready && !photo.trashed) { Model.BeginQR() }
             if Action(session, 436, "Detect text", .{x + width - 126.0, body.y + body.height - 270.0, 126.0, 32.0}, ready && !photo.trashed) { Model.BeginText() }
         }
         details: Vec(u8); BuilderPrint(*details, "% · % x % · % bytes", TextUntilNul(Model.detail_taken[:]), photo.width, photo.height, Model.detail_size)

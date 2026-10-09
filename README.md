@@ -224,6 +224,30 @@ both records agree. Embedded Android motion-photo extraction and native phone
 Live Photo capture remain unfinished.
 
 This version is a local photo library with sync, not complete Ente feature parity.
+Detect QR opens an on-demand local scanner for photos, screenshots and Live Photo
+stills outside Trash. Click a detected box or use Previous code and Next code,
+then Copy contents to copy that code's complete text, including Unicode and
+line breaks. Escape and Back return to the photo, including while a scan is
+running. Hidden requires its current local unlock. Access is rechecked while
+results are open; privacy changes or a stalled service clear the viewer's decoded
+contents within its short access lease. Contents deliberately copied remain on
+the system clipboard. Scanning never opens a link, launches another app or makes
+a payment. The QR payload is never cached on disk, added to a search index or
+sent through encrypted backup.
+
+The headless Ziran helper uses the installed ZBar C engine and GdkPixbuf, with
+EXIF orientation and transparent backgrounds handled locally. HEIC/RAW photos
+use the existing local decoder. Animated images use their first frame. Scanning
+downscales images above 4096 pixels on an edge and accepts up to 32 codes with
+32 KiB of combined UTF-8 text; binary and unsupported text payloads are reported
+without displaying partial contents. Small, damaged or unusual codes may be
+missed; crop a copy to scan a smaller area. Detection makes no network requests;
+a missing original is restored only through the pinned ThinkPad client. QR
+discovery indexing, phone long-press scanning, link-opening, native sharing and
+payment actions remain unfinished. This follows Ente's
+[QR behavior](https://ente.photos/help/photos/features/utilities/qr-codes-in-photos),
+with those platform actions still explicitly tracked as gaps.
+
 Detect text opens an on-demand local OCR viewer for photos and Live Photo stills
 outside Trash. Click a word, drag across words, double-click a word to select its
 recognized line, or Select all; Copy selection puts the result on the clipboard.
@@ -336,6 +360,10 @@ produce a useful message while the rest of the library remains usable.
 
 The native image processor needs GdkPixbuf and GObject on the Linux desktop host;
 Hidden authentication also needs libsodium.
+QR detection needs ZBar's installed `libzbar.so.0` and GdkPixbuf; no camera or
+network recognition service is used. ZBar is distributed separately under LGPL 2.1;
+its [C API reference](https://zbar.sourceforge.net/api/zbar_8h.html) describes the
+local image scanner used by the Ziran helper.
 The HEIC/RAW decoder needs libheif, LibRaw and `prlimit` from util-linux. Its
 display assets use the same Kryon ImageProps viewer as other image formats.
 Video editing and video thumbnails need FFmpeg (including FFprobe and H.264/AAC codecs).
@@ -359,6 +387,7 @@ make codec-window-test codec-portable-test
 make playback-window-test playback-portable-test
 make face-models people-window-test people-portable-test
 make slideshow-window-test slideshow-portable-test
+make qr-window-test qr-portable-test
 PHOTOS_DAOCHI=/path/to/daochi make sync-test
 ```
 

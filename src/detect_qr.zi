@@ -1,0 +1,110 @@
+// Headless on-demand QR recognition. Pixels, payloads and scanner state stay local.
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+UTF8 :: #import "std/utf8";
+zbar :: #system_library "zbar";
+pixbuf :: #system_library "gdk_pixbuf-2.0";
+object :: #system_library "gobject-2.0";
+libc :: #system_library "c";
+Load :: (path: *u8, error: **void) -> *void #foreign pixbuf "gdk_pixbuf_new_from_file";
+Orient :: (image: *void) -> *void #foreign pixbuf "gdk_pixbuf_apply_embedded_orientation";
+Width :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_width";
+Height :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_height";
+Channels :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_n_channels";
+Stride :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_rowstride";
+Pixels :: (image: *void) -> *u8 #foreign pixbuf "gdk_pixbuf_get_pixels";
+Scale :: (image: *void, width: s32, height: s32, interpolation: s32) -> *void #foreign pixbuf "gdk_pixbuf_scale_simple";
+Unref :: (image: *void) #foreign object "g_object_unref";
+Allocate :: (count: usize, size: usize) -> *void #foreign libc "calloc";
+Free :: (memory: *void) #foreign libc "free";
+Scanner :: () -> *void #foreign zbar "zbar_image_scanner_create";
+DestroyScanner :: (scanner: *void) #foreign zbar "zbar_image_scanner_destroy";
+Configure :: (scanner: *void, symbol: s32, option: s32, value: s32) -> s32 #foreign zbar "zbar_image_scanner_set_config";
+NewImage :: () -> *void #foreign zbar "zbar_image_create";
+DestroyImage :: (image: *void) #foreign zbar "zbar_image_destroy";
+Format :: (image: *void, format: u64) #foreign zbar "zbar_image_set_format";
+Size :: (image: *void, width: u32, height: u32) #foreign zbar "zbar_image_set_size";
+Data :: (image: *void, data: *void, length: u64, cleanup: *void) #foreign zbar "zbar_image_set_data";
+Scan :: (scanner: *void, image: *void) -> s32 #foreign zbar "zbar_scan_image";
+First :: (image: *void) -> *void #foreign zbar "zbar_image_first_symbol";
+Next :: (symbol: *void) -> *void #foreign zbar "zbar_symbol_next";
+Type :: (symbol: *void) -> s32 #foreign zbar "zbar_symbol_get_type";
+Payload :: (symbol: *void) -> *u8 #foreign zbar "zbar_symbol_get_data";
+Length :: (symbol: *void) -> u32 #foreign zbar "zbar_symbol_get_data_length";
+Points :: (symbol: *void) -> u32 #foreign zbar "zbar_symbol_get_loc_size";
+X :: (symbol: *void, point: u32) -> s32 #foreign zbar "zbar_symbol_get_loc_x";
+Y :: (symbol: *void, point: u32) -> s32 #foreign zbar "zbar_symbol_get_loc_y";
+Quoted :: (out: *Vec(u8), value: string) {
+    BuilderPrint(out,"\""); hex := "0123456789abcdef"
+    for i: 0..value.count-1 {
+        byte := value[i]
+        if byte == 34 || byte == 92 { BuilderPrint(out,"\\%",value[i:i+1]) }
+        else if byte < 32 || byte == 127 { BuilderPrint(out,"\\u00%",hex[cast(s32)byte/16:cast(s32)byte/16+1]); BuilderPrint(out,"%",hex[cast(s32)byte%16:cast(s32)byte%16+1]) }
+        else { BuilderPrint(out,"%",value[i:i+1]) }
+    }
+    BuilderPrint(out,"\"")
+}
+main :: (argc: s32, argv: **u8) -> s32 {
+    if argc != 2 { return 2 }
+    image := Load(argv[1],null); if image == null { return 3 }; defer { Unref(image) }
+    oriented := Orient(image); if oriented == null { return 3 }; defer { Unref(oriented) }
+    width := Width(oriented); height := Height(oriented)
+    if width <= 0 || height <= 0 || cast(s64)width*cast(s64)height > 100000000 { return 3 }
+    output := oriented; small: *void; defer { if small != null { Unref(small) } }
+    if width > 4096 || height > 4096 {
+        factor := 4096.0/cast(float64)(ifx width > height then width else height)
+        width = cast(s32)(cast(float64)width*factor); height = cast(s32)(cast(float64)height*factor)
+        if width < 1 { width = 1 }; if height < 1 { height = 1 }
+        small = Scale(oriented,width,height,2); if small == null { return 3 }; output = small
+    }
+    channels := Channels(output); stride := Stride(output); pixels := Pixels(output)
+    if (channels != 3 && channels != 4) || stride < width*channels || pixels == null { return 3 }
+    memory := Allocate(cast(usize)(width*height),1); if memory == null { return 3 }; defer { Free(memory) }
+    gray := cast(*u8)memory
+    for y: 0..height-1 { for x: 0..width-1 {
+        at := y*stride+x*channels
+        value := (77*cast(s32)pixels[at]+150*cast(s32)pixels[at+1]+29*cast(s32)pixels[at+2]+128)/256
+        if channels == 4 { alpha := cast(s32)pixels[at+3]; value = (value*alpha+255*(255-alpha)+127)/255 }
+        gray[y*width+x] = cast(u8)value
+    } }
+    scanner := Scanner(); if scanner == null { return 3 }; defer { DestroyScanner(scanner) }
+    if Configure(scanner,0,0,0) != 0 || Configure(scanner,64,0,1) != 0 { return 3 }
+    scanned := NewImage(); if scanned == null { return 3 }; defer { DestroyImage(scanned) }
+    Format(scanned,808466521); Size(scanned,cast(u32)width,cast(u32)height) // Y800
+    Data(scanned,memory,cast(u64)(width*height),null)
+    if Scan(scanner,scanned) < 0 { return 3 }
+    out: Vec(u8); BuilderPrint(*out,"{\"qr_width\":%,\"qr_height\":%,\"qr_codes\":[",width,height)
+    count: s32; unsupported: s32; used: s64
+    symbol := First(scanned)
+    while symbol != null {
+        if Type(symbol) == 64 {
+            length := Length(symbol); points := Points(symbol); payload := Payload(symbol)
+            if length > 8192 { return 5 }
+            text: [8193]u8; valid := length > 0 && payload != null && points >= 4 && points <= 64
+            if valid {
+                for i: 0..cast(s32)length-1 { text[i] = payload[i]; if payload[i] == 0 || (payload[i] < 32 && payload[i] != 9 && payload[i] != 10 && payload[i] != 13) || payload[i] == 127 { valid = false } }
+                valid = valid && UTF8.Valid(TextUntilNul(text[:]))
+            }
+            left := width; top := height; right: s32; bottom: s32
+            if valid {
+                for i: 0..cast(s32)points-1 {
+                    x := X(symbol,cast(u32)i); y := Y(symbol,cast(u32)i)
+                    if x < left { left = x }; if x > right { right = x }
+                    if y < top { top = y }; if y > bottom { bottom = y }
+                }
+                if left < 0 { left = 0 }; if top < 0 { top = 0 }; if right > width { right = width }; if bottom > height { bottom = height }
+                valid = left < right && top < bottom
+            }
+            if valid {
+                used += cast(s64)length
+                if count >= 32 || used > 32768 { return 5 }
+                if count > 0 { BuilderPrint(*out,",") }
+                BuilderPrint(*out,"{\"text\":"); Quoted(*out,TextUntilNul(text[:]))
+                BuilderPrint(*out,",\"x\":%,\"y\":%,\"width\":%,\"height\":%}",left,top,right-left,bottom-top)
+                count += 1
+            } else { unsupported += 1 }
+        }
+        symbol = Next(symbol)
+    }
+    BuilderPrint(*out,"],\"qr_unsupported\":%}\n",unsupported); print("%",BuilderFinish(out)); return 0
+}
