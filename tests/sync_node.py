@@ -238,6 +238,25 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
             assert people.export_index(first,media_id)==people.export_index(second,media_id)
             assert second.db.execute('SELECT embedding FROM semantic_embeddings WHERE photo_id=?',(media_id,)).fetchone()[0] == vector
         assert Path(peer.materialize(batch_ids[0])).read_bytes() == (batch/'Image 0.png').read_bytes()
+        # Birth dates, opt-in ordinary album rules and membership provenance
+        # must survive real signed, encrypted paged requests in both directions.
+        from photos import auto_albums
+        person = hashlib.sha256(b'fixture-person:0').hexdigest()
+        first.set_setting('people_enabled',True)
+        people.edit(first,'person_birth',person,'1990-06-15')
+        first.edit_album('','create','Automatic fixture')
+        auto_albums.configure(first,'Automatic fixture',[person])
+        while client.sync(): pass
+        assert peer.sync()==0
+        assert people.group(second,person)['birth']=='1990-06-15'
+        assert json.loads(second.album_details('Automatic fixture')['auto_people'])==[person]
+        assert second.query(album='Automatic fixture')['count']==52
+        second.edit(batch_ids[0],'album_add','Automatic fixture')
+        auto_albums.configure(second,'Automatic fixture',[],remove=True)
+        while peer.sync(): pass
+        assert client.sync()==0
+        assert first.query(album='Automatic fixture')['count']==1
+        assert first.query(album='Automatic fixture')['photos'][0]['id']==batch_ids[0]
         print('Isolated Daochi v6: signed sync, byte-limited face-rich and compact semantic index batches, originals, editing, places, codecs, Live Photo privacy and separation round trip passed')
     finally:
         process.terminate()

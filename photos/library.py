@@ -98,7 +98,8 @@ class Library:
                 embedding BLOB, error TEXT NOT NULL DEFAULT '');
             CREATE TABLE IF NOT EXISTS people (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '',
-                ignored INTEGER NOT NULL DEFAULT 0, updated REAL NOT NULL);
+                ignored INTEGER NOT NULL DEFAULT 0, updated REAL NOT NULL,
+                birth TEXT NOT NULL DEFAULT '');
             CREATE TABLE IF NOT EXISTS face_scans (
                 photo_id TEXT PRIMARY KEY, model TEXT NOT NULL, error TEXT NOT NULL DEFAULT '');
             CREATE TABLE IF NOT EXISTS faces (
@@ -127,6 +128,16 @@ class Library:
                 if 'filter' not in {row[1] for row in self.db.execute('PRAGMA table_info(albums)')}:
                     self.db.execute("ALTER TABLE albums ADD COLUMN filter TEXT NOT NULL DEFAULT ''")
         self.db.commit()
+        if 'auto_people' not in {row[1] for row in self.db.execute('PRAGMA table_info(albums)')}:
+            with self.db:
+                self.db.execute('BEGIN IMMEDIATE')
+                if 'auto_people' not in {row[1] for row in self.db.execute('PRAGMA table_info(albums)')}:
+                    self.db.execute("ALTER TABLE albums ADD COLUMN auto_people TEXT NOT NULL DEFAULT '[]'")
+        if 'birth' not in {row[1] for row in self.db.execute('PRAGMA table_info(people)')}:
+            with self.db:
+                self.db.execute('BEGIN IMMEDIATE')
+                if 'birth' not in {row[1] for row in self.db.execute('PRAGMA table_info(people)')}:
+                    self.db.execute("ALTER TABLE people ADD COLUMN birth TEXT NOT NULL DEFAULT ''")
         self.import_album_names = {}
         if not self.setting('album_catalog_migrated', False):
             with self.db:
@@ -323,7 +334,12 @@ class Library:
                 except ValueError: warning = True
         # Derived face data lives in its own private tables, never in the
         # importer metadata blob or ordinary public details.
-        if 'photosPeople' in combined:
+        if not existing and 'photosAutoAlbums' in metadata:
+            from .auto_albums import import_memberships
+            try: import_memberships(self,photo_id,metadata['photosAutoAlbums'])
+            except LibraryError: warning = True
+        if 'photosPeople' in combined or 'photosAutoAlbums' in combined:
+            combined.pop('photosAutoAlbums',None)
             combined.pop('photosPeople',None)
             self.db.execute('UPDATE photos SET metadata=? WHERE id=?',(packed(combined),photo_id))
         self.db.execute('INSERT OR REPLACE INTO sources VALUES(?,?,?,?,?)',
@@ -350,6 +366,10 @@ class Library:
                         description = info.get('description', '')
                         cover = info.get('cover', '')
                         smart_filter = info.get('filter', '')
+                        from .auto_albums import identities
+                        auto_people = identities(info.get('auto_people',[]))
+                        if smart_filter and auto_people:
+                            raise LibraryError('Smart albums cannot auto-add people')
                         if not isinstance(smart_filter, str):
                             raise LibraryError('Invalid smart album search')
                         if smart_filter:
@@ -365,8 +385,8 @@ class Library:
                             existed = self.db.execute('SELECT 1 FROM albums WHERE name=?', (name,)).fetchone()
                             album = self._ensure_album(name)
                             if not existed:
-                                self.db.execute('UPDATE albums SET description=?,cover=?,pinned=?,archived=?,filter=? WHERE id=?',
-                                                (description, cover, int(info.get('pinned', 0)), int(info.get('archived', 0)), smart_filter, album['id']))
+                                self.db.execute('UPDATE albums SET description=?,cover=?,pinned=?,archived=?,filter=?,auto_people=? WHERE id=?',
+                                                (description, cover, int(info.get('pinned', 0)), int(info.get('archived', 0)), smart_filter, packed(auto_people), album['id']))
                     except (ValueError, OSError, AttributeError):
                         result['warning'] += 1
                 for name in sorted(filenames):
@@ -444,6 +464,10 @@ class Library:
             albums.add(name) if action == 'album_add' else albums.discard(name)
             removed = set(edits.get('removed_albums', []))
             removed.discard(name) if action == 'album_add' else removed.add(name)
+            # Deliberate addition takes ownership of an automatic membership.
+            definition = self.db.execute('SELECT id FROM albums WHERE name=?',(name,)).fetchone()
+            if definition:
+                edits.get('auto_albums',{}).pop(definition['id'],None)
             edits['removed_albums'] = sorted(removed)
             self.db.execute('UPDATE photos SET albums=?,edits=?,updated=?,dirty=1 WHERE id=?',
                             (packed(sorted(albums)), packed(edits), time.time(), photo_id))
@@ -503,8 +527,13 @@ class Library:
                 raise LibraryError('That album name is retained for synchronization; choose another name')
             self.db.execute('UPDATE albums SET name=?,updated=?,dirty=1 WHERE id=?', (new, time.time(), current['id']))
             for photo_id in ids:
+                provenance = json.loads(self.photo(photo_id)['edits']).get('auto_albums',{}).get(current['id'])
                 self._edit(photo_id, 'album_remove', old)
                 self._edit(photo_id, 'album_add', new)
+                if provenance is not None:
+                    edits = json.loads(self.photo(photo_id)['edits'])
+                    edits.setdefault('auto_albums',{})[current['id']]=provenance
+                    self.db.execute('UPDATE photos SET edits=? WHERE id=?',(packed(edits),photo_id))
 
     def _ensure_album(self, name, dirty=1):
         name = self.album_name(name)
@@ -636,28 +665,34 @@ class Library:
                     taken=datetime.fromtimestamp(photo['taken'], timezone.utc).isoformat(),
                     location=f"{geo[0]}, {geo[1]}" if geo else '')
 
-    def query(self, view='photos', search='', album='', offset=0, limit=60, sort='newest', album_mode='active', album_sort='name', memory_date='', hidden_access=True, map_bounds=None, map_gallery=False, person='', people_mode='active'):
+    def query(self, view='photos', search='', album='', offset=0, limit=60, sort='newest', album_mode='active', album_sort='name', memory_date='', hidden_access=True, map_bounds=None, map_gallery=False, person='', people_mode='active', lane_year=0, jump_day=''):
         # Map summaries contain coordinates rather than IDs to hydrate. Hold
         # the writer lock until they are returned, so concurrent Hidden/Trash
         # changes cannot overtake the native query and publish private markers.
-        locked = view in {'map','people'} and not self.db.in_transaction
+        locked = view in {'map','people','lane','auto_people'} and not self.db.in_transaction
         if locked:
             self.db.execute('BEGIN IMMEDIATE')
         try:
             return self._query(view, search, album, offset, limit, sort, album_mode, album_sort,
-                               memory_date, hidden_access, map_bounds, map_gallery, person, people_mode)
+                               memory_date, hidden_access, map_bounds, map_gallery, person, people_mode, lane_year, jump_day)
         finally:
             if locked:
                 self.db.rollback()
 
-    def _query(self, view, search, album, offset, limit, sort, album_mode, album_sort, memory_date, hidden_access, map_bounds, map_gallery, person, people_mode):
+    def _query(self, view, search, album, offset, limit, sort, album_mode, album_sort, memory_date, hidden_access, map_bounds, map_gallery, person, people_mode, lane_year, jump_day):
         from .query import page
         album_detail = self.db.execute('SELECT * FROM albums WHERE name=? AND deleted=0', (album,)).fetchone() if album else None
         smart_filter = album_detail['filter'] if album_detail else ''
         map_request = dict(map_bounds=map_bounds) if map_bounds is not None else {}
         request = dict(view=view, search=search, album=album, offset=max(0, int(offset)),
                         limit=max(1, min(100, int(limit))), sort=sort, memory_date=memory_date,
-                        hidden_access=int(bool(hidden_access)), filter=smart_filter, map_gallery=int(bool(map_gallery)), person=person, **map_request)
+                        hidden_access=int(bool(hidden_access)), filter=smart_filter, map_gallery=int(bool(map_gallery)), person=person,
+                        lane_year=lane_year,jump_day=jump_day, **map_request)
+        if view=='lane':
+            from . import people
+            detail = people.group(self,person)
+            request['birth'] = detail['birth']
+            if detail['ignored'] or not self.setting('people_enabled',False): request['person']=''
         if view == 'semantic':
             from .semantic import search_page
             response = search_page(self, request, page)
@@ -672,14 +707,14 @@ class Library:
             photo = dict(row)
             # Native ID paging and row hydration are separate reads. A photo
             # hidden by another request in between must not expose its paths.
-            if (photo['hidden'] and (not hidden_access or view in {'map', 'semantic','people'})) or (view in {'map', 'semantic','people'} and photo['trashed']):
+            if (photo['hidden'] and (not hidden_access or view in {'map', 'semantic','people','lane'})) or (view in {'map', 'semantic','people','lane'} and photo['trashed']):
                 continue
             from . import live
             try:
                 parts = live.components(self, photo)
             except LibraryError:
                 continue
-            if any(p['hidden'] and (not hidden_access or view in {'map', 'semantic','people'}) for p in parts):
+            if any(p['hidden'] and (not hidden_access or view in {'map', 'semantic','people','lane'}) for p in parts):
                 continue
             if any(bool(p['trashed']) != bool(photo['trashed']) for p in parts):
                 continue
@@ -697,13 +732,21 @@ class Library:
         album_pending = self.db.execute('SELECT COUNT(*) FROM albums WHERE dirty=1').fetchone()[0]
         result = dict(photos=photos, count=count, albums=albums, total=totals[0], bytes=totals[1], pending=(totals[2] or 0) + album_pending,
                     status=self.setting('status', 'Local library · ThinkPad sync only'), importing=self.setting('import', {}))
-        if view=='people':
+        if response.get('jump_offset') is not None and jump_day:
+            result['jump_offset'] = response['jump_offset']
+        if view in {'people','lane'}:
             from . import people
-            result['albums'],result['people_count'] = people.catalog(self,search,people_mode,offset) if not person and self.setting('people_enabled',False) else ([],0)
+            result['albums'],result['people_count'] = people.catalog(self,search,people_mode,offset) if view=='people' and not person and self.setting('people_enabled',False) else ([],0)
             if person:
                 detail = people.group(self,person)
                 # Do not publish the identity of a group with no accessible faces.
                 result['person_detail'] = detail if photos else dict(id=person,name='',ignored=0)
+            if view=='lane':
+                result.update(lane_year=response.get('lane_year',0),lane_years=response.get('lane_years',[]),current_year=response.get('current_year',0))
+        if view=='auto_people':
+            from . import people
+            result['photos'],result['count']=[],0
+            result['albums'],result['people_count']=people.catalog(self,search,offset=offset,named_only=True) if self.setting('people_enabled',False) else ([],0)
         if view == 'memories':
             result['memory_date'] = response['memory_date']
         if view == 'map':
@@ -746,5 +789,8 @@ class Library:
         from .people import export_index
         index = export_index(self,photo_id)
         if index is not None: metadata['photosPeople'] = index
+        from .auto_albums import export_memberships
+        automatic = export_memberships(self,photo)
+        if automatic: metadata['photosAutoAlbums'] = automatic
         atomic(folder / 'metadata' / (destination.name + '.json'), packed(metadata).encode())
         return str(destination)

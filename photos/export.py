@@ -154,7 +154,9 @@ class Export:
             relative = folders[name] + '/.photos-album.json'
             desired.add(relative)
             fields = ('name', 'description', 'cover', 'pinned', 'archived', 'filter')
-            written += self.write(relative, packed({k: album[k] for k in fields}).encode())
+            details = {k: album[k] for k in fields}
+            details['auto_people'] = json.loads(album['auto_people'])
+            written += self.write(relative, packed(details).encode())
         for photo in rows:
             memberships = [folders[name] for name in json.loads(photo['albums']) if name in folders] or ['Uncategorized']
             name = component(Path(photo['name']).stem) + '--' + photo['id'][:12] + photo['extension']
@@ -165,6 +167,9 @@ class Export:
             from .people import export_index
             index = export_index(self.library,photo['id'])
             if index is not None: metadata['photosPeople'] = index
+            from .auto_albums import export_memberships
+            automatic = export_memberships(self.library,photo)
+            if automatic: metadata['photosAutoAlbums'] = automatic
             for folder in memberships:
                 relative = folder + '/' + name
                 desired.add(relative)

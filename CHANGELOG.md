@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.19
+
+- Browse a person's Memory Lane by year, with years-ago and optional birth-date captions; keep private, ignored and archived items out of the timeline.
+- Jump to a capture date within the current gallery, album and search, and keep that position when opening a photo or refreshing.
+- Choose named people to fill ordinary albums with existing and newly indexed matches, and keep or remove earlier automatic additions when stopping a rule.
+- Preserve deliberately added memberships, manual removals, birth dates and automatic album rules in encrypted backup and folder exports while leaving originals unchanged.
+
 ## 0.1.18
 
 - Enable local face indexing and browse people without sending photos or face data to a recognition service.

@@ -48,8 +48,15 @@ Selection :: struct { id: [65]u8 }
 Album :: struct { name: [513]u8; thumbnail: [4097]u8; count: s32; pinned: bool; archived: bool; smart: bool; place: bool; id: [65]u8; ignored: bool }
 person: [65]u8;
 person_name: [513]u8;
+person_birth: [11]u8;
+lane_year: s32;
+lane_years: [256]s32;
+lane_count: s32;
+current_year: s32;
+date_jumped: bool;
 person_ignored: bool;
 people_mode: string = "active";
+auto_remove: bool;
 people_status: [1025]u8;
 people_enabled: bool;
 people_processing: bool;
@@ -177,7 +184,7 @@ SendRequest :: (action: string, id: string, value: string) {
     text_check_pending = action == "text_check"
     text_request = action == "detect_text" || action == "text_check"
     playback_request = action == "playback_check"
-    if action != "query" { offset = ifx selected >= 0 then (selected + feed_base) / 60 * 60 else feed_base; appending = false }
+    if action != "query" { offset = ifx selected >= 0 then feed_base + selected / 60 * 60 else feed_base; appending = false }
     out: Vec(u8)
     BuilderPrint(*out, "{\"gallery_format\":2,\"action\":"); Quoted(*out, action)
     Property(*out, "view", view); Property(*out, "search", TextUntilNul(search[:]))
@@ -189,12 +196,13 @@ SendRequest :: (action: string, id: string, value: string) {
     Property(*out, "edit_session", TextUntilNul(edit_session[:]))
     Property(*out, "vault_token", TextUntilNul(vault_token[:]))
     Property(*out, "video_job", TextUntilNul(video_job[:]))
+    BuilderPrint(*out,",\"lane_year\":%",lane_year)
     if view == "map" {
         region := ifx Map.gallery then Map.gallery_bounds else Map.bounds
         BuilderPrint(*out, ",\"map_bounds\":[%,%,%,%],\"map_gallery\":%", region[0], region[1], region[2], region[3], ifx Map.gallery then 1 else 0)
     }
     mutation = action != "text_check" && action != "detect_text" && action != "query" && action != "open" && action != "sync" && action != "import" && action != "image_preview" && action != "video_preview" && action != "video_begin" && action != "video_save" && action != "video_status" && action != "video_cancel" && action != "playback_check"
-    if mutation && picked_count > 0 && (action == "album_add" || action == "album_remove" || !StartsWithFoldASCII(action, "album_")) {
+    if action == "album_auto_people" || action == "album_auto_people_remove" || (mutation && picked_count > 0 && (action == "album_add" || action == "album_remove" || !StartsWithFoldASCII(action, "album_"))) {
         BuilderPrint(*out, ",\"ids\":[")
         for i: 0..picked_count - 1 { if i > 0 { BuilderPrint(*out, ",") }; Quoted(*out, TextUntilNul(picked[i].id[:])) }
         BuilderPrint(*out, "]")
@@ -343,15 +351,33 @@ Tick :: () {
         people_count = Number(json,0,"people_count")
         if Lookup(json,0,"person") >= 0 { Decode(json,0,"person",person[:]); selected = -1; offset = 0; scroll = 0 }
         person_detail := Lookup(json,0,"person_detail")
-        person_name[0] = 0; person_ignored = false
-        if person_detail >= 0 { Decode(json,person_detail,"name",person_name[:]); person_ignored = Number(json,person_detail,"ignored") > 0 }
+        person_name[0] = 0; person_birth[0] = 0; person_ignored = false
+        if person_detail >= 0 { Decode(json,person_detail,"name",person_name[:]); Decode(json,person_detail,"birth",person_birth[:]); person_ignored = Number(json,person_detail,"ignored") > 0 }
+        if Lookup(json,0,"lane_year") >= 0 {
+            lane_year = Number(json,0,"lane_year"); current_year = Number(json,0,"current_year"); lane_count = 0
+            array := Lookup(json,0,"lane_years"); at := Space(json,array+1)
+            while at >= 0 && at < cast(s32)json.count && json[at] != 93 && lane_count < 256 {
+                number := ReadNumber(json,at); if !number.valid { break }; lane_years[lane_count] = cast(s32)number.value; lane_count += 1
+                at = Space(json,number.after); if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json,at+1) } else { break }
+            }
+        }
+        if Lookup(json,0,"jump_offset") >= 0 { offset = Number(json,0,"jump_offset"); scroll = 0; selected = -1; appending = false; date_jumped = true }
         if mutation { ClearSelection(); editor = "" }
+        initial := Lookup(json,0,"auto_selection")
+        if initial >= 0 {
+            ClearSelection(); date_jumped = false; auto_remove = false; at := Space(json,initial+1)
+            while at >= 0 && at < cast(s32)json.count && json[at] != 93 && picked_count < 64 {
+                choice: Selection; size := ReadStringText(json,at,choice.id[:]); value := ReadString(json,at)
+                if size != 64 || !value.valid { break }; unused VecPush(picked,choice); picked_count += 1
+                at = Space(json,value.after); if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json,at+1) } else { break }
+            }
+        }
         if Number(json, 0, "place_open") > 0 { selected = -1; detail_id[0] = 0 }
         if Lookup(json, 0, "album") >= 0 { Decode(json, 0, "album", album[:]); offset = 0; scroll = 0 }
         if Lookup(json, 0, "search") >= 0 { Decode(json, 0, "search", search[:]); search_cursor = 0; search_anchor = 0 }
         if Lookup(json, 0, "view") >= 0 {
             fresh_view: [32]u8; Decode(json, 0, "view", fresh_view[:])
-            for i: 0..cast(s32)13 { if View(i) == TextUntilNul(fresh_view[:]) { view = View(i) } }
+            for i: 0..cast(s32)15 { if View(i) == TextUntilNul(fresh_view[:]) { view = View(i) } }
         }
         album_detail := Lookup(json, 0, "album_detail")
         album_description[0] = 0; album_filter[0] = 0; album_pinned = false; album_archived = false; album_place = false
@@ -406,21 +432,22 @@ Tick :: () {
     if !loading && playback_id[0] != 0 && ticks >= playback_poll { playback_poll = ticks + 30; Request("playback_check", TextUntilNul(playback_id[:])); return }
     if !loading && editor == "text" && TextDetection.active && selected >= 0 && selected < count && ticks >= text_poll { text_poll = ticks + 30; Request("text_check", TextUntilNul(photos[selected].id[:])); return }
     if !loading && video_job[0] != 0 && ticks >= video_poll { video_poll = ticks + 60; Request("video_status"); return }
-    if !loading && ticks > next_refresh && ((scroll == 0 && selected < 0) || (view == "hidden" && vault_unlocked)) { if selected < 0 && view != "people" { offset = 0 }; Request() }
+    if !loading && ticks > next_refresh && ((scroll == 0 && selected < 0) || (view == "hidden" && vault_unlocked)) { if selected < 0 && view != "people" { offset = ifx date_jumped then feed_base else 0 }; Request() }
 }
 Navigate :: (target: string) {
     TextDetection.Clear()
     Viewer.Reset()
     StopPlayback()
     queued_request = false
-    if loading { for i: 0..cast(s32)13 { if View(i) == target { queued_view = i } }; return }
+    if loading { for i: 0..cast(s32)15 { if View(i) == target { queued_view = i } }; return }
     if view == "hidden" && target != "hidden" && vault_token[0] != 0 {
-        for i: 0..cast(s32)13 { if View(i) == target { queued_view = i } }
+        for i: 0..cast(s32)15 { if View(i) == target { queued_view = i } }
         vault_unlocked = false; selected = -1; ClearSelection(); editor = ""; Wipe(edit_value[:]); Wipe(vault_first[:]); Wipe(edit_preview[:])
         Request("vault_lock"); Wipe(vault_token[:]); return
     }
     Wipe(vault_first[:]); if Secret() { Wipe(edit_value[:]) }
     if target == "map" { Map.Reset() }
+    date_jumped = false; lane_year = 0
     ClearSelection(); editor = ""; view = target; appending = false; feed_base = 0; album[0] = 0; person[0] = 0; selected = -1; offset = 0; scroll = 0; Request()
 }
 Choose :: (index: s32) {
@@ -641,7 +668,7 @@ FinishCrop :: (apply: bool) {
         if apply { image_crop = crop_candidate }; editor = "image"; ImageRequest()
     }
 }
-Find :: () { ClearSelection(); CancelEditor(); offset = 0; scroll = 0; selected = -1; Request() }
+Find :: () { date_jumped = false; if view != "auto_people" { ClearSelection() }; CancelEditor(); offset = 0; scroll = 0; selected = -1; Request() }
 ToggleSort :: () { if loading { return }; sort = ifx sort == "newest" then "oldest" else "newest"; Find() }
 AlbumFilter :: () { album_mode = ifx album_mode == "active" then "archived" else (ifx album_mode == "archived" then "empty" else "active"); Find() }
 AlbumSort :: () { album_sort = ifx album_sort == "name" then "newest" else (ifx album_sort == "newest" then "oldest" else "name"); Find() }
@@ -668,8 +695,26 @@ MapGallery :: (index: s32 = -1) {
     Map.OpenGallery(index); RefreshMap()
 }
 MapBack :: () { if loading { return }; Map.gallery = false; Map.dragged = false; RefreshMap() }
-CatalogView :: () -> bool { return view == "albums" || view == "places" || (view == "people" && person[0] == 0) }
-PeopleBack :: () { if loading { return }; ClearSelection(); person[0] = 0; search[0] = 0; selected = -1; offset = 0; scroll = 0; Request() }
+CatalogView :: () -> bool { return view == "albums" || view == "places" || view == "auto_people" || (view == "people" && person[0] == 0) }
+AutoPerson :: (id: string) {
+    if loading { return }
+    for i: 0..picked_count-1 { if TextUntilNul(picked[i].id[:]) == id { picked[i] = picked[picked_count-1]; unused VecPop(picked); picked_count -= 1; return } }
+    if picked_count >= 64 { Set(message[:],"Choose up to 64 people"); return }
+    choice: Selection; Set(choice.id[:],id); if VecPush(picked,choice) { picked_count += 1 }
+}
+AutoBack :: () { if loading { return }; ClearSelection(); view = "photos"; search[0] = 0; offset = 0; scroll = 0; Request() }
+PeopleBack :: () { if loading { return }; ClearSelection(); view = "people"; person[0] = 0; search[0] = 0; selected = -1; offset = 0; scroll = 0; Request() }
+MemoryLane :: () { if loading || person[0] == 0 { return }; date_jumped = false; ClearSelection(); view = "lane"; lane_year = 0; search[0] = 0; album[0] = 0; selected = -1; offset = 0; scroll = 0; sort = "oldest"; Request() }
+LaneYear :: (direction: s32) {
+    if loading { return }
+    for i: 0..lane_count-1 { if lane_years[i] == lane_year { target := i+direction; if target < 0 || target >= lane_count { return }; lane_year = lane_years[target]; selected = -1; offset = 0; scroll = 0; Request(); return } }
+}
+JumpPhoto :: () {
+    if loading || selected < 0 || selected >= count || photos[selected].hidden || photos[selected].trashed { return }
+    day: [11]u8; Set(day[:],TextUntilNul(photos[selected].date[:]))
+    ClearSelection(); editor = ""; selected = -1; person[0] = 0; album[0] = 0; search[0] = 0; view = "photos"; offset = 0; scroll = 0; Request("jump_date","",TextUntilNul(day[:]))
+}
+JumpGallery :: () -> bool { return view == "photos" || view == "favorites" || view == "videos" || view == "archive" || view == "uncategorized" }
 PeoplePage :: (direction: s32) { if loading { return }; offset += direction * 60; if offset < 0 { offset = 0 }; scroll = 0; Request() }
 AlbumPlace :: () -> bool { return album_place }
 BeginPlace :: (from_photo: bool = false) {
@@ -678,4 +723,4 @@ BeginPlace :: (from_photo: bool = false) {
     else { Set(place_area[:], "0, 0, 1") }
     BeginEdit("place_name", "Name this place", "", "A name such as Home; photos in its radius match automatically")
 }
-View :: (index: s32) -> string { names: [14]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized", "memories", "map", "places", "semantic", "people"}; return names[index] }
+View :: (index: s32) -> string { names: [16]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized", "memories", "map", "places", "semantic", "people", "lane", "auto_people"}; return names[index] }

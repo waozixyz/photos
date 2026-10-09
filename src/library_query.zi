@@ -43,9 +43,9 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if length == 0 || length >= 16384 { return Failure("Gallery request exceeds its limit") }
     json := TextFromBytes(input[:length])
     if Space(json, ValueEnd(json, 0, 0)) != length || json[0] != 123 { return Failure("Choose a valid gallery request") }
-    view: [32]u8; search: [513]u8; album: [513]u8; sort: [16]u8; memory: [11]u8; filter: [513]u8; person: [65]u8
+    view: [32]u8; search: [513]u8; album: [513]u8; sort: [16]u8; memory: [11]u8; filter: [513]u8; person: [65]u8; birth: [11]u8; jump: [11]u8
     if !Decode(json,"view",view[:]) || !Decode(json,"search",search[:]) || !Decode(json,"album",album[:]) ||
-        !Decode(json,"sort",sort[:]) || !Decode(json,"memory_date",memory[:]) || !Decode(json,"filter",filter[:]) || !Decode(json,"person",person[:]) { return Failure("Gallery value exceeds its limit") }
+        !Decode(json,"sort",sort[:]) || !Decode(json,"memory_date",memory[:]) || !Decode(json,"filter",filter[:]) || !Decode(json,"person",person[:]) || !Decode(json,"birth",birth[:]) || !Decode(json,"jump_day",jump[:]) { return Failure("Gallery value exceeds its limit") }
     order := TextUntilNul(sort[:]); page := Number(json, "offset", 0); limit := Number(json, "limit", 60)
     if order != "newest" && order != "oldest" { return Failure("Choose newest first or oldest first") }
     if limit < 1 { limit = 1 }; if limit > 100 { limit = 100 }
@@ -59,7 +59,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
         else if name == "videos" { Search.AddSQL(*query," AND kind='video'") }
         else if name == "archive" { Search.AddSQL(*query," AND (archived=1 OR EXISTS(SELECT 1 FROM json_each(photos.albums) j JOIN albums a ON a.name=j.value WHERE a.archived=1 AND a.deleted=0))") }
         else if name == "uncategorized" { Search.AddSQL(*query," AND json_array_length(albums)=0") }
-        else if name == "photos" && album[0] == 0 && search[0] == 0 && filter[0] == 0 || name == "memories" {
+        else if name == "photos" && album[0] == 0 && search[0] == 0 && filter[0] == 0 || name == "memories" || name == "lane" {
             Search.AddSQL(*query," AND archived=0 AND NOT EXISTS(SELECT 1 FROM json_each(photos.albums) j JOIN albums a ON a.name=j.value WHERE a.archived=1 AND a.deleted=0)")
         }
     }
@@ -70,9 +70,20 @@ main :: (argc: s32, argv: **u8) -> s32 {
     // is a gallery item. Incomplete or mismatched privacy updates fail closed.
     Search.AddSQL(*query, " AND coalesce(json_extract(metadata,'$.photosLive.photo'),'')='' AND (json_extract(metadata,'$.photosLive.video') IS NULL OR EXISTS(SELECT 1 FROM photos motion WHERE motion.id=json_extract(photos.metadata,'$.photosLive.video') AND motion.kind='video' AND json_extract(motion.metadata,'$.photosLive.photo')=photos.id AND motion.hidden=photos.hidden AND (motion.trashed>0)=(photos.trashed>0)))")
     if album[0] != 0 && filter[0] == 0 { Search.AddSQL(*query," AND EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=?)"); Search.Bind(*query,TextUntilNul(album[:])) }
-    if name == "people" {
+    if name == "people" || name == "lane" {
         Search.AddSQL(*query," AND hidden=0 AND trashed=0 AND EXISTS(SELECT 1 FROM faces WHERE faces.photo_id=photos.id AND faces.person_id=?)")
         Search.Bind(*query,TextUntilNul(person[:]))
+    }
+    if name == "lane" {
+        Search.AddSQL(*query," AND (SELECT ignored FROM people WHERE id=?)=0"); Search.Bind(*query,TextUntilNul(person[:]))
+        if birth[0] != 0 {
+            value := TextUntilNul(birth[:]); year := DateNumber(value,0,4); month := DateNumber(value,5,2); day := DateNumber(value,8,2)
+            // Birth dates can predate the Unix epoch. Compare calendar dates
+            // without the standard feed parser's 1970 lower bound.
+            cutoff: Vec(u8); BuilderPrint(*cutoff,"%-%-",year+3,value[5:7])
+            BuilderPrint(*cutoff,"%",ifx month == 2 && day == 29 then "28" else value[8:10])
+            Search.AddSQL(*query," AND strftime('%Y-%m-%d',taken,'unixepoch')>=?"); Search.Bind(*query,BuilderFinish(cutoff))
+        }
     }
     if name == "memories" {
         if memory[0] == 0 { unused WriteIsoDay(Clock.UnixNow(),memory[:]) }
@@ -102,12 +113,44 @@ main :: (argc: s32, argv: **u8) -> s32 {
     unused SqliteBusyTimeout(database,10000)
     if SqliteExecText(database,"BEGIN") != SQLITE_OK { return Failure("Cannot open a gallery snapshot") }
     defer { unused SqliteExecText(database,"ROLLBACK") }
+    lane_years: [256]s32; lane_count: s32; lane_year := Number(json,"lane_year",0)
+    if name == "lane" {
+        copy: Vec(u8); for i: 0..query.sql.count-1 { unused VecPush(copy,query.sql[i]) }
+        initial := BuilderFinish(copy); years: Vec(u8)
+        BuilderPrint(*years,"SELECT cast(strftime('%',taken,'unixepoch') AS INTEGER) y FROM photos WHERE % GROUP BY y HAVING count(*)>=4 ORDER BY y","%Y",initial)
+        statement: *void
+        if !Prepare(database,BuilderFinish(years),*query,*statement) { return Failure("Cannot prepare Memory Lane") }
+        while true {
+            result := SqliteStep(statement)
+            if result == SQLITE_DONE { break }
+            if result != SQLITE_ROW || lane_count >= 256 { unused SqliteFinalize(statement); return Failure("Cannot read Memory Lane years") }
+            lane_years[lane_count] = cast(s32)SqliteColumnInt64(statement,0); lane_count += 1
+        }
+        unused SqliteFinalize(statement)
+        if lane_count < 2 { lane_count = 0; lane_year = 0; Search.AddSQL(*query," AND 0") }
+        else {
+            if lane_year == 0 { lane_year = lane_years[0] }
+            valid: bool; for i: 0..lane_count-1 { if lane_years[i] == lane_year { valid = true } }
+            if !valid { lane_year = lane_years[0] }
+            Search.AddSQL(*query," AND cast(strftime('%Y',taken,'unixepoch') AS INTEGER)=?"); Search.BindNumber(*query,cast(s64)lane_year)
+        }
+    }
     where := BuilderFinish(query.sql)
     sql: Vec(u8); BuilderPrint(*sql,"SELECT COUNT(*) FROM photos WHERE %",where); count_sql := BuilderFinish(sql)
     statement: *void
     if !Prepare(database,count_sql,*query,*statement) { return Failure("Cannot prepare the gallery query") }
     if SqliteStep(statement) != SQLITE_ROW { unused SqliteFinalize(statement); return Failure("Cannot count gallery matches") }
     matches := SqliteColumnInt64(statement,0); unused SqliteFinalize(statement); statement = null
+    if jump[0] != 0 {
+        day := Search.Date(TextUntilNul(jump[:]))
+        if day < 0 || name == "semantic" || name == "map" || name == "lane" { return Failure("Choose a gallery date in YYYY-MM-DD format") }
+        jump_sql: Vec(u8); BuilderPrint(*jump_sql,"SELECT count(*) FROM photos WHERE % AND taken%?",where,ifx order == "newest" then ">=" else "<")
+        Search.BindNumber(*query,day + (ifx order == "newest" then 86400 else 0))
+        if !Prepare(database,BuilderFinish(jump_sql),*query,*statement) { return Failure("Cannot jump to the gallery date") }
+        if SqliteStep(statement) != SQLITE_ROW { unused SqliteFinalize(statement); return Failure("Cannot locate the gallery date") }
+        target := SqliteColumnInt64(statement,0); unused SqliteFinalize(statement); statement = null; query.count -= 1
+        if matches == 0 { page = 0 } else { page = cast(s32)(ifx target >= matches then matches-1 else target) }
+    }
     rows: Vec(u8); BuilderPrint(*rows,"SELECT id FROM photos WHERE % ORDER BY ",where)
     if name == "semantic" { BuilderPrint(*rows,"% DESC,",Semantic.RankSQL) }
     BuilderPrint(*rows,"taken %,id LIMIT % OFFSET %",ifx order == "newest" then "DESC" else "ASC",limit,page)
@@ -126,6 +169,12 @@ main :: (argc: s32, argv: **u8) -> s32 {
         BuilderPrint(*output,"%\"%\"",ifx count == 0 then "" else ",",id); count += 1
     }
     BuilderPrint(*output,"]")
+    if jump[0] != 0 { BuilderPrint(*output,",\"jump_offset\":%",page) }
+    if name == "lane" {
+        current: [11]u8; unused WriteIsoDay(Clock.UnixNow(),current[:])
+        BuilderPrint(*output,",\"lane_year\":%,\"current_year\":%,\"lane_years\":[",lane_year,DateNumber(TextUntilNul(current[:]),0,4))
+        for i: 0..lane_count-1 { BuilderPrint(*output,"% %",ifx i == 0 then "" else ",",lane_years[i]) }; BuilderPrint(*output,"]")
+    }
     if name == "map" && Number(json, "map_gallery", 0) == 0 {
         unused SqliteFinalize(statement); statement = null
         cluster_sql := Locations.ClusterSQL(where, map_bounds)

@@ -1,5 +1,6 @@
 using UI :: #import "kryon/Widgets";
 using Model :: #import "model";
+#import "std/date_parse"
 Playback :: #import "playback";
 Crop :: #import "crop";
 Viewer :: #import "viewer";
@@ -487,11 +488,28 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Model.album[0] != 0 && Model.album_filter[0] == 0 && ready && !photo.hidden && !photo.trashed {
             if Action(session, 205, "Use as album cover", .{x + width - 186.0, body.y + 44.0, 186.0, 36.0}) { Model.Apply("album_cover", TextUntilNul(photo.id[:])) }
         }
+        if Model.album[0] == 0 && !photo.hidden && !photo.trashed {
+            if Action(session,464,"Jump to this day",.{x+width-170.0,body.y+44.0,170.0,36.0},ready) { Model.JumpPhoto() }
+        }
     } else if Model.view == "map" && !Map.gallery {
         OfflineMap(session, body)
     } else {
         if Model.CatalogView() {
-            if Model.view == "people" {
+            if Model.view == "auto_people" {
+                Label(session,473,"Auto-add people",.{x,body.y,width,26.0},22)
+                Label(session,474,"Choose named people; new indexed matches join this album",.{x,body.y+30.0,width,26.0},14)
+                step := (width-24.0)/3.0
+                if Action(session,475,"Save people",.{x,body.y+64.0,step,36.0},!Model.loading) { Model.Request(ifx Model.auto_remove then "album_auto_people_remove" else "album_auto_people") }
+                if Action(session,476,"Cancel",.{x+step+12.0,body.y+64.0,step,36.0},!Model.loading) { Model.AutoBack() }
+                if Action(session,477,"Deselect all",.{x+2.0*(step+12.0),body.y+64.0,step,36.0},!Model.loading) { Model.ClearSelection() }
+                body.y += 108.0; body.height -= 108.0
+                if Action(session,478,ifx Model.auto_remove then "Remove previously auto-added photos" else "Keep previously auto-added photos",.{x,body.y,width,36.0},!Model.loading) { Model.auto_remove = !Model.auto_remove }
+                body.y += 44.0; body.height -= 44.0
+                if Action(session,456,"Previous people",.{x,body.y,138.0,36.0},!Model.loading && Model.offset>0) { Model.PeoplePage(-1) }
+                if Action(session,457,"More people",.{x+148.0,body.y,138.0,36.0},!Model.loading && Model.offset+60<Model.people_count) { Model.PeoplePage(1) }
+                choices: Vec(u8); BuilderPrint(*choices,"% people selected",Model.picked_count); label := BuilderFinish(choices)
+                Label(session,479,label,.{x+296.0,body.y+6.0,width-296.0,26.0},14); Model.Release(label)
+            } else if Model.view == "people" {
                 Label(session,450,TextUntilNul(Model.people_status[:]),.{x,body.y,width,26.0},14)
                 Label(session,451,"Face groups are suggestions; name, merge or correct them",.{x,body.y+28.0,width,26.0},14)
                 if Action(session,452,ifx Model.people_processing then "Pause face indexing" else (ifx Model.people_enabled then "Resume face indexing" else "Enable People"),.{x,body.y+60.0,190.0,36.0},!Model.loading) { Model.Apply(ifx Model.people_processing then "people_pause" else "people_enable") }
@@ -523,7 +541,24 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                 if Action(session,461,ifx Model.person_ignored then "Unignore person" else "Ignore person",.{x+2.0*(step+12.0),body.y+34.0,step,36.0},!Model.loading && Model.matches>0) { Model.Apply("person_ignore") }
                 if Action(session,462,"Not this person",.{x,body.y+78.0,190.0,36.0},!Model.loading && Model.picked_count>0) { Model.Apply("person_remove") }
                 Label(session,463,"Select wrong photos to move their faces into new groups",.{x+200.0,body.y+84.0,width-200.0,26.0},13)
-                body.y += 122.0; body.height -= 122.0
+                if Action(session,465,"Memory Lane",.{x,body.y+122.0,190.0,36.0},!Model.loading && Model.matches>0 && !Model.person_ignored) { Model.MemoryLane() }
+                if Action(session,466,"Birth date",.{x+200.0,body.y+122.0,138.0,36.0},!Model.loading && Model.matches>0) { Model.BeginEdit("person_birth","Person's birth date",TextUntilNul(Model.person_birth[:]),"YYYY-MM-DD; optional, used for age captions and eligibility") }
+                body.y += 166.0; body.height -= 166.0
+            }
+            if Model.view == "lane" {
+                Label(session,467,"Memory Lane",.{x,body.y,width,26.0},22)
+                caption: Vec(u8)
+                if Model.lane_count >= 2 {
+                    BuilderPrint(*caption,"% · %",TextUntilNul(Model.person_name[:]),Model.lane_year)
+                    if Model.current_year > Model.lane_year { BuilderPrint(*caption," · % years ago",Model.current_year-Model.lane_year) }
+                    if Model.person_birth[0] != 0 { birth_year := DateNumber(TextUntilNul(Model.person_birth[:]),0,4); BuilderPrint(*caption," · turned % that year",Model.lane_year-birth_year) }
+                } else { BuilderPrint(*caption,"Needs four eligible photos in each of two years; ages under three stay excluded") }
+                text := BuilderFinish(caption); Label(session,468,text,.{x,body.y+30.0,width,26.0},14); Model.Release(text)
+                step := (width-24.0)/3.0
+                if Action(session,469,"Back to person",.{x,body.y+64.0,step,36.0},!Model.loading) { Model.view = "people"; Model.selected = -1; Model.offset = 0; Model.scroll = 0; Model.Request() }
+                if Action(session,470,"Previous year",.{x+step+12.0,body.y+64.0,step,36.0},!Model.loading && Model.lane_count>0 && Model.lane_year != Model.lane_years[0]) { Model.LaneYear(-1) }
+                if Action(session,471,"Next year",.{x+2.0*(step+12.0),body.y+64.0,step,36.0},!Model.loading && Model.lane_count>0 && Model.lane_year != Model.lane_years[Model.lane_count-1]) { Model.LaneYear(1) }
+                body.y += 108.0; body.height -= 108.0
             }
             if Model.view == "semantic" {
                 Label(session, 430, TextUntilNul(Model.semantic_status[:]), .{x, body.y, width, 26.0}, 14)
@@ -546,16 +581,26 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                 text: Vec(u8); BuilderPrint(*text, "% selected", Model.picked_count); value := BuilderFinish(text)
                 Label(session, 48, value, .{x + 304.0, body.y + 7.0, width - 304.0, 26.0}); Model.Release(value)
             } else if Model.album[0] != 0 {
-                Label(session, 48, TextUntilNul(Model.album[:]), .{x + 88.0, body.y + 7.0, width - 376.0, 26.0})
+                Label(session, 48, TextUntilNul(Model.album[:]), .{x + 88.0, body.y + 7.0, width - (ifx width >= 620.0 then 512.0 else 376.0), 26.0})
+                if width >= 620.0 && Model.view == "photos" {
+                    if Action(session,472,"Jump to date",.{x+width-410.0,body.y,122.0,36.0},!Model.loading) { Model.BeginEdit("jump_date","Jump to date","","YYYY-MM-DD; keeps the current album and search") }
+                }
                 if Action(session, 49, ifx Model.AlbumPlace() then "Rename place" else "Rename album", .{x + width - 278.0, body.y, 138.0, 36.0}, !Model.loading) { Model.BeginEdit("album_rename", ifx Model.AlbumPlace() then "Rename place" else "Rename album", TextUntilNul(Model.album[:]), "New name; originals and other albums stay intact") }
             } else {
                 if Action(session, 320, "Save search", .{x + 88.0, body.y, 126.0, 36.0}, !Model.loading && Model.search[0] != 0 && Model.view == "photos") { Model.BeginEdit("album_smart_create", "Name this smart album", "", "Saved search; matching photos update automatically") }
                 if Action(session, 321, "Search tips", .{x + 224.0, body.y, 112.0, 36.0}) { Model.CancelEditor(); Model.editor = "search_help" }
+                if width >= 620.0 && Model.JumpGallery() {
+                    if Action(session,472,"Jump to date",.{x+346.0,body.y,120.0,36.0},!Model.loading) { Model.BeginEdit("jump_date","Jump to date","","YYYY-MM-DD; keeps the current gallery and search") }
+                }
             }
             if !Model.selecting {
                 if Action(session, 60, ifx Model.view == "semantic" then "Closest first" else (ifx Model.sort == "newest" then "Newest first" else "Oldest first"), .{x + width - 132.0, body.y, 132.0, 36.0}, !Model.loading && Model.view != "semantic") { Model.ToggleSort() }
             }
             body.y += 44.0; body.height -= 44.0
+            if width < 620.0 && Model.JumpGallery() && !Model.selecting {
+                if Action(session,472,"Jump to date",.{x,body.y,122.0,36.0},!Model.loading) { Model.BeginEdit("jump_date","Jump to date","","YYYY-MM-DD; keeps the current gallery, album and search") }
+                body.y += 44.0; body.height -= 44.0
+            }
             if Model.album[0] != 0 && !Model.selecting {
                 step := (width - 24.0) / 4.0
                 if Action(session, 203, "Description", .{x, body.y, step, 36.0}, !Model.loading) { Model.BeginEdit("album_description", "Album description", TextUntilNul(Model.album_description[:]), "Describe this album") }
@@ -581,6 +626,9 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                 if Model.album_description[0] != 0 { Label(session, 208, TextUntilNul(Model.album_description[:]), .{x, body.y, width, 28.0}, 14); body.y += 32.0; body.height -= 32.0 }
                 if Model.view == "photos" {
                     if Action(session, 418, ifx Model.AlbumPlace() then "Place map" else "Album map", .{x, body.y, 138.0, 36.0}, !Model.loading) { Model.OpenMap() }
+                    if Model.album_filter[0] == 0 {
+                        if Action(session,480,"Auto-add people",.{x+148.0,body.y,166.0,36.0}) { Model.ClearSelection(); Model.Request("auto_people_begin") }
+                    }
                     body.y += 44.0; body.height -= 44.0
                 }
             }
@@ -622,9 +670,10 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                 item := *Model.catalog[i]
                 clicked := Action(session, cast(s32)(1000 + i), TextUntilNul(item.name[:]), .{bx + 68.0, by, width - 190.0, 56.0})
                 ImageAt(session, cast(u64)(4000000 + i), TextUntilNul(item.thumbnail[:]), TextUntilNul(item.name[:]), .{bx, by, 56.0, 56.0}, true)
-                info: Vec(u8); BuilderPrint(*info, "% items", item.count); if item.place { BuilderPrint(*info, " · Place") } else if item.smart { BuilderPrint(*info, " · Smart") }; if item.pinned { BuilderPrint(*info, " · Pinned") }
+                info: Vec(u8); BuilderPrint(*info, "% items", item.count); if Model.view == "auto_people" && Model.IsPicked(TextUntilNul(item.id[:])) { BuilderPrint(*info," · Selected") }; if item.place { BuilderPrint(*info, " · Place") } else if item.smart { BuilderPrint(*info, " · Smart") }; if item.pinned { BuilderPrint(*info, " · Pinned") }
                 text := BuilderFinish(info); Label(session, cast(u64)(4100000 + i), text, .{bx + width - 120.0, by + 16.0, 120.0, 24.0}, 13); Model.Release(text)
                 if clicked {
+                    if Model.view == "auto_people" { Model.AutoPerson(TextUntilNul(item.id[:])); break }
                     Model.ClearSelection()
                     if Model.view == "people" { Model.Set(Model.person[:],TextUntilNul(item.id[:])); Model.search[0] = 0 }
                     else { Model.Set(Model.album[:], TextUntilNul(item.name[:])); Model.view = "photos" }

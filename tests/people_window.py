@@ -123,8 +123,8 @@ with tempfile.TemporaryDirectory() as directory:
             text('Ada'); control('Save',250,350)
             named=wait(lambda:result('person_name'),'Person naming missing'); assert named['person_detail']['name']=='Ada'
             time.sleep(.6);shoot('people-named-portable.png' if portable else 'people-named-native.png')
-            control('Select',245,288);time.sleep(.5)
-            control('Select loaded',355,288);time.sleep(.5)
+            control('Select',245,332);time.sleep(.5)
+            control('Select loaded',355,332);time.sleep(.5)
             assert len(named['photos'])==3
             control('Not this person',290,252)
             corrected=wait(lambda:result('person_remove'),'Face correction missing'); assert not corrected['photos']

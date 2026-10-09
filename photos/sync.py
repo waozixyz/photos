@@ -231,6 +231,7 @@ class Client:
     def album_record(self, album):
         album = dict(album)
         album.pop('dirty', None)
+        album['auto_people'] = json.loads(album['auto_people'])
         return self.seal_record(album, ALBUM_COLLECTION, 'photos.album.v1')
 
     def seal_record(self, value, collection, schema):
@@ -264,6 +265,11 @@ class Client:
         if any(type(album.get(k)) not in {int, float} or not 0 <= album[k] < 32503680000 for k in ['created', 'updated']):
             raise ValueError('Invalid album date')
         existing = self.library.db.execute('SELECT * FROM albums WHERE id=?', (album['id'],)).fetchone()
+        from .auto_albums import identities
+        selected = identities(album.get('auto_people',json.loads(existing['auto_people']) if existing else []))
+        if album['filter'] and selected:
+            raise ValueError('Smart albums cannot auto-add people')
+        album['auto_people'] = packed(selected)
         if existing and existing['updated'] >= album['updated']:
             return
         other = self.library.db.execute('SELECT * FROM albums WHERE name=? AND id<>?', (album['name'], album['id'])).fetchone()
@@ -273,7 +279,7 @@ class Client:
             if other['updated'] != 0:
                 raise ValueError('Album name conflict; local edits are retained')
             self.library.db.execute('DELETE FROM albums WHERE id=?', (other['id'],))
-        columns = ['id', 'name', 'description', 'cover', 'pinned', 'archived', 'deleted', 'created', 'updated', 'filter']
+        columns = ['id', 'name', 'description', 'cover', 'pinned', 'archived', 'deleted', 'created', 'updated', 'filter','auto_people']
         self.library.db.execute('INSERT OR REPLACE INTO albums(' + ','.join(columns) + ',dirty) VALUES(' + ','.join('?' for _ in columns) + ',0)', [album[k] for k in columns])
 
     def accept(self, record):
@@ -300,6 +306,9 @@ class Client:
             raise ValueError('Invalid photo archive state')
         if not isinstance(photo['edits'], dict):
             raise ValueError('Invalid photo edits')
+        if 'auto_albums' in photo['edits']:
+            from .auto_albums import validate_provenance
+            photo['edits']['auto_albums'] = validate_provenance(photo['edits']['auto_albums'])
         existing = self.library.db.execute('SELECT * FROM photos WHERE id=?', (photo['id'],)).fetchone()
         if existing and existing['updated'] >= photo['updated']:
             return

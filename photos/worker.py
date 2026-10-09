@@ -33,7 +33,8 @@ def ui_query(library, request):
                            album_mode=request.get('album_mode', 'active'), album_sort=request.get('album_sort', 'name'),
                            memory_date=request.get('memory_date', ''), hidden_access=vault.unlocked(library, request.get('vault_token', '')),
                            map_bounds=request.get('map_bounds'), map_gallery=request.get('map_gallery', False),
-                           person=request.get('person',''), people_mode=request.get('people_mode','active'))
+                           person=request.get('person',''), people_mode=request.get('people_mode','active'),
+                           lane_year=request.get('lane_year',0), jump_day=request.get('jump_day',''))
     result.update(vault.state(library, request.get('vault_token', '')))
     # A native page or slow catalog query may outlast the unlock. Recheck
     # before returning any Hidden paths to the caller.
@@ -70,6 +71,19 @@ def ui_query(library, request):
 
 def library_request(library, request, config):
     action = request.get('action', 'query')
+    if action in {'auto_people_begin','album_auto_people','album_auto_people_remove'}:
+        from . import auto_albums
+        album = library.album_details(request.get('album',''))
+        if album['filter']:
+            raise LibraryError('Choose a regular album for automatic people additions')
+        if action != 'auto_people_begin':
+            auto_albums.configure(library,album['name'],request.get('ids',[]),remove=action=='album_auto_people_remove')
+            result = ui_query(library,{**request,'view':'photos','search':'','offset':0})
+            result.update(view='photos',search='',album=album['name'])
+        else:
+            result = ui_query(library,{**request,'view':'auto_people','search':'','offset':0})
+            result.update(view='auto_people',search='',album=album['name'],auto_selection=json.loads(album['auto_people']))
+        return result
     if action in {'people_enable','people_pause','people_retry','people_disable'}:
         from . import people
         if action=='people_retry':
@@ -77,12 +91,18 @@ def library_request(library, request, config):
         people.enable(library,action in {'people_enable','people_retry'})
         if action=='people_disable': library.set_setting('people_enabled',False)
         return ui_query(library,request)
-    if action in {'person_name','person_ignore','person_remove'}:
+    if action=='jump_date':
+        if not isinstance(request.get('value'),str) or not request['value']:
+            raise LibraryError('Choose a gallery date in YYYY-MM-DD format')
+        result = ui_query(library,{**request,'jump_day':request.get('value','')})
+        result['jumped'] = 1
+        return result
+    if action in {'person_name','person_ignore','person_remove','person_birth'}:
         from . import people
         ids = request.get('ids') or ([request['id']] if request.get('id') else [])
         person = people.edit(library,action,request.get('person'),request.get('value',''),ids)
         result = ui_query(library,{**request,'person':person,'offset':0})
-        result.update(person=person,view='people',status='People updated; originals retained')
+        result.update(person=person,view=request.get('view','people'),status='People updated; originals retained')
         return result
     if action in {'semantic_enable', 'semantic_pause', 'semantic_retry', 'semantic_disable'}:
         from . import semantic

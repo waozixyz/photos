@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from datetime import date
 
 from .library import Library, LibraryError, digest_file, packed
 from .semantic import runtime
@@ -158,7 +159,7 @@ def store(library, photo_id, detected, folder):
         for index, face in enumerate(detected):
             face_id = hashlib.sha256(f'{MODEL}:{photo_id}:{index}'.encode()).hexdigest()
             person = match(library,face['embedding'],used,folder) or face_id
-            library.db.execute('INSERT OR IGNORE INTO people VALUES(?,?,?,?)',(person,'',0,time.time()))
+            library.db.execute('INSERT OR IGNORE INTO people(id,name,ignored,updated) VALUES(?,?,?,?)',(person,'',0,time.time()))
             library.db.execute('INSERT INTO faces VALUES(?,?,?,?,?,?)',
                                (face_id,photo_id,person,packed(face['rect']),face['embedding'],'[]'))
             used.add(person)
@@ -168,6 +169,8 @@ def store(library, photo_id, detected, folder):
                 os.replace(face['portrait'],destination)
         library.db.execute('INSERT INTO face_scans VALUES(?,?,?)',(photo_id,MODEL,''))
         library.db.execute('UPDATE photos SET updated=?,dirty=1 WHERE id=?',(time.time(),photo_id))
+        from . import auto_albums
+        auto_albums.apply(library,photo_id=photo_id)
     return True
 
 
@@ -176,6 +179,8 @@ def enable(library, enabled):
         prepare(); library.set_setting('people_enabled',True)
     library.set_setting('people_processing',bool(enabled))
     if enabled:
+        from . import auto_albums
+        auto_albums.apply(library)
         kick(library)
 
 
@@ -237,7 +242,7 @@ def state(library):
                 people_status=library.setting('people_status','') or status)
 
 
-def catalog(library, search='', mode='active', offset=0):
+def catalog(library, search='', mode='active', offset=0, named_only=False):
     if not isinstance(search,str) or len(search.encode())>512 or mode not in {'active','ignored'}:
         raise LibraryError('Choose an active or ignored people view')
     rows = library.db.execute('''SELECT g.*,count(DISTINCT f.photo_id) count FROM people g
@@ -246,6 +251,7 @@ def catalog(library, search='', mode='active', offset=0):
         ORDER BY (g.name=''),g.name COLLATE NOCASE,g.id''',(int(mode=='ignored'),)).fetchall()
     result = []
     for group in rows:
+        if named_only and not group['name']: continue
         if search.casefold() not in group['name'].casefold(): continue
         faces = library.db.execute('SELECT id,photo_id FROM faces WHERE person_id=? ORDER BY id',(group['id'],)).fetchall()
         visible_faces = [f for f in faces if visible(library,f['photo_id'])]
@@ -285,8 +291,19 @@ def edit(library, action, person, value='', ids=None):
                     raise LibraryError('These groups contain corrected faces; move the photos deliberately instead')
                 library.db.execute('UPDATE faces SET person_id=? WHERE person_id=?',(target,person)); person = target
                 library.db.execute('UPDATE people SET ignored=0 WHERE id=?',(person,))
+                if current['birth']:
+                    library.db.execute("UPDATE people SET birth=? WHERE id=? AND birth=''",(current['birth'],person))
+                # Rules follow a deliberately merged identity.
+                for album in library.db.execute("SELECT id,auto_people FROM albums WHERE auto_people<>'[]'").fetchall():
+                    selected = json.loads(album['auto_people'])
+                    if current['id'] in selected:
+                        selected = sorted(set(target if p==current['id'] else p for p in selected))
+                        library.db.execute('UPDATE albums SET auto_people=?,updated=?,dirty=1 WHERE id=?',(packed(selected),time.time(),album['id']))
                 touched.update(r[0] for r in library.db.execute('SELECT photo_id FROM faces WHERE person_id=?',(person,)))
             else: library.db.execute('UPDATE people SET name=? WHERE id=?',(name,person))
+        elif action=='person_birth':
+            if not valid_birth(value): raise LibraryError('Use YYYY-MM-DD for a birth date, or leave empty to remove it')
+            library.db.execute('UPDATE people SET birth=? WHERE id=?',(value,person))
         elif action=='person_ignore':
             library.db.execute('UPDATE people SET ignored=? WHERE id=?',(1-current['ignored'],person))
         elif action=='person_remove':
@@ -299,12 +316,22 @@ def edit(library, action, person, value='', ids=None):
                     excluded = set(json.loads(face['excluded'])); excluded.add(person)
                     if len(excluded)>128: raise LibraryError('This face has reached its correction limit')
                     identity = hashlib.sha256(f'{face["id"]}:{time.time_ns()}'.encode()).hexdigest()
-                    library.db.execute('INSERT INTO people VALUES(?,?,?,?)',(identity,'',0,time.time()))
+                    library.db.execute('INSERT INTO people(id,name,ignored,updated) VALUES(?,?,?,?)',(identity,'',0,time.time()))
                     library.db.execute('UPDATE faces SET person_id=?,excluded=? WHERE id=?',(identity,packed(sorted(excluded)),face['id']))
         else: raise LibraryError('Unknown People action')
         now = time.time(); library.db.execute('UPDATE people SET updated=? WHERE id=?',(now,person))
         library.db.executemany('UPDATE photos SET updated=?,dirty=1 WHERE id=?',[(now,i) for i in touched])
+        from . import auto_albums
+        auto_albums.apply(library)
     return person
+
+
+def valid_birth(value):
+    if not isinstance(value,str): return False
+    if value=='': return True
+    try:
+        return bool(re.fullmatch('[0-9]{4}-[0-9]{2}-[0-9]{2}',value)) and date(1600,1,1)<=date.fromisoformat(value)<=date.today()
+    except ValueError: return False
 
 
 def export_index(library, photo_id):
@@ -335,6 +362,7 @@ def accept_index(library, photo_id, value):
             if not isinstance(person['name'],str) or len(person['name'].encode())>512 or any(ord(c)<32 for c in person['name']): raise ValueError()
             if type(person['ignored']) is not int or person['ignored'] not in (0,1): raise ValueError()
             if type(person['updated']) not in (int,float) or not 0<=person['updated']<32503680000: raise ValueError()
+            if not valid_birth(person.get('birth','')): raise ValueError()
             excluded = face['excluded']
             if not isinstance(excluded,list) or len(excluded)>128 or any(not isinstance(i,str) or not HASH.fullmatch(i) for i in excluded): raise ValueError()
             prior = library.db.execute('SELECT photo_id FROM faces WHERE id=?',(identity,)).fetchone()
@@ -345,8 +373,9 @@ def accept_index(library, photo_id, value):
     library.db.execute('DELETE FROM faces WHERE photo_id=?',(photo_id,))
     for face,blob in records:
         person = face['person']
-        prior = library.db.execute('SELECT updated FROM people WHERE id=?',(person['id'],)).fetchone()
+        prior = library.db.execute('SELECT updated,birth FROM people WHERE id=?',(person['id'],)).fetchone()
         if prior is None or prior[0]<person['updated']:
-            library.db.execute('INSERT OR REPLACE INTO people VALUES(?,?,?,?)',(person['id'],person['name'],person['ignored'],person['updated']))
+            birth = person.get('birth',prior['birth'] if prior else '')
+            library.db.execute('INSERT OR REPLACE INTO people(id,name,ignored,updated,birth) VALUES(?,?,?,?,?)',(person['id'],person['name'],person['ignored'],person['updated'],birth))
         library.db.execute('INSERT INTO faces VALUES(?,?,?,?,?,?)',(face['id'],photo_id,person['id'],packed(face['rect']),blob,packed(face['excluded'])))
     library.db.execute('INSERT OR REPLACE INTO face_scans VALUES(?,?,?)',(photo_id,MODEL,''))

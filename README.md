@@ -44,6 +44,11 @@ original, capture time, dimensions, file size, caption, tags, albums and locatio
 Use the dedicated editors to change captions, tags, file names and capture dates.
 Dates without an explicit time-zone offset use UTC. Left/right arrows browse
 photos and Escape returns to the grid when no text field has focus.
+Jump to date accepts a capture day in YYYY-MM-DD format and scrolls the current
+gallery to that day, keeping its album, search and sort. If the day is missing,
+it starts at the next match in that direction, or the end of the gallery.
+Opening a photo, returning and refreshing retain the jumped position. Jump to
+this day in a visible photo's details opens its day in the main timeline.
 Zoom + and Zoom - magnify photos, and the mouse wheel zooms around the pointer.
 Drag the image to pan. Fit restores the fitted view; 1:1 displays original pixels
 at one screen pixel each, using the decoder's oriented image dimensions.
@@ -89,8 +94,14 @@ removes location. Apply it to a photo or selection. Corrections survive source
 rescans and remain in encrypted sync and export sidecars. Memories shows photos
 from the same capture day in earlier years, using UTC, and Choose day lets you
 browse another day. Hidden, Trash and individually or album-archived photos stay
-excluded. This is an on-this-day gallery; face-based Memory Lane and curated
-stories remain unfinished.
+excluded. In People, Memory Lane groups a person's eligible photos by year and
+offers Previous year and Next year. It requires at least four eligible photos
+in each of two years. An optional Birth date adds age captions and excludes
+photos before age three; leap-day birthdays use February 28 in a non-leap year.
+Birth dates are preserved in the private encrypted face index and exports.
+Hidden, Trash, ignored people and individually or album-archived photos stay
+excluded. Timeline playback, public Memory Lane links and curated stories remain
+unfinished.
 
 Map shows GPS locations on a bundled offline world map. Zoom with buttons or
 the wheel, drag to pan, and choose a numbered cluster or View photos to browse
@@ -142,8 +153,19 @@ ThinkPad and preserved by library export/import. Edit search changes the rules;
 pinning and renaming work like regular albums. Delete smart album removes only
 the saved search. Membership changes, explicit covers and whole-album archiving
 apply to regular albums; a smart album uses its newest matching photo as its cover.
-These are saved searches; Ente's automatically curated trip and people albums
-remain unfinished.
+These are saved searches; automatically curated trip albums remain unfinished.
+For an ordinary album, Auto-add people opens a picker of named visible people.
+Choose up to 64 people; a photo matching any selected person joins the album.
+Existing matches are added on Save people, and new matches join after local face
+indexing. Naming and merging people updates these rules; disabling People pauses
+additions, and enabling it catches up. Rules use person identities, so a renamed
+person or album keeps working. Deselect all stops additions. Keep previously
+auto-added photos retains memberships; Remove previously auto-added photos
+removes automatic contributions from deselected people without removing photos
+that were imported or deliberately added to that album. Hidden and Trash stay
+untouched by this cleanup. Manual removal stays authoritative through indexing
+and source rescans. The rules and automatic-membership provenance survive
+encrypted backup and folder export/import. Originals stay unchanged.
 
 Local sync offers Export library and Continuous export. Choose a destination
 outside the library and every import source. Background export writes unchanged
@@ -169,8 +191,8 @@ Decoding is limited to 100 megapixels and bounded memory/time; an unsupported or
 damaged original stays stored and can still be backed up and exported. Existing
 imports gain missing thumbnails during source rescans or when opened. Video
 thumbnails need ffmpeg. Videos can be stored, synced, previewed and exported;
-in-app playback is available on Linux with GStreamer and its installed codecs. Facial recognition,
-public links and phone camera backup are not implemented.
+in-app playback is available on Linux with GStreamer and its installed codecs.
+Public links and phone camera backup are not implemented.
 Exported Live Photos with an image and a MOV/MP4 motion file appear as one item.
 Automatic pairing requires the same folder and base name, unambiguous components,
 capture dates or source file times within one day, and a motion file of one to ten
@@ -268,6 +290,8 @@ The Ente comparison uses its [feature overview](https://ente.com/features/),
 [metadata and editing reference](https://github.com/ente/ente/blob/main/docs/docs/photos/faq/metadata-and-editing.md)
 [video editing](https://ente.com/help/photos/features/utilities/video-editor)
 and [export behavior](https://ente.com/help/photos/features/backup-and-sync/export).
+Memory Lane follows Ente's [eligibility rules](https://ente.photos/help/photos/features/search-and-discovery/memory-lane)
+and automatic people albums follow its [auto-add behavior](https://ente.com/help/photos/features/albums-and-organization/auto-add-people).
 The remaining replacement work includes:
 
 - Mobile clients, permission-aware background camera backup and device space recovery.
