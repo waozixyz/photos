@@ -63,8 +63,12 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         imported_metadata = {'unknownCameraFields': {'empty': None, 'integer': 10**100,
                              'values': [True, False, '日本語\n\0']}}
         (source/'fixture.jpg.json').write_text(packed(imported_metadata))
+        imported_album = dict(name='Fixture',description='日本語\n\0'+'é'*1000,pinned=False,archived=False)
+        (source/'.photos-album.json').write_bytes(packed(imported_album).encode('utf-16'))
         first = Library(folder/'desktop')
         first.import_folders([source.parent])
+        assert first.album_details('Fixture')['description'] == imported_album['description']
+        assert first.album_details('Fixture')['pinned'] == 0
         assert json.loads(first.photo(digest_file(source/'fixture.jpg'))['metadata']) == imported_metadata
         assert first.photo(digest_file(source/'fixture.jpg'))['taken'] == -315521755
         assert first.db.execute('SELECT mtime FROM sources WHERE path=?',
@@ -88,6 +92,8 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         peer = Client(second, config)
         assert peer.sync() == 0
         assert second.query()['total'] == 2
+        assert second.album_details('Fixture')['description'] == imported_album['description']
+        assert second.album_details('Fixture')['pinned'] == 0
         assert json.loads(second.photo(photo_id)['metadata']) == imported_metadata
         assert second.photo(photo_id)['taken'] == -315521755
         assert semantic.encrypted_index(second, photo_id) == semantic.encrypted_index(first, photo_id)

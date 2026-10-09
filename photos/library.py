@@ -405,14 +405,10 @@ class Library:
                             raise LibraryError('Invalid album metadata')
                         if any(type(info.get(k, 0)) not in {int, bool} or info.get(k, 0) not in (0, 1) for k in ['pinned', 'archived']):
                             raise LibraryError('Invalid album state')
+                        importing.merge(self, dict(operation='album', name=name, description=description,
+                            cover=cover, filter=smart_filter, auto_people=auto_people,
+                            pinned=bool(info.get('pinned', 0)), archived=bool(info.get('archived', 0))))
                         self.import_album_names[str(path)] = name
-                        with self.db:
-                            self.db.execute('BEGIN IMMEDIATE')
-                            existed = self.db.execute('SELECT 1 FROM albums WHERE name=?', (name,)).fetchone()
-                            album = self._ensure_album(name)
-                            if not existed:
-                                self.db.execute('UPDATE albums SET description=?,cover=?,pinned=?,archived=?,filter=?,auto_people=? WHERE id=?',
-                                                (description, cover, int(info.get('pinned', 0)), int(info.get('archived', 0)), smart_filter, packed(auto_people), album['id']))
                     except (ValueError, OSError, AttributeError):
                         result['warning'] += 1
                 if kind == 'directory':

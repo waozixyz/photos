@@ -245,4 +245,85 @@ class MetadataImportTest(unittest.TestCase):
         self.assertTrue(self.library.db.in_transaction); self.library.db.rollback()
 
 
+class AlbumImportTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name); self.source = self.root/'Source'; self.source.mkdir()
+        self.path = self.source/'Photo.png'; Image.new('RGB', (12, 9), 'green').save(self.path)
+        self.original = self.path.read_bytes()
+        self.library = Library(self.root/'library'); self.addCleanup(self.library.db.close)
+
+    def request(self, **changes):
+        value = dict(operation='album', name='日本語', description='é\n\0'+'x'*8000,
+                     cover='', filter='', auto_people=['b'*64, 'a'*64, 'b'*64],
+                     pinned=True, archived=False)
+        value.update(changes); return value
+
+    def test_complete_definition_native_import_preserves_exact_text_and_later_edits(self):
+        request = self.request()
+        self.assertTrue(importing.merge(self.library, request))
+        album = self.library.album_details(request['name'])
+        self.assertEqual(album['description'], request['description'])
+        self.assertEqual(json.loads(album['auto_people']), ['a'*64, 'b'*64])
+        self.assertEqual((album['pinned'], album['archived'], album['dirty']), (1, 0, 1))
+        self.library.edit_album(request['name'], 'description', 'Keep the later caption')
+        self.library.db.execute('UPDATE albums SET updated=2000000000,dirty=1 WHERE id=?', (album['id'],)); self.library.db.commit()
+        before = self.library.album_details(request['name'])
+        self.assertFalse(importing.merge(self.library, self.request(description='Ignore replacement', pinned=False)))
+        self.assertEqual(self.library.album_details(request['name']), before)
+        self.assertEqual(self.path.read_bytes(), self.original)
+
+    def test_saved_search_validation_and_automatic_rules_fail_before_creating_any_album(self):
+        for changes in [dict(name=''), dict(name=' '), dict(name='Bad\0name'), dict(name='x'*513),
+                        dict(description='é'*4097), dict(cover='invalid'), dict(cover='a'*64+'\0'), dict(pinned=1),
+                        dict(auto_people=['bad']), dict(auto_people=['a'*64+'\0']), dict(auto_people=['a'*64]*65),
+                        dict(filter='is:favorite'), dict(filter='type:unknown', auto_people=[]),
+                        dict(filter='year:2024\0', auto_people=[]), dict(filter='   ', auto_people=[])]:
+            with self.subTest(changes=changes), self.assertRaises(LibraryError):
+                importing.merge(self.library, self.request(**changes))
+            self.assertEqual(self.library.db.execute('SELECT count(*) FROM albums').fetchone()[0], 0)
+        self.assertTrue(importing.merge(self.library, self.request(filter='is:favorite -tag:work', auto_people=[])))
+        self.assertEqual(self.library.album_details('日本語')['filter'], 'is:favorite -tag:work')
+        self.assertEqual(self.path.read_bytes(), self.original)
+
+    def test_definition_failure_rolls_back_its_new_album_and_keeps_source(self):
+        self.library.db.execute("CREATE TRIGGER fail_definition BEFORE UPDATE OF description ON albums BEGIN SELECT RAISE(ABORT,'fixture'); END")
+        self.library.db.commit()
+        with self.assertRaisesRegex(LibraryError, 'definition'):
+            importing.merge(self.library, self.request())
+        self.assertEqual(self.library.db.execute('SELECT count(*) FROM albums').fetchone()[0], 0)
+        self.assertEqual(self.path.read_bytes(), self.original)
+
+    def test_actual_interrupted_native_writer_rolls_back_the_entire_definition(self):
+        self.library.db.execute("""CREATE TRIGGER slow_definition BEFORE UPDATE OF description ON albums BEGIN
+            SELECT sum(x) FROM (WITH RECURSIVE work(x) AS
+                (SELECT 1 UNION ALL SELECT x+1 FROM work WHERE x<100000000) SELECT x FROM work);
+            END""")
+        self.library.db.commit()
+        child = subprocess.Popen([str(importing.metadata_program()), str(self.library.root/'library.sqlite')],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env={k: v for k, v in os.environ.items() if k not in {
+                'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS', 'SESSION_MANAGER'}})
+        def close():
+            if child.poll() is None: child.kill()
+            child.wait(timeout=3)
+            if not child.stdin.closed: child.stdin.close()
+            child.stdout.close(); child.stderr.close()
+        self.addCleanup(close)
+        child.stdin.write(packed(self.request()).encode()); child.stdin.close()
+        self.library.db.execute('PRAGMA busy_timeout=10')
+        import sqlite3
+        locked = False; deadline = time.monotonic()+3
+        while time.monotonic() < deadline:
+            try:
+                self.library.db.execute('BEGIN IMMEDIATE'); self.library.db.rollback()
+            except sqlite3.OperationalError:
+                locked = True; break
+            time.sleep(.01)
+        self.assertTrue(locked, 'Native album writer never acquired the transaction')
+        child.kill(); child.wait(timeout=3)
+        self.assertEqual(self.library.db.execute('SELECT count(*) FROM albums').fetchone()[0], 0)
+        self.assertEqual(self.path.read_bytes(), self.original)
+
+
 if __name__=='__main__':unittest.main()

@@ -29,8 +29,12 @@ are read there too, with UTF-8, UTF-16 and UTF-32 supported and unknown JSON val
 preserved. Unreadable, linked, oversized or malformed sidecars produce import
 warnings while originals remain intact. One reader serves an import batch;
 failed codecs are bounded and the next request can restart the reader.
-Imports carrying private face or automatic-album indexes and album-definition
-publication still use the compatibility service; the complete importer port
+Album definitions publish in one native Ziran transaction, including their
+complete description, cover, pinning, archive state, saved search and automatic
+people rules. Existing definitions retain their later edits and backup stamps;
+failed or interrupted publication rolls back the whole definition.
+Imports carrying private face or automatic-album indexes still use the
+compatibility service; the complete importer port
 remains in progress. Some non-TIFF RAW camera formats still lack capture-field
 extraction even when their pixels can be viewed.
 
@@ -434,7 +438,7 @@ The remaining replacement work includes:
   engine, image processor, password verifier, photo/album-property writers,
   original copying, folder discovery, camera/provider/album-sidecar reading
   and ordinary import metadata/source-cache writes are Ziran/Kryon.
-  Private derived-index import writes, album-definition import publication,
+  Album-definition import publication is native too. Private derived-index import writes,
   authorization adapter and encrypted sync worker remain Python.
 
 Choose Play video to watch a video in the Photos window. Pause/resume, Replay,

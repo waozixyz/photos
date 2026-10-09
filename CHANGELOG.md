@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.33
+
+- Import complete album definitions together, preserving descriptions, covers, pinning, archive state, saved searches and automatic people rules.
+- Keep later album edits and pending backup changes when an older folder export is imported again.
+- Roll back an unfinished album definition when an import fails or is interrupted, leaving source photos and metadata untouched.
+
 ## 0.1.32
 
 - Preserve camera capture dates, fractional seconds, time-zone offsets and valid GPS locations when importing JPEG, PNG, WebP, TIFF and HEIC photos.

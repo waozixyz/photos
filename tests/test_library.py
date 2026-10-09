@@ -205,6 +205,7 @@ class LibraryTest(unittest.TestCase):
         schema = self.library.db.execute("SELECT sql FROM sqlite_master WHERE name='photos'").fetchone()[0]
         schema = schema.replace('archived INTEGER NOT NULL DEFAULT 0,', '')
         with sqlite3.connect(legacy / 'library.sqlite') as db:
+            self.addCleanup(db.close)
             db.execute(schema)
             db.execute('INSERT INTO photos(' + ','.join(photo) + ') VALUES(' + ','.join('?' for _ in photo) + ')', list(photo.values()))
         migrated = Library(legacy)

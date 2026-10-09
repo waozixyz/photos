@@ -2,6 +2,7 @@
 // its own fresh snapshot after the original has been copied and verified.
 using SQLite :: #import "sqlite/SQLite";
 Album :: #import "album_edit";
+Search :: #import "search";
 #import "std/byte_text_linux"
 #import "std/json_scan"
 #import "std/text_buffer"
@@ -123,6 +124,41 @@ EnsureAlbum :: (database: *void, name: string, now: float64) -> bool {
     return Bind(statement,1,TextFromCString(*identity[0])) && Bind(statement,2,name) &&
         SqliteBindDouble(statement,3,now) == SQLITE_OK && SqliteBindDouble(statement,4,now) == SQLITE_OK && SqliteStep(statement) == SQLITE_DONE
 }
+ImportAlbum :: (database: *void, request: string) -> s32 {
+    statement: *void
+    validation := "SELECT json_type(data)='object' AND json_type(data,'$.name')='text' AND json_type(data,'$.description')='text' AND length(CAST(json_extract(data,'$.description') AS BLOB))<=8192 AND json_type(data,'$.cover')='text' AND (json_extract(data,'$.cover')='' OR (length(json_extract(data,'$.cover'))=64 AND length(CAST(json_extract(data,'$.cover') AS BLOB))=64 AND json_extract(data,'$.cover') NOT GLOB '*[^0-9a-f]*')) AND json_type(data,'$.filter')='text' AND length(CAST(json_extract(data,'$.filter') AS BLOB))<=512 AND json_type(data,'$.pinned') IN ('true','false') AND json_type(data,'$.archived') IN ('true','false') AND json_type(data,'$.auto_people')='array' AND json_array_length(data,'$.auto_people')<=64 AND NOT EXISTS(SELECT 1 FROM json_each(data,'$.auto_people') WHERE type<>'text' OR length(value)<>64 OR length(CAST(value AS BLOB))<>64 OR value GLOB '*[^0-9a-f]*') AND (json_extract(data,'$.filter')='' OR json_array_length(data,'$.auto_people')=0) FROM incoming"
+    if SqlitePrepareText(database,validation,-1,*statement,null) != SQLITE_OK { return Failure("Choose valid import album metadata") }
+    valid := SqliteStep(statement) == SQLITE_ROW && SqliteColumnInt(statement,0) == 1; unused SqliteFinalize(statement)
+    if !valid { return Failure("Choose valid import album metadata") }
+    decoded := ReadStringValue(request,FieldAt(request,0,"name"),512)
+    if !decoded.valid { return Failure("Enter an album name of at most 512 bytes") }; name := BuilderFinish(decoded.value)
+    if !Album.NameValid(name) { return Failure("Enter an album name of at most 512 bytes") }
+    content: bool; for byte: name { if byte != 32 { content = true } }; if !content { return Failure("Enter an album name of at most 512 bytes") }
+    decodedRules := ReadStringValue(request,FieldAt(request,0,"filter"),512)
+    if !decodedRules.valid { return Failure("Choose valid imported album rules") }; rules := BuilderFinish(decodedRules.value)
+    for byte: rules { if byte == 0 { return Failure("Choose valid imported album rules") } }
+    content = false; for byte: rules { if byte > 32 { content = true } }
+    if rules.count > 0 && !content { return Failure("Choose valid imported album rules") }
+    predicate: Search.Predicate; Search.Parse(*predicate,rules)
+    if predicate.error != "" { return Failure("Choose valid imported album rules") }
+    if !Execute(database,"BEGIN IMMEDIATE") { return Failure("The library is busy; retry album import") }
+    defer { unused Execute(database,"ROLLBACK") }
+    if SqlitePrepareText(database,"SELECT 1 FROM albums WHERE name=?",-1,*statement,null) != SQLITE_OK { return Failure("Cannot retain the imported album") }
+    status := ifx Bind(statement,1,name) then SqliteStep(statement) else -1; unused SqliteFinalize(statement)
+    existing := status == SQLITE_ROW
+    if status != SQLITE_ROW && status != SQLITE_DONE { return Failure("Cannot retain the imported album") }
+    if !existing {
+        time: Timespec; if GetTime(0,*time) != 0 { return Failure("Cannot read the album import time") }
+        now := cast(float64)time.seconds+cast(float64)time.nanoseconds/1000000000.0
+        if !EnsureAlbum(database,name,now) { return Failure("Cannot retain the imported album") }
+        sql := "UPDATE albums SET description=(SELECT json_extract(data,'$.description') FROM incoming),cover=(SELECT json_extract(data,'$.cover') FROM incoming),pinned=(SELECT json_extract(data,'$.pinned') FROM incoming),archived=(SELECT json_extract(data,'$.archived') FROM incoming),filter=(SELECT json_extract(data,'$.filter') FROM incoming),auto_people=(SELECT json_group_array(value) FROM (SELECT DISTINCT value FROM incoming,json_each(data,'$.auto_people') ORDER BY value)) WHERE name=?"
+        if SqlitePrepareText(database,sql,-1,*statement,null) != SQLITE_OK { return Failure("Cannot store the imported album definition") }
+        valid = Bind(statement,1,name) && SqliteStep(statement) == SQLITE_DONE; unused SqliteFinalize(statement)
+        if !valid { return Failure("Cannot store the imported album definition") }
+    }
+    if !Execute(database,"COMMIT") { return Failure("Cannot finish the album import") }
+    unused Send(ifx existing then "{\"saved\":1,\"added\":0}\n" else "{\"saved\":1,\"added\":1}\n"); return 0
+}
 main :: (argc: s32, argv: **u8) -> s32 {
     if argc != 2 { return Failure("Supply the private library database") }
     storage := Allocate(16777217); if storage == null { return Failure("Import metadata exceeds available memory") }
@@ -147,6 +183,12 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if SqlitePrepareText(database,"SELECT json_valid(data) FROM incoming",-1,*statement,null) != SQLITE_OK { return Failure("Choose valid import metadata") }
     valid = SqliteStep(statement) == SQLITE_ROW && SqliteColumnInt(statement,0) == 1; unused SqliteFinalize(statement)
     if !valid { return Failure("Choose valid import metadata") }
+    if SqlitePrepareText(database,"SELECT json_extract(data,'$.operation') FROM incoming",-1,*statement,null) != SQLITE_OK { return Failure("Choose valid import metadata") }
+    status := SqliteStep(statement)
+    operation := ifx status == SQLITE_ROW then TextFromCString(SqliteColumnText(statement,0)) else "invalid"
+    albumImport := operation == "album"; valid = operation == "" || albumImport; unused SqliteFinalize(statement)
+    if !valid { return Failure("Choose a valid import operation") }
+    if albumImport { return ImportAlbum(database,request) }
     // Typed integer access preserves the source's nanosecond stamp exactly.
     validation := "SELECT json_type(data)='object' AND json_type(data,'$.metadata')='object' AND json_type(data,'$.albums')='array' AND json_type(data,'$.id')='text' AND length(json_extract(data,'$.id'))=64 AND json_extract(data,'$.id') NOT GLOB '*[^0-9a-f]*' AND typeof(json_extract(data,'$.size'))='integer' AND json_extract(data,'$.size')>=0 AND typeof(json_extract(data,'$.mtime'))='integer' AND typeof(json_extract(data,'$.width'))='integer' AND typeof(json_extract(data,'$.height'))='integer' AND json_extract(data,'$.width')>=0 AND json_extract(data,'$.height')>=0 AND json_type(data,'$.taken') IN ('integer','real') AND json_type(data,'$.path')='text' AND length(json_extract(data,'$.path'))>0 AND json_type(data,'$.stamp')='text' AND json_type(data,'$.name')='text' AND json_type(data,'$.extension')='text' AND json_extract(data,'$.kind') IN ('photo','video') AND json_type(data,'$.caption')='text' AND json_type(data,'$.tags')='text' AND json_type(data,'$.favorite') IN ('true','false') AND json_type(data,'$.archived') IN ('true','false') AND json_type(data,'$.correct_date') IN ('true','false') AND json_type(data,'$.metadata.photosPeople') IS NULL AND json_type(data,'$.metadata.photosAutoAlbums') IS NULL AND NOT EXISTS(SELECT 1 FROM json_each(data,'$.albums') WHERE type<>'text' OR length(value)=0) FROM incoming"
     if SqlitePrepareText(database,validation,-1,*statement,null) != SQLITE_OK { return Failure("Choose valid import metadata") }
@@ -158,7 +200,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
     now := cast(float64)time.seconds+cast(float64)time.nanoseconds/1000000000.0
     // Keep the snapshot text alive until its fields have been collected.
     if SqlitePrepareText(database,"SELECT metadata,edits FROM photos WHERE id=(SELECT json_extract(data,'$.id') FROM incoming)",-1,*statement,null) != SQLITE_OK { return Failure("Cannot load existing metadata") }
-    status := SqliteStep(statement); existing := status == SQLITE_ROW
+    status = SqliteStep(statement); existing := status == SQLITE_ROW
     if existing {
         old := TextFromCString(SqliteColumnText(statement,0)); edits := TextFromCString(SqliteColumnText(statement,1))
         valid = Collect(database,old) && Collect(database,Field(request,"metadata"))
