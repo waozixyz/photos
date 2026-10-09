@@ -10,6 +10,7 @@ import urllib.error
 from .library import Library, LibraryError, atomic, packed
 from .sync import Client
 from . import vault
+from . import guest
 
 
 def configuration():
@@ -22,7 +23,8 @@ def configuration():
 def process(request, config):
     library = Library(config['root'])
     try:
-        return library_request(library, request, config)
+        with guest.guard:
+            return library_request(library, request, config)
     finally:
         library.db.close()
 
@@ -36,6 +38,7 @@ def ui_query(library, request):
                            person=request.get('person',''), people_mode=request.get('people_mode','active'),
                            lane_year=request.get('lane_year',0), jump_day=request.get('jump_day',''))
     result.update(vault.state(library, request.get('vault_token', '')))
+    result.update(guest_active=0, guest_configured=int(vault.configured(library)))
     # A native page or slow catalog query may outlast the unlock. Recheck
     # before returning any Hidden paths to the caller.
     if not result['vault_unlocked']:
@@ -69,7 +72,15 @@ def ui_query(library, request):
     return result
 
 
-def library_request(library, request, config):
+def library_request(library, request, config, guest_bypass=False):
+    if not guest_bypass:
+        response = guest.route(library, request, config)
+        if response is not None:
+            if response.get('guest_exit_authorized') == 1:
+                result = ui_query(library, dict(view='photos', gallery_format=request.get('gallery_format')))
+                result.update(response, status='Guest view ended')
+                return result
+            return response
     action = request.get('action', 'query')
     if action in {'collage_begin', 'collage_check', 'collage_save'}:
         from . import collage

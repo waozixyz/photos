@@ -68,6 +68,15 @@ main :: (argc: s32, argv: **u8) -> s32 {
     // A saved search never turns into a Hidden or Trash album, even when
     // callers combine it with another gallery view or an unlocked vault.
     if filter[0] != 0 { Search.AddSQL(*query," AND trashed=0 AND hidden=0") }
+    if FieldAt(json,0,"photo_id") >= 0 {
+        identity: [65]u8
+        if ReadStringText(json,FieldAt(json,0,"photo_id"),identity[:]) != 64 { return Failure("Choose a valid gallery photo") }
+        for i: 0..63 {
+            byte := identity[i]
+            if !((byte >= 48 && byte <= 57) || (byte >= 97 && byte <= 102)) { return Failure("Choose a valid gallery photo") }
+        }
+        Search.AddSQL(*query," AND id=?"); Search.Bind(*query,TextUntilNul(identity[:]))
+    }
     // Motion originals remain separate encrypted records, but only their still
     // is a gallery item. Incomplete or mismatched privacy updates fail closed.
     Search.AddSQL(*query, " AND coalesce(json_extract(metadata,'$.photosLive.photo'),'')='' AND (json_extract(metadata,'$.photosLive.video') IS NULL OR EXISTS(SELECT 1 FROM photos motion WHERE motion.id=json_extract(photos.metadata,'$.photosLive.video') AND motion.kind='video' AND json_extract(motion.metadata,'$.photosLive.photo')=photos.id AND motion.hidden=photos.hidden AND (motion.trashed>0)=(photos.trashed>0)))")

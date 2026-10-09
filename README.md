@@ -289,6 +289,25 @@ Source rescans recheck older imports once with the new reader. Complete original
 including camera trailers, remain in backup and exports. Native phone Live Photo
 capture remains unfinished.
 
+Guest view lets you hand over the desktop app with only an opened photo or video,
+a selection of up to 1000 items, or the current album visible. Choose Guest view
+from the gallery or viewer footer. Browse the permitted items, zoom photos and
+play videos or Live Photo motion; library navigation, information, settings,
+editing, export and sharing actions are unavailable. Hidden and Trash are always
+excluded. Later privacy or album membership changes revoke access, and an
+unavailable local service clears the displayed items within a short access lease.
+The scope survives app and service restarts. Smart albums retain the search rule
+chosen when Guest view starts; renames follow the album's identity.
+Create a local Hidden password first, then use Leave Guest view and that password
+to return to the library. The password stays masked and does not appear in app
+inspection state, process arguments or logs. Entering Guest view locks all local
+Hidden sessions; leaving does not unlock Hidden or change originals or backup keys.
+This implements local desktop handover. Ente's mobile
+[Guest view](https://www.ente.photos/help/photos/features/utilities/guest-view)
+uses device authentication; system authentication and phone gestures remain
+unfinished here. Guest view is an app access restriction; local originals retain
+their existing storage format.
+
 This version is a local photo library with sync, not complete Ente feature parity.
 
 Create collage combines two through six visible photos or Live Photo stills.

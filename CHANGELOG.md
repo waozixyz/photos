@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.36
+
+- Hand over Photos in Guest view with only a chosen photo, selection or album available, without exposing the rest of your library or editing actions.
+- Require your local Hidden password to leave Guest view, retain the restriction after restarting the app, and keep Hidden locked when you return.
+- Revoke guest viewing when an item becomes private or leaves its album, and clear previews when the local service is unavailable while preserving originals and backup keys.
+
 ## 0.1.35
 
 - Import private face groups, names, birthdays, corrections and manual people tags together with photos, albums and source records.

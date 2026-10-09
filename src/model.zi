@@ -131,6 +131,10 @@ vault_token: [65]u8;
 vault_first: [1025]u8;
 vault_configured: bool;
 vault_unlocked: bool;
+guest_active: bool;
+guest_configured: bool;
+guest_poll: s64;
+guest_valid_until: s64;
 edit_value: [8193]u8;
 detail_id: [65]u8;
 detail_caption: [8193]u8;
@@ -347,9 +351,19 @@ Tick :: () {
     if !initialized { initialized = true; Request() }
     if Transport.Poll() {
         loading = false; busy = false
-        if Transport.error != "" { Set(message[:], Transport.error); if slide_active { StopSlides() }; if editor == "collage" { RevokeCollage() }; if editor == "text" || editor == "qr" { CancelEditor() }; if playback_id[0] != 0 { StopPlayback() }; if appending { more_due = ticks + 300; appending = false }; return }
+        if Transport.error != "" { if guest_active { ClearGuestDisplay() }; Set(message[:], Transport.error); if slide_active { StopSlides() }; if editor == "collage" { RevokeCollage() }; if editor == "text" || editor == "qr" { CancelEditor() }; if playback_id[0] != 0 { StopPlayback() }; if appending { more_due = ticks + 300; appending = false }; return }
         json := Transport.Value()
         ReadHeader(json)
+        if Lookup(json,0,"guest_configured") >= 0 { guest_configured = Number(json,0,"guest_configured") > 0 }
+        if guest_active && (Lookup(json,0,"guest_active") < 0 || (Number(json,0,"guest_active") == 0 && Number(json,0,"guest_exit_authorized") != 1)) {
+            ClearGuestDisplay(); Set(message[:],"Guest view is unavailable; authenticate to leave"); return
+        }
+        if Lookup(json,0,"guest_active") >= 0 {
+            fresh_guest := Number(json,0,"guest_active") > 0
+            if fresh_guest != guest_active { ResetGuest(); guest_active = fresh_guest }
+            if guest_active { now = Clock.Milliseconds(); guest_poll = now+500; guest_valid_until = now+2500 }
+        }
+        if guest_active && Lookup(json,0,"error") >= 0 { ClearGuestDisplay() }
         if collage_request {
             collage_request = false
             Decode(json,0,"error",message[:]); if editor != "collage" { return }
@@ -524,6 +538,14 @@ Tick :: () {
     if !loading && queued_request {
         queued_request = false; SendRequest(TextUntilNul(queued_action[:]), TextUntilNul(queued_id[:]), TextUntilNul(queued_value[:])); return
     }
+    if guest_active {
+        now = Clock.Milliseconds()
+        if editor == "guest_exit" { return }
+        if guest_valid_until > 0 && now >= guest_valid_until { ClearGuestDisplay(); guest_valid_until = 0; Set(message[:],"Guest view is unavailable; authenticate to leave") }
+        if !loading && playback_id[0] != 0 && ticks >= playback_poll { playback_poll = ticks+30; Request("playback_check",TextUntilNul(playback_id[:])); return }
+        if !loading && now >= guest_poll { guest_poll = now+500; Request(); return }
+        return
+    }
     if slide_active {
         if !loading && !slide_paused && slide_id[0] != 0 && now >= slide_due { MoveSlide(1); return }
         if !loading && slide_id[0] != 0 && now >= slide_poll { slide_poll = now+500; Request("slide_check",TextUntilNul(slide_id[:])); return }
@@ -658,6 +680,7 @@ Apply :: (action: string, value: string = "") {
 }
 SaveEditor :: () {
     if loading { return }
+    if editor == "guest_exit" { Request("guest_exit","",TextUntilNul(edit_value[:])); Wipe(edit_value[:]); cursor = 0; anchor = 0; return }
     if editor == "place_name" {
         if edit_value[0] == 0 || TextUntilNul(edit_value[:]).count > 512 { Set(message[:], "Choose a place name of at most 512 bytes"); return }
         Set(place_name[:], TextUntilNul(edit_value[:]))
@@ -695,8 +718,37 @@ Wipe :: (bytes: []u8) { for i: 0..cast(s32)bytes.count - 1 { bytes[i] = 0 } }
 PlaybackState :: () -> s32 { return Playback.State() }
 PlaybackPosition :: () -> s64 { return Playback.Position() }
 PlaybackDuration :: () -> s64 { return Playback.Duration() }
-Secret :: () -> bool { return StartsWithFoldASCII(editor, "vault_") }
+Secret :: () -> bool { return StartsWithFoldASCII(editor, "vault_") || editor == "guest_exit" }
 CancelEditor :: () { TextDetection.Clear(); QRDetection.Clear(); Collage.Clear(); editor = ""; focused = false; Wipe(edit_value[:]); Wipe(vault_first[:]) }
+ClearGuestDisplay :: () {
+    StopPlayback(); StopSlides(); Viewer.Reset(); TextDetection.Clear(); QRDetection.Clear(); Collage.Clear()
+    VecClear(photos); VecClear(catalog); count = 0; album_count = 0; matches = 0; total = 0; pending = 0; selected = -1
+    Wipe(detail_id[:]); Wipe(detail_caption[:]); Wipe(detail_tags[:]); Wipe(detail_people[:]); Wipe(detail_albums[:]); Wipe(detail_location[:]); Wipe(detail_taken[:]); detail_size = 0
+    Wipe(edit_preview[:]); Wipe(edit_session[:]); Wipe(video_job[:]); Wipe(album_description[:]); Wipe(album_filter[:]); Wipe(person_name[:]); Wipe(person_birth[:])
+}
+ResetGuest :: () {
+    ClearGuestDisplay(); ClearSelection(); CancelEditor(); Wipe(vault_token[:]); Wipe(vault_first[:]); vault_unlocked = false
+    Map.Reset(); Wipe(memory_date[:]); lane_count = 0; lane_year = 0; people_count = 0
+    Wipe(search[:]); Wipe(input[:]); Wipe(album[:]); Wipe(person[:]); Wipe(summary[:]); Wipe(export_status[:]); Wipe(semantic_status[:]); Wipe(people_status[:])
+    queued_request = false; queued_view = -1; queued_action[0] = 0; queued_id[0] = 0; Wipe(queued_value[:]); appending = false
+    collage_request = false; slide_request = false; text_request = false; qr_request = false; playback_request = false
+    offset = 0; feed_base = 0; scroll = 0; view = "photos"; search_focused = false
+}
+BeginGuest :: () {
+    if loading || view == "hidden" || view == "trash" { return }
+    id := ifx selected >= 0 && selected < count then TextUntilNul(photos[selected].id[:]) else ""
+    value := ifx id == "" && picked_count == 0 && album[0] != 0 then "album" else ""
+    StopPlayback(); StopSlides(); CancelEditor(); Request("guest_start",id,value)
+}
+BeginGuestExit :: () {
+    ClearGuestDisplay(); guest_valid_until = 0
+    BeginEdit("guest_exit","Leave Guest view","","Enter your local Hidden password")
+}
+CancelGuestExit :: () { CancelEditor(); ClearGuestDisplay(); guest_poll = 0; Request() }
+GuestPage :: (direction: s32) {
+    if loading { return }; next := offset+direction*60; if next < 0 || next >= matches { return }
+    StopPlayback(); Viewer.Reset(); selected = -1; offset = next; scroll = 0; Request()
+}
 RevokeCollage :: () { CancelEditor(); ClearSelection(); VecClear(photos); count = 0; matches = 0; selected = -1; Request() }
 CollageReady :: () -> bool {
     if loading || picked_count < 2 || picked_count > 6 { return false }

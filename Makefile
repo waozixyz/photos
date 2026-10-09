@@ -1,4 +1,9 @@
 .DEFAULT_GOAL := build
+.PHONY: guest-window-test guest-portable-test
+guest-window-test: build
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/guest_window.py
+guest-portable-test: bundle
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_GUEST_PORTABLE=1 $(PYTHON) tests/guest_window.py
 .PHONY: original-importer metadata-importer folder-importer metadata-reader
 metadata-reader:
 	LDLIBS='-l:libsqlite3.so.0 -l:libheif.so.1 -lgdk_pixbuf-2.0 -lglib-2.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry read_metadata:main --exe -o build/read-metadata src/read_metadata.zi
