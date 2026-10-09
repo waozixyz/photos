@@ -519,6 +519,16 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
     background: BoxProps; background.key = 1; background.bounds = viewport; background.fill = BackgroundColor(); Box(session, background)
     key := KeyboardTake(session); modifiers := KeyboardModifiers(session); typed_bytes: [256]u8; typed := TypedTextTake(session, typed_bytes[:])
     if Model.guest_active { GuestView(session,viewport,key,modifiers,typed); return 0 }
+    if Model.RecoveryResetEditor() {
+        x := viewport.x+24.0; y := viewport.y+32.0; width := viewport.width-48.0
+        Label(session,655,Model.editor_title,.{x,y,width,40.0},28)
+        Label(session,656,Model.editor_hint,.{x,y+54.0,width,52.0},16)
+        committed := Field(session,.{x,y+114.0,width,44.0},false,key,modifiers,typed)
+        if Action(session,657,ifx Model.editor == "recovery_reset_confirm" then "Recover password" else "Continue",.{x,y+182.0,180.0,40.0},Model.AppLockReady()) || (committed && Model.AppLockReady()) { Model.SaveEditor() }
+        if Action(session,658,"Cancel",.{x+196.0,y+182.0,140.0,40.0},Model.AppLockReady()) || key == Input.KeyEscape { Model.CancelRecoveryReset() }
+        Label(session,659,TextUntilNul(Model.message[:]),.{x,y+238.0,width,80.0},15)
+        return 0
+    }
     if Model.app_locked {
         x := viewport.x+24.0; y := viewport.y+32.0; width := viewport.width-48.0
         Label(session,620,"Photos is locked",.{x,y,width,40.0},28)
@@ -526,6 +536,8 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         committed := Field(session,.{x,y+104.0,width,44.0},false,key,modifiers,typed)
         if Action(session,622,"Unlock Photos",.{x,y+174.0,168.0,40.0},!Model.loading) || (committed && !Model.loading) { Model.SaveEditor() }
         Label(session,623,TextUntilNul(Model.message[:]),.{x,y+234.0,width,56.0},15)
+        if Action(session,660,"Recover app password",.{x,y+308.0,216.0,40.0},!Model.loading) { Model.BeginRecoveryReset(1) }
+        if Action(session,661,"Recover Hidden password",.{x+232.0,y+308.0,236.0,40.0},!Model.loading) { Model.BeginRecoveryReset(2) }
         return 0
     }
     if StartsWithFoldASCII(Model.editor,"app_lock_") {
@@ -686,7 +698,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         Label(session, 91, Model.editor_title, .{x + 12.0, body.y + 12.0, width - 24.0, 34.0}, 22)
         committed := Field(session, .{x + 12.0, body.y + 64.0, width - 24.0, 44.0}, false, key, modifiers, typed)
         Label(session, 92, Model.editor_hint, .{x + 12.0, body.y + 124.0, width - 24.0, 26.0}, 13)
-        if Action(session, 93, "Save", .{x + 12.0, body.y + 172.0, 94.0, 38.0}, !Model.loading) || (committed && !Model.loading) {
+        if Action(session, 93, "Save", .{x + 12.0, body.y + 172.0, 94.0, 38.0}, Model.AppLockReady()) || (committed && Model.AppLockReady()) {
             Model.SaveEditor()
         }
         if Action(session, 94, "Cancel", .{x + 118.0, body.y + 172.0, 94.0, 38.0}, !Model.loading) { if Model.editor == "video_trim" { Model.editor = "video"; Model.focused = false } else { Model.CancelEditor() } }
@@ -715,6 +727,8 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         Label(session,652,"Backup key recovery",.{x+18.0,body.y+388.0,width-36.0,30.0},22)
         if Action(session,653,"Save recovery file",.{x+18.0,body.y+430.0,172.0,38.0},!Model.loading) { Model.BeginEdit("recovery_save_path","Save recovery file","","Full path to a new file outside the library; unlock Hidden first if configured") }
         if Action(session,654,"Restore backup keys",.{x+206.0,body.y+430.0,182.0,38.0},!Model.loading) { Model.BeginEdit("recovery_restore_path","Restore backup keys","","Full path to your recovery file; restore into a new empty library with backup stopped") }
+        if Action(session,662,"Recover app password",.{x+404.0,body.y+430.0,192.0,38.0},!Model.loading) { Model.BeginRecoveryReset(1) }
+        if Action(session,663,"Recover Hidden password",.{x+612.0,body.y+430.0,222.0,38.0},!Model.loading) { Model.BeginRecoveryReset(2) }
         Label(session,650,"Gallery selection",.{x+18.0,body.y+482.0,width-36.0,30.0},22)
         if Action(session,651,ifx Model.swipe_selection_enabled then "Swipe to select: on" else "Swipe to select: off",.{x+18.0,body.y+520.0,210.0,38.0},!Model.loading) {
             Model.Apply("swipe_selection",ifx Model.swipe_selection_enabled then "off" else "on")

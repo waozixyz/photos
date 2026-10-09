@@ -131,6 +131,8 @@ memory_date: [11]u8;
 vault_token: [65]u8;
 vault_first: [1025]u8;
 recovery_path: [4097]u8;
+recovery_secret: [1025]u8;
+recovery_kind: s32;
 vault_configured: bool;
 vault_unlocked: bool;
 guest_active: bool;
@@ -395,7 +397,7 @@ Tick :: (window_focused: bool) {
         if Transport.error != "" { if guest_active { ClearGuestDisplay() } else if app_lock_enabled { EnterAppLock() }; Set(message[:], Transport.error); if slide_active { StopSlides() }; if editor == "collage" { RevokeCollage() }; if editor == "text" || editor == "qr" { CancelEditor() }; if playback_id[0] != 0 { StopPlayback() }; if appending { more_due = ticks + 300; appending = false }; return }
         json := Transport.Value()
         ReadHeader(json)
-        if Lookup(json,0,"app_lock_method") >= 0 { app_lock_method = Number(json,0,"app_lock_method"); if app_locked { editor_hint = AppLockHint() } }
+        if Lookup(json,0,"app_lock_method") >= 0 { app_lock_method = Number(json,0,"app_lock_method"); if app_locked && !RecoveryResetEditor() { editor_hint = AppLockHint() } }
         if Lookup(json,0,"app_lock_delay") >= 0 { app_lock_delay = Number(json,0,"app_lock_delay") }
         if Lookup(json,0,"swipe_selection_enabled") >= 0 { swipe_selection_enabled = Number(json,0,"swipe_selection_enabled") > 0 }
         if Lookup(json,0,"guest_configured") >= 0 { guest_configured = Number(json,0,"guest_configured") > 0 }
@@ -410,6 +412,18 @@ Tick :: (window_focused: bool) {
         if guest_active && Lookup(json,0,"error") >= 0 { ClearGuestDisplay() }
         if guest_active && Lookup(json,0,"app_lock_enabled") >= 0 { app_lock_enabled = Number(json,0,"app_lock_enabled") > 0 }
         if !guest_active {
+            if RecoveryResetEditor() && Lookup(json,0,"recovery_reset") >= 0 {
+                if Number(json,0,"recovery_reset") == 1 {
+                    CancelEditor(); Wipe(vault_token[:]); vault_unlocked = false
+                    EnterAppLock()
+                    if !app_lock_enabled { app_locked = false; editor = ""; Request() }
+                    else { BeginEdit("app_lock_unlock","Unlock Photos","",AppLockHint()) }
+                    Decode(json,0,"status",message[:]); return
+                }
+                Wipe(recovery_secret[:]); Wipe(vault_first[:]); Wipe(edit_value[:])
+                BeginEdit("recovery_reset_proof","Recovery file password","","Enter the separate password for this recovery file")
+                Decode(json,0,"error",message[:]); return
+            }
             // A query or heartbeat submitted before the access lease expired
             // cannot bring the private gallery back. Only a new auth response
             // or authenticated Guest exit may reopen it.
@@ -460,7 +474,7 @@ Tick :: (window_focused: bool) {
         if view == "hidden" && !vault_unlocked {
             TextDetection.Clear()
             StopPlayback(); selected = -1; VecClear(photos); count = 0; ClearSelection(); appending = false; Wipe(edit_preview[:])
-            if !Secret() { CancelEditor() }
+            if !Secret() && !RecoveryResetEditor() { CancelEditor() }
         }
         if text_request {
             text_request = false
@@ -538,7 +552,7 @@ Tick :: (window_focused: bool) {
             }
         }
         if Lookup(json,0,"jump_offset") >= 0 { offset = Number(json,0,"jump_offset"); scroll = 0; selected = -1; appending = false; date_jumped = true }
-        if mutation { ClearSelection(); editor = ""; Wipe(recovery_path[:]) }
+        if mutation { ClearSelection(); editor = ""; Wipe(recovery_path[:]); Wipe(recovery_secret[:]); Wipe(vault_first[:]) }
         initial := Lookup(json,0,"auto_selection")
         if initial >= 0 {
             ClearSelection(); date_jumped = false; auto_remove = false; at := Space(json,initial+1)
@@ -648,7 +662,7 @@ Navigate :: (target: string) {
         vault_unlocked = false; selected = -1; ClearSelection(); editor = ""; Wipe(edit_value[:]); Wipe(vault_first[:]); Wipe(edit_preview[:])
         Request("vault_lock"); Wipe(vault_token[:]); return
     }
-    Wipe(vault_first[:]); if Secret() { Wipe(edit_value[:]) }
+    Wipe(vault_first[:]); Wipe(recovery_secret[:]); Wipe(recovery_path[:]); if Secret() { Wipe(edit_value[:]) }
     if target == "map" { Map.Reset() }
     date_jumped = false; lane_year = 0
     ClearSelection(); editor = ""; view = target; appending = false; feed_base = 0; album[0] = 0; person[0] = 0; selected = -1; offset = 0; scroll = 0; Request()
@@ -790,6 +804,36 @@ Apply :: (action: string, value: string = "") {
 }
 SaveEditor :: () {
     if loading && !app_lock_check_pending { return }
+    if editor == "recovery_reset_path" {
+        size := TextUntilNul(edit_value[:]).count
+        if size < 1 || size > 4096 { Set(message[:],"Choose a full path for your recovery file"); return }
+        Set(recovery_path[:],TextUntilNul(edit_value[:]))
+        Wipe(edit_value[:]); message[0] = 0
+        BeginEdit("recovery_reset_proof","Recovery file password","","Enter the separate password for this recovery file"); return
+    }
+    if editor == "recovery_reset_proof" || editor == "recovery_reset_password" {
+        proof := editor == "recovery_reset_proof"; minimum := ifx proof then 12 else 8
+        chars: s32; i: s32
+        while i < 1024 && edit_value[i] != 0 { if (edit_value[i] & 192) != 128 { chars += 1 }; i += 1 }
+        if chars < minimum || i >= 1024 { Set(message[:],ifx proof then "Use the recovery file password of at least 12 characters" else "Use at least 8 characters for your new local password"); return }
+        if proof {
+            Set(recovery_secret[:],TextUntilNul(edit_value[:]))
+            Wipe(edit_value[:]); message[0] = 0
+            BeginEdit("recovery_reset_password","New local password","",ifx recovery_kind == 1 then "Choose a new app password; Hidden keeps its own password" else "Choose a new Hidden password; photos and backup keys stay unchanged")
+        } else {
+            Set(vault_first[:],TextUntilNul(edit_value[:]))
+            Wipe(edit_value[:]); message[0] = 0
+            BeginEdit("recovery_reset_confirm","Confirm new local password","","Type the same new password again")
+        }
+        return
+    }
+    if editor == "recovery_reset_confirm" {
+        if TextUntilNul(edit_value[:]) != TextUntilNul(vault_first[:]) { Set(message[:],"Passwords do not match"); return }
+        out: Vec(u8); BuilderPrint(*out,"["); Quoted(*out,TextUntilNul(recovery_path[:])); BuilderPrint(*out,",")
+        Quoted(*out,TextUntilNul(recovery_secret[:])); BuilderPrint(*out,","); Quoted(*out,TextUntilNul(edit_value[:])); BuilderPrint(*out,"]")
+        value := BuilderFinish(out); Request(ifx recovery_kind == 1 then "recovery_reset_app" else "recovery_reset_hidden","",value); Release(value)
+        Wipe(edit_value[:]); Wipe(vault_first[:]); Wipe(recovery_secret[:]); cursor = 0; anchor = 0; return
+    }
     if editor == "recovery_save_path" || editor == "recovery_restore_path" {
         size := TextUntilNul(edit_value[:]).count
         if size < 1 || size > 4096 { Set(message[:],"Choose a full path for a separate recovery file"); return }
@@ -871,8 +915,18 @@ Wipe :: (bytes: []u8) { for i: 0..cast(s32)bytes.count - 1 { bytes[i] = 0 } }
 PlaybackState :: () -> s32 { return Playback.State() }
 PlaybackPosition :: () -> s64 { return Playback.Position() }
 PlaybackDuration :: () -> s64 { return Playback.Duration() }
-Secret :: () -> bool { return StartsWithFoldASCII(editor, "vault_") || StartsWithFoldASCII(editor,"app_lock_") || editor == "guest_exit" || editor == "recovery_password" || editor == "recovery_confirm" || editor == "recovery_restore_password" }
-CancelEditor :: () { TextDetection.Clear(); QRDetection.Clear(); Collage.Clear(); editor = ""; focused = false; Wipe(edit_value[:]); Wipe(vault_first[:]); Wipe(recovery_path[:]) }
+Secret :: () -> bool { return StartsWithFoldASCII(editor, "vault_") || StartsWithFoldASCII(editor,"app_lock_") || (RecoveryResetEditor() && editor != "recovery_reset_path") || editor == "guest_exit" || editor == "recovery_password" || editor == "recovery_confirm" || editor == "recovery_restore_password" }
+CancelEditor :: () { TextDetection.Clear(); QRDetection.Clear(); Collage.Clear(); editor = ""; focused = false; Wipe(edit_value[:]); Wipe(vault_first[:]); Wipe(recovery_path[:]); Wipe(recovery_secret[:]) }
+RecoveryResetEditor :: () -> bool { return StartsWithFoldASCII(editor,"recovery_reset_") }
+BeginRecoveryReset :: (kind: s32) {
+    if loading && !app_lock_check_pending { return }
+    CancelEditor(); recovery_kind = kind; message[0] = 0
+    BeginEdit("recovery_reset_path",ifx kind == 1 then "Recover app password" else "Recover Hidden password","","Full path to your recovery file; you will need its separate password")
+}
+CancelRecoveryReset :: () {
+    CancelEditor()
+    if app_locked { BeginEdit("app_lock_unlock","Unlock Photos","",AppLockHint()) }
+}
 ClearGuestDisplay :: () {
     StopPlayback(); StopSlides(); Viewer.Reset(); TextDetection.Clear(); QRDetection.Clear(); Collage.Clear()
     VecClear(photos); VecClear(catalog); count = 0; album_count = 0; matches = 0; total = 0; pending = 0; selected = -1

@@ -34,6 +34,10 @@ def process(request, config):
                     token = app_lock.grant(library)
                     result.update(app_lock.state(library, token), app_lock_token=token)
                 return result
+            from . import recovery
+            result = recovery.route(library, request, config)
+            if result is not None:
+                return result
             result = app_lock.route(library, request)
             if result is not None:
                 if result.get('app_lock_authorized') == 1 or (result.get('app_lock_changed') == 1 and not result['app_locked']):

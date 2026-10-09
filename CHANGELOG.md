@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.50
+
+- Recover a forgotten app PIN or password using your encrypted recovery file and its separate password, then unlock with a confirmed new app password.
+- Recover the local Hidden password without changing an independent app password, originals or encrypted backup keys.
+- Keep recovered libraries locked, end old viewing sessions and refuse recovery files from another backup account or ThinkPad node.
+
 ## 0.1.49
 
 - Save an encrypted recovery file for your private backup keys, protected by a separate password confirmed before saving.

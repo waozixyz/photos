@@ -6,12 +6,13 @@ import os
 from pathlib import Path
 import re
 import secrets
+import stat
 import struct
 import subprocess
 import tempfile
 
-from .library import LibraryError, packed
-from . import account_sign, app_lock, vault
+from .library import LibraryError, packed, atomic
+from . import account_sign, app_lock, vault, access_sessions, guest
 
 MAGIC = b'PHOTOS-RECOVERY\x01'
 LIMIT = 65536
@@ -124,15 +125,20 @@ def save(library, config, request, destination, password):
     return str(path)
 
 
-def restore(library, config, request, source, password):
-    password_bytes(password)
-    # Restoring keys is an initial setup operation; an existing library must
-    # retain its identity. Local password reset is a separate recovery flow.
-    permitted(library, request)
+def read(library, config, source, password):
+    """Verify the encrypted proof without changing identity or granting access."""
     path = file_path(source, library)
-    if not path.is_file() or path.stat().st_size > len(MAGIC)+LIMIT+56:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, 'rb') as file:
+            info = os.fstat(file.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > len(MAGIC)+LIMIT+56:
+                raise LibraryError('Choose a valid Photos recovery file')
+            data = file.read(len(MAGIC)+LIMIT+57)
+    except OSError:
+        raise LibraryError('Choose a valid Photos recovery file') from None
+    if len(data) > len(MAGIC)+LIMIT+56:
         raise LibraryError('Choose a valid Photos recovery file')
-    data = path.read_bytes()
     if not data.startswith(MAGIC):
         raise LibraryError('Choose a valid Photos recovery file')
     try:
@@ -144,8 +150,16 @@ def restore(library, config, request, source, password):
             raise ValueError()
     except LibraryError:
         raise
-    except (ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError, RecursionError):
         raise LibraryError('Recovery identity or ThinkPad pin is invalid; existing keys were preserved') from None
+    return value
+
+
+def restore(library, config, request, source, password):
+    password_bytes(password)
+    # Restoring keys is initial setup; credential reset is separately scoped.
+    permitted(library, request)
+    value = read(library, config, source, password)
     private = library.root/'private'; private.mkdir(exist_ok=True, mode=0o700)
     lock = (library.root/'.worker.lock').open('a')
     try:
@@ -175,3 +189,74 @@ def restore(library, config, request, source, password):
     finally:
         lock.close()
     return 'Backup keys restored; reconnect to the pinned ThinkPad to restore your photos'
+
+
+def reset(library, config, source, password, replacement, kind):
+    """Replace one local verifier only after proof of this exact backup identity."""
+    if kind not in {'app', 'hidden'}:
+        raise LibraryError('Choose App lock or Hidden recovery')
+    vault.password_bytes(replacement)
+    scope = access_sessions.APP if kind == 'app' else access_sessions.HIDDEN
+    with guest.guard:
+        if guest.scope(library) is not None:
+            raise LibraryError('Leave Guest view before recovering local credentials')
+        access_sessions.check_attempts(library, scope)
+        try:
+            proof = read(library, config, source, password)
+            marker = library.root/'private/identity.json'
+            if marker.is_symlink() or not marker.is_file() or marker.stat().st_size > LIMIT:
+                raise LibraryError('Existing backup keys are unavailable; no keys were replaced')
+            before = marker.read_bytes()
+            if json.loads(before) != proof['identity']:
+                raise LibraryError('Recovery file belongs to different backup keys; existing keys were preserved')
+            private = marker.parent
+            target = app_lock.path(library) if kind == 'app' else private/'hidden-password.json'
+            lock_path = private/('.app-lock.lock' if kind == 'app' else '.hidden-password.lock')
+            with app_lock.credential_lock(lock_path):
+                if not os.path.lexists(target):
+                    raise LibraryError('The selected local lock is not configured')
+                if target.is_symlink() or not target.is_file() or target.stat().st_size > 1024:
+                    raise LibraryError('Local password settings cannot be replaced safely')
+                old = target.read_bytes()
+                config_value = app_lock.settings(library) if kind == 'app' else None
+                if kind == 'app' and not config_value['enabled']:
+                    raise LibraryError('App lock is not enabled')
+                verifier = vault.hash_password(replacement)
+                with vault.guard:
+                    if (guest.scope(library) is not None or marker.is_symlink() or marker.read_bytes() != before
+                            or target.is_symlink() or target.read_bytes() != old):
+                        raise LibraryError('Credentials or backup identity changed; try recovery again')
+                    value = (dict(version=3, enabled=True, method='password', verifier=verifier,
+                                  auto_lock=config_value['auto_lock']) if kind == 'app' else dict(verifier=verifier))
+                    atomic(target, packed(value).encode())
+                    # Proof never returns a session. Every old viewing lease
+                    # ends, including app locks that use the Hidden password.
+                    app_lock.revoke(library)
+                    vault.revoke_all(library)
+                    access_sessions.clear_attempts(library, scope)
+        except LibraryError:
+            access_sessions.failed_attempt(library, scope)
+            raise
+        except (ValueError, UnicodeError, RecursionError):
+            access_sessions.failed_attempt(library, scope)
+            raise LibraryError('Existing backup identity is invalid; keys were preserved') from None
+    return ('App password recovered; unlock Photos with your new password' if kind == 'app' else
+            'Hidden password recovered; unlock again with your new password')
+
+
+def route(library, request, config):
+    action = request.get('action')
+    if action not in {'recovery_reset_app', 'recovery_reset_hidden'}:
+        return None
+    # This route is allowed before app authentication, but provides no gallery,
+    # tokens, private paths, sync operation or key export.
+    try:
+        value = json.loads(request.get('value', ''))
+        if type(value) is not list or len(value) != 3 or not all(isinstance(v, str) for v in value):
+            raise LibraryError('Choose a recovery file, its password and a new local password')
+        message = reset(library, config, *value, 'app' if action == 'recovery_reset_app' else 'hidden')
+        return dict(app_lock.empty(library, message), recovery_reset=1)
+    except LibraryError as error:
+        return dict(app_lock.empty(library), recovery_reset=0, error=str(error))
+    except (ValueError, TypeError, RecursionError):
+        return dict(app_lock.empty(library), recovery_reset=0, error='Choose a recovery file, its password and a new local password')

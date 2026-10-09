@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from nacl import bindings, pwhash
 from PIL import Image
-from photos import recovery, vault, worker, account_sign
+from photos import recovery, vault, worker, account_sign, app_lock, guest, access_sessions
 from photos.library import Library, packed, LibraryError
 from photos.sync import Client
 
@@ -168,6 +168,139 @@ class RecoveryTest(unittest.TestCase):
         encoded = json.dumps(result)
         for secret in [PASSWORD, self.client.identity['private'], self.client.identity['content_key']]:
             self.assertNotIn(secret, encoded)
+
+    def reset_request(self, kind='app', password=PASSWORD, replacement='new local fixture password'):
+        return dict(action='recovery_reset_'+kind, value=json.dumps([str(self.target), password, replacement]))
+
+    def lock_both(self):
+        hidden = vault.authenticate(self.library, 'old Hidden fixture password', setup=True)
+        app_lock.route(self.library, dict(action='app_lock_password', value='old local fixture password'))
+        app = app_lock.route(self.library, dict(action='app_lock_unlock', value='old local fixture password'))['app_lock_token']
+        return hidden, app
+
+    def test_recovery_resets_app_password_from_locked_screen_without_unlocking_hidden(self):
+        self.save(); hidden, app = self.lock_both()
+        before_hidden = (self.library.root/'private/hidden-password.json').read_bytes()
+        result = worker.process(self.reset_request(), self.config)
+        self.assertEqual(result['recovery_reset'], 1); self.assertEqual(result['app_locked'], 1)
+        self.assertFalse(result['photos']); self.assertFalse(result['albums'])
+        self.assertNotIn('app_lock_token', result)
+        self.assertFalse(app_lock.unlocked(self.library, app)); self.assertFalse(vault.unlocked(self.library, hidden))
+        self.assertEqual((self.library.root/'private/hidden-password.json').read_bytes(), before_hidden)
+        self.assertEqual(worker.process(dict(action='app_lock_unlock', value='old local fixture password'), self.config)['app_locked'], 1)
+        accepted = worker.process(dict(action='app_lock_unlock', value='new local fixture password'), self.config)
+        self.assertEqual(accepted['app_lock_authorized'], 1); self.assertFalse(accepted['vault_unlocked'])
+        self.assertEqual(self.client.identity_path.read_bytes(), self.before)
+        self.assertEqual(self.client.device_path.read_bytes(), self.device)
+        for secret in [PASSWORD, 'new local fixture password', self.client.identity['content_key']]:
+            self.assertNotIn(secret, json.dumps(result))
+
+    def test_hidden_reset_keeps_independent_app_password_and_backup_keys(self):
+        self.save(); hidden, app = self.lock_both(); app_before = app_lock.path(self.library).read_bytes()
+        result = worker.process(self.reset_request('hidden'), self.config)
+        self.assertEqual(result['recovery_reset'], 1); self.assertEqual(result['app_locked'], 1)
+        self.assertEqual(app_lock.path(self.library).read_bytes(), app_before)
+        self.assertFalse(app_lock.unlocked(self.library, app)); self.assertFalse(vault.unlocked(self.library, hidden))
+        with self.assertRaisesRegex(LibraryError, 'Incorrect password'):
+            vault.authenticate(self.library, 'old Hidden fixture password')
+        self.assertTrue(vault.unlocked(self.library, vault.authenticate(self.library, 'new local fixture password')))
+        app_lock.authenticate(self.library, 'old local fixture password')
+        self.assertEqual(self.client.identity_path.read_bytes(), self.before)
+
+    def test_recovering_hidden_updates_shared_app_verifier_without_granting_access(self):
+        self.save(); vault.authenticate(self.library, 'old Hidden fixture password', setup=True)
+        app_lock.route(self.library, dict(action='app_lock_enable', value='old Hidden fixture password'))
+        result = worker.process(self.reset_request('hidden'), self.config)
+        self.assertEqual(result['recovery_reset'], 1); self.assertEqual(result['app_locked'], 1)
+        self.assertEqual(app_lock.settings(self.library)['method'], 'hidden')
+        app_lock.authenticate(self.library, 'new local fixture password')
+        self.assertFalse(vault.unlocked(self.library, result.get('vault_token', '')))
+
+    def test_wrong_proof_pin_account_and_changed_content_key_preserve_every_credential(self):
+        self.save(); self.lock_both()
+        paths = [app_lock.path(self.library), self.library.root/'private/hidden-password.json', self.client.identity_path, self.client.device_path]
+        before = [p.read_bytes() for p in paths]
+        for request, config in [(self.reset_request(password='wrong recovery fixture password'), self.config),
+                                (self.reset_request(), {**self.config, 'node_id': 'b'*64})]:
+            result = worker.process(request, config)
+            self.assertEqual(result['recovery_reset'], 0); self.assertEqual([p.read_bytes() for p in paths], before)
+        value = {**self.client.identity, 'content_key': '42'*32}
+        self.client.identity_path.write_text(packed(value))
+        changed = self.client.identity_path.read_bytes()
+        result = worker.process(self.reset_request(), self.config)
+        self.assertEqual(result['recovery_reset'], 0); self.assertIn('different backup keys', result['error'])
+        self.assertEqual(self.client.identity_path.read_bytes(), changed)
+        self.assertEqual([p.read_bytes() for p in paths[:2]], before[:2])
+
+    def test_identity_or_credentials_changing_during_new_password_hashing_abort_reset(self):
+        self.save(); self.lock_both(); path = app_lock.path(self.library); before = path.read_bytes()
+        hash_password = vault.hash_password
+        def changed(password, **kwargs):
+            verifier = hash_password(password, **kwargs)
+            self.client.identity_path.write_text(packed({**self.client.identity, 'content_key': '42'*32}))
+            return verifier
+        with patch.object(vault, 'hash_password', side_effect=changed):
+            result = worker.process(self.reset_request(), self.config)
+        self.assertEqual(result['recovery_reset'], 0); self.assertIn('changed', result['error'])
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_missing_native_helper_or_hash_failure_never_changes_a_local_lock(self):
+        self.save(); self.lock_both(); path = app_lock.path(self.library); before = path.read_bytes()
+        with patch.object(recovery, 'crypt', side_effect=LibraryError('Recovery unavailable')):
+            result = worker.process(self.reset_request(), self.config)
+        self.assertEqual(result['recovery_reset'], 0)
+        with patch.object(vault, 'hash_password', side_effect=LibraryError('Authentication unavailable')):
+            result = worker.process(self.reset_request(), self.config)
+        self.assertEqual(result['recovery_reset'], 0); self.assertEqual(path.read_bytes(), before)
+
+    def test_recovery_cannot_escape_guest_scope_or_replace_unconfigured_locks(self):
+        self.save()
+        result = worker.process(self.reset_request(), self.config)
+        self.assertEqual(result['recovery_reset'], 0); self.assertFalse(app_lock.path(self.library).exists())
+        result = worker.process(self.reset_request('hidden'), self.config)
+        self.assertEqual(result['recovery_reset'], 0); self.assertFalse(vault.configured(self.library))
+        self.lock_both(); before = app_lock.path(self.library).read_bytes()
+        source = self.folder/'Camera'; source.mkdir(); Image.new('RGB', (20, 20), 'blue').save(source/'photo.jpg')
+        self.library.import_folders([source]); photo = self.library.query()['photos'][0]['id']
+        app = app_lock.route(self.library, dict(action='app_lock_unlock', value='old local fixture password'))['app_lock_token']
+        worker.process(dict(action='guest_start', ids=[photo], app_lock_token=app), self.config)
+        result = worker.process(self.reset_request(), self.config)
+        self.assertEqual(result['guest_active'], 1); self.assertNotIn('recovery_reset', result)
+        self.assertEqual(app_lock.path(self.library).read_bytes(), before)
+
+    def test_recovery_failures_share_bounded_attempts_and_never_weaken_password_rules(self):
+        self.save(); self.lock_both(); before = app_lock.path(self.library).read_bytes()
+        for _ in range(5):
+            result = worker.process(self.reset_request(password='wrong recovery fixture password'), self.config)
+            self.assertEqual(result['recovery_reset'], 0)
+        result = worker.process(self.reset_request(), self.config)
+        self.assertIn('Too many attempts', result['error']); self.assertEqual(app_lock.path(self.library).read_bytes(), before)
+        access_sessions.clear_attempts(self.library, access_sessions.APP)
+        result = worker.process(self.reset_request(replacement='1234'), self.config)
+        self.assertEqual(result['recovery_reset'], 0); self.assertIn('8 characters', result['error'])
+        self.assertEqual(app_lock.path(self.library).read_bytes(), before)
+
+    def test_nonregular_recovery_and_linked_credential_files_are_refused(self):
+        self.save(); self.lock_both(); target = app_lock.path(self.library)
+        before = target.read_bytes(); external = self.folder/'external'; external.write_bytes(before)
+        target.unlink(); target.symlink_to(external)
+        result = worker.process(self.reset_request(), self.config)
+        self.assertEqual(result['recovery_reset'], 0); self.assertEqual(external.read_bytes(), before)
+        fifo = self.folder/'fifo'; os.mkfifo(fifo)
+        with self.assertRaisesRegex(LibraryError, 'valid Photos recovery file'):
+            recovery.read(self.library, self.config, str(fifo), PASSWORD)
+
+    def test_recovery_and_normal_changes_never_follow_linked_lock_files(self):
+        self.save(); self.lock_both()
+        private = self.library.root/'private'; external = self.folder/'foreign-lock'
+        external.write_bytes(b'foreign file'); external.chmod(0o640)
+        for kind, name in [('app', '.app-lock.lock'), ('hidden', '.hidden-password.lock')]:
+            lock = private/name; lock.unlink(missing_ok=True); lock.symlink_to(external)
+            result = worker.process(self.reset_request(kind), self.config)
+            self.assertEqual(result['recovery_reset'], 0); self.assertIn('safely', result['error'])
+        result = app_lock.route(self.library, dict(action='app_lock_password', value='replacement fixture password'))
+        self.assertIn('safely', result['error'])
+        self.assertEqual(external.read_bytes(), b'foreign file'); self.assertEqual(stat.S_IMODE(external.stat().st_mode), 0o640)
 
 
 if __name__ == '__main__': unittest.main()

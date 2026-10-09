@@ -1,7 +1,10 @@
 """Local app access lock using the existing native password verifier."""
 import hashlib
+import fcntl
+from contextlib import contextmanager
 import json
 import os
+import stat
 
 from .library import LibraryError, atomic, packed
 from . import vault
@@ -116,7 +119,36 @@ def lock_hidden(library):
     vault.revoke_all(library)
 
 
+@contextmanager
+def credential_lock(marker):
+    """Lock a private regular file without following a replaced lock symlink."""
+    try:
+        descriptor = os.open(marker, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    except OSError:
+        raise LibraryError('Local password settings cannot be replaced safely') from None
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise LibraryError('Local password settings cannot be replaced safely')
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
 def route(library, request):
+    # Serialize verifier changes with recovery, across local service processes.
+    if request.get('action') in {'app_lock_delay', 'app_lock_enable', 'app_lock_disable', 'app_lock_pin', 'app_lock_password'}:
+        private = library.root/'private'; private.mkdir(exist_ok=True, mode=0o700)
+        try:
+            with credential_lock(private/'.app-lock.lock'):
+                return _route(library, request)
+        except LibraryError as error:
+            return dict(empty(library), error=str(error))
+    return _route(library, request)
+
+
+def _route(library, request):
     action = request.get('action', 'query')
     token = request.get('app_lock_token', '')
     active = enabled(library)

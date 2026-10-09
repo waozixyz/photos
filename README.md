@@ -514,8 +514,8 @@ or changed through the local service, including hidden items in Trash and mixed
 selections. Leaving Hidden or using Lock Hidden revokes the unlock; it also expires
 after ten minutes and on service restart. Authentication is local to each device,
 while the Hidden property remains in encrypted sync. This is an application access
-lock; local originals retain their existing storage format. System biometrics and
-password recovery remain unfinished. While Hidden is unlocked, Change password
+lock; local originals retain their existing storage format. System biometrics
+remain unfinished. While Hidden is unlocked, Change password
 accepts and confirms a replacement password, then relocks every local session.
 Your originals and encrypted-backup keys stay intact. The local password is not
 synced to other devices.
@@ -534,9 +534,9 @@ The remaining replacement work includes:
 - Mobile clients, permission-aware background camera backup and device space recovery.
 - Detailed maps, curated memories, automatic trip albums and richer face review/assignment controls.
 - Advanced photo editing, encrypted video streaming, animated editing previews, broader Motion Photo formats, HDR display and broader codec/camera coverage.
-- Private sharing, collaboration, public links, comments and account recovery.
+- Private sharing, collaboration, public links, comments and recovery phrases.
   Any sharing design needs to honor the owner's ThinkPad-only sync restriction.
-- System authentication, Hidden password recovery and a deliberate deletion/retention policy.
+- System authentication and a deliberate deletion/retention policy.
 - A complete Ziran library/sync service. The native UI, portable app, gallery/search
   engine, image processor, password verifier, photo/album-property writers,
   original copying, folder discovery, camera/provider/album-sidecar reading
@@ -633,4 +633,15 @@ and enter its recovery password. Photos verifies the account key pair before
 publishing keys, and creates a fresh device identity on the next signed sync.
 Existing libraries and accounts cannot be overwritten. Reconnect the private
 ThinkPad tunnel and start backup to download the encrypted records and originals.
-Local app/Hidden password reset with a recovery proof remains unfinished.
+Recover app password and Recover Hidden password are available on the locked
+screen and in Local sync. Choose your recovery file, enter its separate password,
+then choose and confirm a new local password of at least eight characters.
+Recovery verifies that the file contains this library's exact account and content
+keys and the same ThinkPad pin. An app PIN becomes a password; the background
+lock delay remains unchanged. Recovering Hidden keeps an independent app password
+intact; an app lock using the Hidden password follows the new Hidden password.
+Old local viewing sessions end and you must unlock again. Recovery never grants
+Hidden access, exports keys, changes originals or escapes Guest view. Keep a
+recovery file before losing local credentials; another account's file cannot
+recover your library. A 24-word recovery phrase and system authentication remain
+unfinished.
