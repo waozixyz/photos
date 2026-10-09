@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.26
+
+- Play Samsung HEIC Motion Photos while preserving their camera metadata and complete combined originals.
+- Recognize Motion Photos whose JPEG metadata is split across extended XMP segments or uses XML elements for item properties.
+- Recheck previously imported photos for these formats, rejecting incomplete metadata and invalid video pointers without altering originals.
+
 ## 0.1.25
 
 - Play older Samsung JPEG Motion Photos without altering their original trailer metadata.

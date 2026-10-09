@@ -16,7 +16,7 @@ sys.path.insert(0, os.environ.get('PHOTOS_SERVICE_PACKAGE', str(ROOT)))
 from photos.library import Library, digest_file
 from photos.service import Server
 import photos.service as service_module
-from motion_fixtures import jpeg, heif, samsung
+from motion_fixtures import jpeg, heif, samsung, extended_jpeg, samsung_heif
 from test_live import movie
 
 assert os.environ.get('PHOTOS_PRIVATE_XVFB') == '1'
@@ -41,11 +41,14 @@ with tempfile.TemporaryDirectory() as directory:
     heif(source/'SecondMP.heic',clip)
     heif(source/'ThirdMP.avif',clip,4)
     samsung(source/'Samsung.jpg',clip)
+    extended_jpeg(source/'Extended.jpg',clip)
+    samsung_heif(source/'Samsung-heic.heic',clip)
+    samsung_heif(source/'Samsung-no-xmp.heic',clip,xmp=False)
     originals = {p:p.read_bytes() for p in source.iterdir()}
-    ids = [digest_file(source/name) for name in ['MomentMP.jpg','SecondMP.heic','ThirdMP.avif','Samsung.jpg']]
+    ids = [digest_file(source/name) for name in ['MomentMP.jpg','SecondMP.heic','ThirdMP.avif','Samsung.jpg','Extended.jpg','Samsung-heic.heic','Samsung-no-xmp.heic']]
     library = Library(folder/'library'); library.import_folders([source.parent])
     for index,photo_id in enumerate(ids):
-        library.edit(photo_id,'taken',f'2025-06-0{6-index}T12:00:00Z')
+        library.edit(photo_id,'taken',f'2025-06-{10-index:02d}T12:00:00Z')
     calls = []; original_process = service_module.process
     def record(request,config):
         result = original_process(request,config); calls.append((request,result)); return result
@@ -94,10 +97,10 @@ with tempfile.TemporaryDirectory() as directory:
                 xdo('key','Escape'); time.sleep(.3)
                 if index < len(ids)-1: xdo('key','Right'); time.sleep(.3)
             click(875,178)
-            wait(lambda:any(q.get('action')=='live_separate' and r.get('count')==5 for q,r in calls),'Motion copy separation missing')
+            wait(lambda:any(q.get('action')=='live_separate' and r.get('count')==len(ids)+1 for q,r in calls),'Motion copy separation missing')
             assert all(p.read_bytes()==data for p,data in originals.items())
             assert all(library.original(library.photo(digest_file(p))).read_bytes()==data for p,data in originals.items())
-            print(('Portable' if portable else 'Native')+' JPEG/HEIC/AVIF and Samsung embedded motion: animated pixels, audio-capable playback, navigation and retained-original separation passed')
+            print(('Portable' if portable else 'Native')+' JPEG/HEIC/AVIF, extended XMP and Samsung SEF/sefd motion: animated pixels, audio-capable playback, navigation and retained-original separation passed')
         finally:
             child.terminate()
             try: child.wait(timeout=5)

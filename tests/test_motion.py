@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from motion_fixtures import jpeg, heif, samsung
+from motion_fixtures import jpeg, heif, samsung, extended_jpeg, samsung_heif
 from test_live import movie
 from photos import editing, live, motion
 from photos.export import Export
@@ -206,6 +206,94 @@ class MotionTest(unittest.TestCase):
                         xml.replace('<C:MicroVideo> 1 </C:MicroVideo>','<C:MotionPhoto>0</C:MotionPhoto><C:MicroVideo>1</C:MicroVideo>')]:
             jpeg(path,self.clip,xml=invalid)
             self.assertIsNone(motion.read(path))
+
+    def test_extended_xmp_chunks_merge_scalar_directory_and_camera_fields(self):
+        for reverse,split,elements in [(True,True,True),(False,False,False),(True,True,False)]:
+            with self.subTest(reverse=reverse,split=split,elements=elements):
+                path = extended_jpeg(self.source/'Extended.jpg',self.clip,reverse=reverse,split=split,elements=elements)
+                original = path.read_bytes()
+                output = self.root/'extension.mp4'; output.unlink(missing_ok=True)
+                self.assertEqual(motion.read(path,output)['length'],len(self.clip))
+                self.assertEqual(output.read_bytes(),self.clip)
+                self.library.import_folders([self.source.parent]); photo_id = digest_file(path)
+                self.assertEqual(Path(self.request(action='playback_check',id=photo_id)['playback_path']).read_bytes(),self.clip)
+                self.assertEqual(path.read_bytes(),original)
+
+    def test_extended_xmp_gaps_overlap_digest_mismatch_and_duplicate_properties_are_rejected(self):
+        def altered(at,value):
+            def mutate(standard,chunks):
+                chunk = bytearray(chunks[0]); chunk[at:at+len(value)] = value
+                return standard,[bytes(chunk),*chunks[1:]]
+            return mutate
+        mutations = [
+            lambda standard,chunks:(standard,chunks[:-1]),
+            lambda standard,chunks:(standard,[*chunks,chunks[0]]),
+            altered(35,b'0'*32), altered(67,(1048577).to_bytes(4,'big')),
+            altered(71,(1048575).to_bytes(4,'big')), altered(90,b'z'),
+            lambda standard,chunks:(standard.replace('C:MotionPhoto="1"','C:MotionPhoto="0"'),chunks),
+            lambda standard,chunks:(standard.replace('N:HasExtendedXMP=', 'N:Other='),chunks),
+            lambda standard,chunks:(standard.replace('/></rdf:RDF>','><C:MotionPhoto>1</C:MotionPhoto></rdf:Description></rdf:RDF>'),chunks),
+        ]
+        for index,mutate in enumerate(mutations):
+            path = extended_jpeg(self.root/f'bad-ext-{index}.jpg',self.clip,mutate=mutate)
+            output = self.root/'bad-ext.mp4'
+            self.assertIsNone(motion.read(path,output),index)
+            self.assertFalse(output.exists())
+
+    def test_item_scalar_properties_duplicate_nested_and_wrong_namespaces(self):
+        path = jpeg(self.root/'scalar.jpg',self.clip)
+        original = path.read_bytes(); length = int.from_bytes(original[4:6],'big')
+        from motion_fixtures import HEADER
+        xml = original[6+len(HEADER):4+length].decode()
+        import re
+        xml = re.sub(r'<Container:Item ([^>]+)/>',lambda m:
+            '<Container:Item>'+''.join(f'<Item:{key}>{value}</Item:{key}>' for key,value in
+            re.findall(r'Item:(\w+)="([^"]*)"',m[1]))+'</Container:Item>',xml)
+        jpeg(path,self.clip,xml=xml)
+        self.assertEqual(motion.read(path)['length'],len(self.clip))
+        for bad in [
+            xml.replace('<Item:Length>','<Item:Length><Item:Other>'),
+            xml.replace('</Item:Length>','</Item:Length><Item:Length>1</Item:Length>'),
+            xml.replace('<Item:Semantic>MotionPhoto</Item:Semantic>','<Item:Semantic/>'),
+            xml.replace('container/item/','wrong/item/'),
+            xml.replace('<Container:Item>','<Container:Item Item:Length="1">',1),
+        ]:
+            jpeg(path,self.clip,xml=bad)
+            self.assertIsNone(motion.read(path))
+
+    def test_samsung_heic_sefd_pointer_excludes_trailer_and_keeps_original(self):
+        for xmp in [True,False]:
+            path = samsung_heif(self.source/('Samsung-xmp.heic' if xmp else 'Samsung-sef.heic'),self.clip,xmp=xmp)
+            original = path.read_bytes()
+            output = self.root/'samsung-heic.mp4'; output.unlink(missing_ok=True)
+            value = motion.read(path,output)
+            self.assertEqual(value['length'],len(self.clip))
+            self.assertEqual(output.read_bytes(),self.clip)
+            self.assertLess(value['offset']+value['length'],len(original))
+            self.library.import_folders([self.source.parent]); photo_id = digest_file(path)
+            self.assertEqual(Path(self.request(action='playback_check',id=photo_id)['playback_path']).read_bytes(),self.clip)
+            mirror = self.root/('heic-export-'+str(xmp)); self.library.export(photo_id,mirror)
+            restored = Library(self.root/('heic-restored-'+str(xmp))); self.addCleanup(restored.db.close)
+            restored.import_folders([mirror]); self.assertTrue(restored.details(photo_id)['live'])
+            self.assertEqual(restored.original(restored.photo(photo_id)).read_bytes(),original)
+            self.assertEqual(path.read_bytes(),original)
+        for position in [
+            original.index(b'mpv2'), original.index(b'mpv2')+4, original.index(b'mpv2')+8,
+            original.index(b'sefd')-4, original.index(b'SEFH')+8, len(original)-16,
+        ]:
+            bad = bytearray(original); bad[position] ^= 128
+            path = self.root/'bad-pointer.heic'; path.write_bytes(bad)
+            self.assertIsNone(motion.read(path),position)
+
+    def test_new_reader_rescans_old_negative_cache_without_dirtying_unchanged_media(self):
+        path = extended_jpeg(self.source/'Previously still.jpg',self.clip)
+        self.library.import_folders([self.source.parent]); photo_id = digest_file(path)
+        self.library.db.execute('UPDATE motion_scans SET reader_version=2 WHERE photo_id=?',(photo_id,))
+        self.library.db.execute('UPDATE photos SET metadata=?,dirty=0 WHERE id=?',(packed({}),photo_id))
+        self.library.db.commit()
+        self.library.import_folders([self.source.parent])
+        self.assertTrue(self.library.details(photo_id)['live'])
+        self.assertEqual(self.library.db.execute('SELECT reader_version FROM motion_scans WHERE photo_id=?',(photo_id,)).fetchone()[0],3)
 
 
 if __name__ == '__main__':

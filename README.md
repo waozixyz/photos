@@ -234,10 +234,16 @@ retained photos. It uses libxml2 and libheif without external XML documents or
 network requests, following the
 [Android Motion Photo format](https://developer.android.com/media/platform/motion-photo-format).
 Samsung JPEG trailers are read through validated SEFH/SEFT directory entries;
-their original trailer remains in backup and exports. Camera flags can be XML
-attributes or scalar elements, independently of their namespace prefix. Samsung
-HEIC `sefd` trailers, extended JPEG XMP packets, non-attribute container item
-properties and native phone Live Photo capture remain unfinished.
+Samsung HEIC `sefd` trailers use their validated absolute video pointer, with
+only the clip extracted for playback. Camera flags and container item properties
+can be XML attributes or scalar elements, independently of their namespace prefix.
+Extended JPEG XMP segments are recombined, including out-of-order chunks and
+properties split between the standard and extended packet. Incomplete or overlapping
+chunks, inconsistent metadata, a mismatched packet digest and invalid pointers
+are rejected. Extended packets are limited to one MiB and one referenced stream.
+Source rescans recheck older imports once with the new reader. Complete originals,
+including camera trailers, remain in backup and exports. Native phone Live Photo
+capture remains unfinished.
 
 This version is a local photo library with sync, not complete Ente feature parity.
 

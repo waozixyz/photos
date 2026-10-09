@@ -5,6 +5,9 @@
 c :: #system_library "c";
 xml :: #system_library "xml2";
 heif :: #system_library "heif";
+glib :: #system_library "glib-2.0";
+Checksum :: (kind: s32, data: *u8, count: usize) -> *u8 #foreign glib "g_compute_checksum_for_data";
+Free :: (data: *void) #foreign glib "g_free";
 Error :: struct { code: s32; subcode: s32; message: *u8 }
 Context :: () -> *void #foreign heif "heif_context_alloc";
 FreeContext :: (context: *void) #foreign heif "heif_context_free";
@@ -62,73 +65,151 @@ Match :: (data: []u8, value: string) -> bool {
     for i: 0..value.count-1 { if data[i] != value[i] { return false } }; return true
 }
 Description :: struct { length: s64; padding: s64; secondary: s64; modern: bool; disabled: bool; valid: bool }
-Parse :: (data: []u8) -> Description {
-    result: Description
+Parsed :: struct { flags: Flags; description: Description; directories: s32; items: s32; ended: bool; guid: [32]u8; hasGuid: bool }
+ItemFields :: struct { primary: bool; motion: bool; image: bool; video: bool; length: s64; padding: s64; seen: [4]bool }
+ItemField :: (name: string) -> s32 {
+    if name == "Semantic" { return 1 }; if name == "Mime" { return 2 }
+    if name == "Length" { return 3 }; if name == "Padding" { return 4 }; return 0
+}
+Trim :: (text: string) -> string {
+    begin: s32; end := cast(s32)text.count
+    while begin < end && (text[begin] == 32 || text[begin] == 9 || text[begin] == 10 || text[begin] == 13) { begin += 1 }
+    while end > begin && (text[end-1] == 32 || text[end-1] == 9 || text[end-1] == 10 || text[end-1] == 13) { end -= 1 }
+    return text[begin:end]
+}
+SetItem :: (item: *ItemFields, field: s32, text: string) -> bool {
+    if field == 0 { return true }; if item.seen[field-1] { return false }; item.seen[field-1] = true
+    value := Trim(text)
+    if field == 1 { item.primary = value == "Primary"; item.motion = value == "MotionPhoto" }
+    if field == 2 { item.image = value == "image/jpeg" || value == "image/heic" || value == "image/avif"; item.video = value == "video/mp4" || value == "video/quicktime" }
+    if field == 3 { item.length = Number(value); if item.length < 0 { return false } }
+    if field == 4 { item.padding = Number(value); if item.padding < 0 { return false } }
+    return true
+}
+FinishItem :: (state: *Parsed, item: ItemFields) -> bool {
+    if state.items >= 32 || !item.seen[0] || !item.seen[1] || state.description.length > 0 { return false }
+    if state.items == 0 {
+        if !item.primary || !item.image || item.length != 0 { return false }; state.description.padding = item.padding
+    } else {
+        if item.primary || !item.seen[2] || item.padding != 0 { return false }
+        state.description.secondary += item.length
+        if item.motion { if !item.video || item.length < 16 { return false }; state.description.length = item.length }
+    }
+    state.items += 1; return true
+}
+SetGuid :: (state: *Parsed, text: string) -> bool {
+    value := Trim(text); if state.hasGuid || value.count != 32 { return false }
+    for i: 0..31 {
+        byte := value[i]; if !((byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 70)) { return false }
+        state.guid[i] = byte
+    }
+    state.hasGuid = true; return true
+}
+SetScalar :: (state: *Parsed, item: *ItemFields, field: s32, value: string) -> bool {
+    if field <= 3 { return Assign(*state.flags,field,value) }
+    if field == 8 { return SetGuid(state,value) }; return SetItem(item,field-3,value)
+}
+ParseInto :: (data: []u8, state: *Parsed) -> bool {
+    if data.count == 0 || data.count > 1048576 { return false }
     // No DTDs, entity expansion, external documents, recovery or huge-tree mode.
     reader := Reader(*data[0],cast(s32)data.count,null,null,2144)
-    if reader == null { return result }; defer { FreeReader(reader) }
-    flags: Flags; flags.modern = -1; flags.legacy = -1; flags.offset = -1
-    scalar: s32; scalarDepth: s32
-    directories: s32; directoryDepth: s32 = -1; items: s32; ended: bool
+    if reader == null { return false }; defer { FreeReader(reader) }
+    scalar: s32; scalarDepth: s32; scalarBytes: [256]u8; scalarCount: s32
+    directoryDepth: s32 = -1; itemDepth: s32 = -1; item: ItemFields
     steps: s32; status := Next(reader)
     while status == 1 {
-        steps += 1; if steps > 8192 || Depth(reader) > 32 { return result }
+        steps += 1; if steps > 8192 || Depth(reader) > 32 { return false }
         kind := Type(reader); name := TextFromCString(Local(reader)); ns := TextFromCString(Namespace(reader))
-        if kind == 5 || kind == 6 || kind == 10 { return result }
-        if scalar != 0 && (kind == 3 || kind == 4) {
-            if !Assign(*flags,scalar,TextFromCString(Value(reader))) { return result }; scalar = 0
+        depth := Depth(reader)
+        if kind == 5 || kind == 6 || kind == 10 { return false }
+        if scalar != 0 {
+            if kind == 3 || kind == 4 || kind == 13 || kind == 14 {
+                text := TextFromCString(Value(reader)); if text.count > cast(s64)(256-scalarCount) { return false }
+                for byte: text { scalarBytes[scalarCount] = byte; scalarCount += 1 }
+            }
+            if kind == 1 { return false }
+            if kind == 15 && depth == scalarDepth {
+                if !SetScalar(state,*item,scalar,TextFromBytes(scalarBytes[:scalarCount])) { return false }; scalar = 0
+            }
         }
-        if scalar != 0 && (kind == 15 && Depth(reader) == scalarDepth || kind == 1 && Depth(reader) > scalarDepth) { return result }
-        if kind == 15 && ns == Container && name == "Directory" { directoryDepth = -1; ended = true }
+        if kind == 15 && depth == itemDepth {
+            if !FinishItem(state,item) { return false }; itemDepth = -1
+        }
+        if kind == 15 && ns == Container && name == "Directory" { directoryDepth = -1; state.ended = true }
         if kind == 1 {
-            if ns == Camera && CameraField(name) != 0 {
-                scalar = CameraField(name); scalarDepth = Depth(reader); if Empty(reader) == 1 { return result }
+            field: s32
+            if ns == Camera { field = CameraField(name) }
+            if ns == "http://ns.adobe.com/xmp/note/" && name == "HasExtendedXMP" { field = 8 }
+            if ns == Item && itemDepth >= 0 && depth == itemDepth+1 && ItemField(name) != 0 { field = ItemField(name)+3 }
+            if field != 0 {
+                if Empty(reader) == 1 { return false }; scalar = field; scalarDepth = depth; scalarCount = 0
             }
             if ns == Container && name == "Directory" {
-                directories += 1; if directories > 1 { return result }; directoryDepth = Depth(reader)
+                state.directories += 1; if state.directories > 1 || Empty(reader) == 1 { return false }; directoryDepth = depth
             }
-            isItem := ns == Container && name == "Item" && directoryDepth >= 0 && Depth(reader) > directoryDepth
-            primary: bool; motion: bool; mime: bool; hasLength: bool
-            length: s64; padding: s64
+            isItem := ns == Container && name == "Item" && directoryDepth >= 0 && depth > directoryDepth
+            if isItem { if itemDepth >= 0 { return false }; item = ItemFields.{}; itemDepth = depth }
             attribute := FirstAttribute(reader)
             while attribute == 1 {
                 key := TextFromCString(Local(reader)); namespace := TextFromCString(Namespace(reader)); value := TextFromCString(Value(reader))
-                if namespace == Camera {
-                    if !Assign(*flags,CameraField(key),value) { return result }
-                }
-                if isItem && namespace == Item {
-                    if key == "Semantic" { primary = value == "Primary"; motion = value == "MotionPhoto" }
-                    if key == "Mime" { mime = (items == 0 && (value == "image/jpeg" || value == "image/heic" || value == "image/avif")) || (items > 0 && (value == "video/mp4" || value == "video/quicktime")) }
-                    if key == "Length" { length = Number(value); hasLength = true }
-                    if key == "Padding" { padding = Number(value) }
-                }
+                if namespace == Camera && !Assign(*state.flags,CameraField(key),value) { return false }
+                if namespace == "http://ns.adobe.com/xmp/note/" && key == "HasExtendedXMP" && !SetGuid(state,value) { return false }
+                if isItem && namespace == Item && !SetItem(*item,ItemField(key),value) { return false }
+                if scalar != 0 && namespace == "http://www.w3.org/1999/02/22-rdf-syntax-ns#" && key == "resource" { return false }
                 attribute = NextAttribute(reader)
             }
             unused ToElement(reader)
-            if isItem {
-                if items >= 32 || padding < 0 || length < 0 || result.length > 0 { return result }
-                if items == 0 {
-                    if !primary || !mime || length != 0 { return result }; result.padding = padding
-                } else {
-                    if primary || !hasLength || padding != 0 { return result }
-                    result.secondary += length
-                    if motion { if !mime || length < 16 { return result }; result.length = length }
-                }
-                items += 1
+            if isItem && Empty(reader) == 1 {
+                if !FinishItem(state,item) { return false }; itemDepth = -1
             }
         }
         status = Next(reader)
     }
-    if status != 0 || scalar != 0 { return result }
+    return status == 0 && scalar == 0 && directoryDepth < 0 && itemDepth < 0
+}
+Finish :: (state: Parsed) -> Description {
+    result := state.description; flags := state.flags
     if flags.seenModern {
-        result.modern = true
-        result.disabled = flags.modern != 1
-        result.valid = flags.modern == 1 && directories == 1 && ended && items >= 2 && result.length >= 16
-    } else if flags.seenLegacy && flags.legacy == 1 && directories == 0 && flags.offset >= 16 {
+        result.modern = true; result.disabled = flags.modern != 1
+        result.valid = flags.modern == 1 && state.directories == 1 && state.ended && state.items >= 2 && result.length >= 16
+    } else if flags.seenLegacy && flags.legacy == 1 && state.directories == 0 && flags.offset >= 16 {
         result.length = flags.offset; result.secondary = flags.offset; result.valid = true
     }
+    if !flags.seenModern && flags.seenLegacy && flags.legacy != 1 { result.disabled = true }
     if result.length > 134217728 || result.secondary > 1073741824 || result.padding > 1048576 { result.valid = false }
     return result
+}
+Parse :: (data: []u8) -> Description {
+    state: Parsed; result: Description
+    if ParseInto(data,*state) { return Finish(state) }; return result
+}
+Extended :: struct { bytes: [1048576]u8; coverage: [1048576]u8; guid: [32]u8; length: s32; count: s32 }
+AddExtended :: (extension: *Extended, data: []u8) -> bool {
+    if data.count <= 75 { return false }
+    length := Big(data[67:71]); offset := Big(data[71:75]); count := data.count-75
+    if length < 1 || length > 1048576 || offset > length || count > length-offset { return false }
+    if extension.length == 0 {
+        extension.length = cast(s32)length; for i: 0..31 { extension.guid[i] = data[35+i] }
+    } else if extension.length != cast(s32)length || !Match(data[35:67],TextFromBytes(extension.guid[:])) { return false }
+    for i: 0..count-1 {
+        at := cast(s32)offset+cast(s32)i
+        if extension.coverage[at] != 0 { return false }
+        extension.bytes[at] = data[75+i]; extension.coverage[at] = 1; extension.count += 1
+    }
+    return true
+}
+MergeExtended :: (extension: *Extended, state: *Parsed) -> bool {
+    if !state.hasGuid { return extension.length == 0 }
+    if extension.length == 0 || extension.count != extension.length || !Match(extension.guid[:],TextFromBytes(state.guid[:])) { return false }
+    // Adobe's GUID is the MD5 of the complete packet, an integrity check only.
+    hash := Checksum(0,*extension.bytes[0],cast(usize)extension.length)
+    if hash == null { return false }; defer { Free(cast(*void)hash) }
+    for i: 0..31 {
+        byte := hash[i]; if byte >= 97 && byte <= 102 { byte -= 32 }
+        if byte != state.guid[i] { return false }
+    }
+    if !ParseInto(extension.bytes[:extension.length],state) { return false }
+    return true
 }
 Big :: (bytes: []u8) -> s64 { value: s64; for byte: bytes { value = value*256+cast(s64)byte }; return value }
 At :: (file: *void, at: s64, bytes: []u8) -> bool {
@@ -136,12 +217,13 @@ At :: (file: *void, at: s64, bytes: []u8) -> bool {
 }
 Little :: (bytes: []u8) -> s64 { value: s64; factor: s64 = 1; for byte: bytes { value += cast(s64)byte*factor; factor *= 256 }; return value }
 Range :: struct { start: s64; end: s64; valid: bool }
-Samsung :: (file: *void, size: s64, imageStart: s64) -> Range {
+Samsung :: (file: *void, size: s64, imageStart: s64, container: bool = false) -> Range {
     result: Range; head: [24]u8
     if !At(file,size-8,head[:8]) || !Match(head[4:8],"SEFT") { return result }
     length := Little(head[:4]); directory := size-8-length
     if length < 24 || length > 65535 || directory <= imageStart { return result }
-    if !At(file,directory,head[:12]) || !Match(head[:4],"SEFH") || Little(head[4:8]) != 101 { return result }
+    if !At(file,directory,head[:12]) || !Match(head[:4],"SEFH") { return result }
+    version := Little(head[4:8]); if version != 101 && version != 106 && version != 107 { return result }
     count := Little(head[8:12]); if count < 1 || count > 32 || length != 12+12*count { return result }
     first := directory
     starts: [32]s64; ends: [32]s64
@@ -153,12 +235,21 @@ Samsung :: (file: *void, size: s64, imageStart: s64) -> Range {
         starts[i] = start; ends[i] = start+block
         if start < first { first = start }
         if kind == 2608 { // Samsung MotionPhoto_Data, tag 0x0a30.
-            if result.valid || block < 40 || block > 134217752 || !At(file,start,head[:24]) { return result }
+            if result.valid || block < 36 || block > 134217752 || !At(file,start,head[:24]) { return result }
             if Little(head[:4]) != 170917888 || Little(head[4:8]) != 16 || !Match(head[8:24],"MotionPhoto_Data") { return result }
-            result.start = start+24; result.end = start+block; result.valid = true
+            if container {
+                if block != 36 || !At(file,start+24,head[:12]) || !Match(head[:4],"mpv2") { return result }
+                result.start = Big(head[4:8]); result.end = result.start+Big(head[8:12])
+                if result.start != imageStart || result.end-result.start < 16 || result.end-result.start > 134217728 { return Range.{} }
+            } else { result.start = start+24; result.end = start+block }
+            result.valid = true
         }
     }
-    if !result.valid || !At(file,first-2,head[:2]) || head[0] != 255 || head[1] != 217 { result.valid = false }
+    if !result.valid { return result }
+    if container {
+        // The pointer must select exactly the movie preceding the terminal sefd box.
+        if result.end != first-8 || !At(file,first-8,head[:8]) || !Match(head[4:8],"sefd") || Big(head[:4]) != size-(first-8) { result.valid = false }
+    } else if !At(file,first-2,head[:2]) || head[0] != 255 || head[1] != 217 { result.valid = false }
     return result
 }
 HEIFDescription :: (path: *u8) -> Description {
@@ -190,6 +281,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
     jpeg := head[0] == 255 && head[1] == 216
     if !jpeg && !Match(head[4:8],"ftyp") { return 4 }
     position: s64 = 2; segments: s32; xmp: s32; description: Description; imageStart: s64
+    state: Parsed; extension: Extended; range: Range
     while jpeg && position < size && position < 4194304 && segments < 1024 {
         if !At(file,position,head[:2]) || head[0] != 255 { return 4 }
         while head[1] == 255 { position += 1; if !At(file,position,head[:2]) { return 4 } }
@@ -204,22 +296,31 @@ main :: (argc: s32, argv: **u8) -> s32 {
             if !At(file,position+2,bytes[:cast(s32)length-2]) { return 4 }
             if Match(bytes[:28],"http://ns.adobe.com/xap/1.0/") && bytes[28] == 0 {
                 xmp += 1; if xmp > 1 { return 4 }
-                description = Parse(bytes[29:cast(s32)length-2])
+                if !ParseInto(bytes[29:cast(s32)length-2],*state) { return 4 }
+            } else if length > 77 && Match(bytes[:34],"http://ns.adobe.com/xmp/extension/") && bytes[34] == 0 {
+                if !AddExtended(*extension,bytes[:cast(s32)length-2]) { return 4 }
             }
         }
         position += length; segments += 1
     }
-    if !jpeg {
+    if jpeg {
+        if !MergeExtended(*extension,*state) { return 4 }; description = Finish(state)
+    } else {
         description = HEIFDescription(argv[1])
-        if !description.valid || !description.modern || description.secondary != description.length { return 4 }
+        if description.disabled || (description.valid && (!description.modern || description.secondary != description.length)) { return 4 }
         position = 0
         while position < size && segments < 4096 {
             if !At(file,position,head[:8]) { return 4 }; length := Big(head[:4]); header: s64 = 8
             if length == 1 { if !At(file,position+8,head[8:16]) { return 4 }; length = Big(head[8:16]); header = 16 }
             if length < header || length > size-position { return 4 }
             if Match(head[4:8],"mpvd") {
-                if position+length != size || length-header != description.length || description.padding != header { return 4 }
-                imageStart = position+header; break
+                if position+length != size { return 4 }
+                imageStart = position+header
+                range = Samsung(file,size,imageStart,true)
+                if description.valid {
+                    if length-header != description.length || description.padding != header { return 4 }
+                } else if !range.valid { return 4 }
+                break
             }
             position += length; segments += 1
         }
@@ -229,11 +330,16 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if jpeg && !description.valid && !description.disabled {
         range := Samsung(file,size,imageStart); if !range.valid { return 4 }
         start = range.start; end = range.end; description.length = end-start
-    } else if !description.valid { return 4 }
+    } else if !description.valid && !range.valid { return 4 }
     else if jpeg {
         imageEnd := size-description.secondary-description.padding
         if imageEnd < imageStart+2 || start < imageEnd || !At(file,imageEnd-2,head[:2]) || head[0] != 255 || head[1] != 217 { return 4 }
-    } else if start != imageStart { return 4 }
+    } else if description.valid && start != imageStart { return 4 }
+    if jpeg && description.valid {
+        range = Samsung(file,size,imageStart)
+        if range.valid && range.start != start { return 4 }
+    }
+    if range.valid { start = range.start; end = range.end; description.length = end-start }
     // Verify complete top-level MP4 boxes. No arbitrary 'ftyp' byte search.
     if !At(file,start,head[:8]) || !Match(head[4:8],"ftyp") { return 4 }
     at := start; boxes: s32; movie: bool; media: bool
@@ -242,6 +348,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
         if length == 1 { if !At(file,at+8,head[8:16]) { return 4 }; length = Big(head[8:16]); header = 16 }
         if length == 0 { length = end-at }
         if length < header || length > end-at { return 4 }
+        if Match(head[4:8],"sefd") { return 4 } // Only a validated Samsung pointer may exclude this trailer.
         if Match(head[4:8],"moov") { movie = true }; if Match(head[4:8],"mdat") { media = true }
         at += length; boxes += 1
     }

@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := build
 .PHONY: motion-engine
 motion-engine:
-	LDLIBS='-lxml2 -l:libheif.so.1' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry motion_photo:main --exe -o build/motion-photo src/motion_photo.zi
+	LDLIBS='-lxml2 -l:libheif.so.1 -lglib-2.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry motion_photo:main --exe -o build/motion-photo src/motion_photo.zi
 .PHONY: motion-window-test motion-portable-test
 motion-window-test: build
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/motion_window.py
