@@ -57,6 +57,12 @@ def main():
     shutil.copyfile(cryptography,installed/'sync_crypto.next')
     os.chmod(installed/'sync_crypto.next',0o755)
     os.replace(installed/'sync_crypto.next',installed/'sync_crypto')
+    account_signer = repo/'build/account-sign/account_sign'
+    if not account_signer.is_file():
+        parser.error('Build native Photos account signing before installing')
+    shutil.copyfile(account_signer,installed/'account_sign.next')
+    os.chmod(installed/'account_sign.next',0o755)
+    os.replace(installed/'account_sign.next',installed/'account_sign')
     metadata_reader = repo/'build/read-metadata/read_metadata'
     if not metadata_reader.is_file():
         parser.error('Build Photos metadata reading before installing')
@@ -179,7 +185,7 @@ def main():
     icon.parent.mkdir(parents=True,exist_ok=True)
     shutil.copyfile(repo/'assets/photos.svg',icon)
     (installed/'assets').mkdir(exist_ok=True)
-    for name in ['world.png', 'MAP-LICENSE.txt', 'SEMANTIC-MODELS.json', 'CLIP-LICENSE.txt', 'TEXT-MODELS.json', 'TESSERACT-LICENSE.txt','FACE-MODELS.json','SFACE-LICENSE.txt','YUNET-LICENSE.txt']:
+    for name in ['world.png', 'MAP-LICENSE.txt', 'SEMANTIC-MODELS.json', 'CLIP-LICENSE.txt', 'TEXT-MODELS.json', 'TESSERACT-LICENSE.txt','FACE-MODELS.json','SFACE-LICENSE.txt','YUNET-LICENSE.txt','OQS-LICENSE.txt','LIBOQS-LICENSE.txt']:
         shutil.copyfile(repo/'assets'/name, installed/'assets'/name)
     if args.semantic_models:
         subprocess.run(['python3',str(repo/'scripts/semantic-models.py'),'--source',str(args.semantic_models),

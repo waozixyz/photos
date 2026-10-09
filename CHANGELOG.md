@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.44
+
+- Keep existing account identities and encrypted backups usable through the account authentication upgrade, without replacing private keys.
+- Continue signed photo and album backup requests with new and existing accounts; interrupted authentication preserves originals and private settings.
+
 ## 0.1.43
 
 - Keep existing encrypted photo and album backups usable through the encryption upgrade, preserving account and content keys.

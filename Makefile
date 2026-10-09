@@ -7,6 +7,16 @@ build bundle test: local-service
 sync-crypto:
 	LDLIBS='-l:libsodium.so.23' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry sync_crypto:main --exe -o build/sync-crypto src/sync_crypto.zi
 build bundle test: sync-crypto
+.PHONY: account-sign
+build/liboqs/lib/liboqs.a: Makefile ziran.lock $(wildcard ziran.local.toml)
+	@set -e; source_dir=$$($(ZIRAN) pkg path liboqs $(PACKAGE_FLAGS)); \
+	cmake -S "$$source_dir" -B build/liboqs -DCMAKE_BUILD_TYPE=MinSizeRel -DBUILD_SHARED_LIBS=OFF \
+	-DOQS_BUILD_ONLY_LIB=ON -DOQS_USE_OPENSSL=OFF -DOQS_DIST_BUILD=OFF \
+	-DOQS_OPT_TARGET=generic '-DOQS_MINIMAL_BUILD=SIG_ml_dsa_44' -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+	cmake --build build/liboqs --target oqs
+account-sign: build/liboqs/lib/liboqs.a
+	LDLIBS='$(abspath build/liboqs/lib/liboqs.a) -l:libsodium.so.23 -lm' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry account_sign:main --exe -o build/account-sign src/account_sign.zi
+build bundle test: account-sign
 .PHONY: app-lock-policy-test
 app-lock-policy-test:
 	$(ZIRAN) build --project $(PACKAGE_FLAGS) --root tests --target=c --entry app_lock_policy_test:main --exe -o build/app-lock-policy tests/app_lock_policy_test.zi

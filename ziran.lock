@@ -18,6 +18,14 @@
       "url": "https://github.com/ziranlang/sqlite.git"
     },
     {
+      "commit": "5cc7677b290f0448462410f7c7e85f518664b943",
+      "dependencies": {"liboqs": "pfb3df7cb222b1bdc"},
+      "id": "p55635fc8976895a9",
+      "name": "Oqs",
+      "ref": "master",
+      "url": "https://github.com/ziranlang/oqs.git"
+    },
+    {
       "commit": "fafa2cea97d0cb379d832086ba45a989fa6f9c8e",
       "dependencies": {},
       "id": "p5a77c9c35110e925",
@@ -42,14 +50,23 @@
       "ref": "version-3.53.4",
       "source": true,
       "url": "https://github.com/sqlite/sqlite.git"
+    },
+    {
+      "commit": "fd44469daeffe6b28f031f54f9bb66cbae69a572",
+      "dependencies": {},
+      "id": "pfb3df7cb222b1bdc",
+      "name": "liboqs",
+      "ref": "main",
+      "source": true,
+      "url": "https://github.com/open-quantum-safe/liboqs.git"
     }
   ],
   "root": {
-    "dependencies": {"kryon": "p63cba7933429fe02", "kss": "p03de317562242e4f", "sqlite": "p450e8db63484350c"},
+    "dependencies": {"kryon": "p63cba7933429fe02", "kss": "p03de317562242e4f", "oqs": "p55635fc8976895a9", "sqlite": "p450e8db63484350c"},
     "name": "photos"
   },
   "toolchain": {
-    "commit": "307ffcb676a6fe3e7b278a3964845fc10ec790a1",
+    "commit": "f3dfe2189067f281ea7bc0b6820fa0bf245a69c1",
     "ref": "master",
     "url": "https://github.com/ziranlang/ziran.git"
   }

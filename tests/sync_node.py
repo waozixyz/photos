@@ -11,7 +11,7 @@ import urllib.request
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PIL import Image
-from photos.library import Library, packed, digest_file
+from photos.library import Library, packed, digest_file, atomic
 from photos.sync import Client
 import photos.sync
 
@@ -77,8 +77,16 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         assert first.db.execute('SELECT mtime FROM sources WHERE path=?',
                                (str(source/'fixture.jpg'),)).fetchone()[0] == (source/'fixture.jpg').stat().st_mtime_ns
         config = dict(node=origin, node_id=node['node_id'])
+        # Preserve an account created by the previous Python implementation,
+        # then exercise all real login/device/transaction signatures natively.
+        from pqcrypto.sign import ml_dsa_44
+        public, private = ml_dsa_44.generate_keypair()
+        existing_identity = first.root/'private/identity.json'
+        atomic(existing_identity,packed(dict(public=public.hex(),private=private.hex(),content_key='42'*32)).encode())
+        existing_bytes = existing_identity.read_bytes()
         client = Client(first, config)
         assert client.sync() == 0
+        assert existing_identity.read_bytes() == existing_bytes
         photo_id = digest_file(source/'fixture.jpg')
         from photos import semantic
         import struct

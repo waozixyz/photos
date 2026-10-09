@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from datetime import datetime, timezone
 
 from .sync_crypto import encrypt, decrypt, seal_blob, seal_record, device_seed, device_public, device_signature
-from pqcrypto.sign import ml_dsa_44
+from . import account_sign
 
 from .library import atomic, packed, digest_file
 
@@ -54,7 +54,7 @@ class Client:
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         self.identity_path = Path(identity_path or library.root / 'private' / 'identity.json')
         if not self.identity_path.exists():
-            public, private = ml_dsa_44.generate_keypair()
+            public, private = account_sign.generate_keypair()
             atomic(self.identity_path, packed(dict(public=public.hex(), private=private.hex(),
                                                  content_key=secrets.token_hex(32))).encode())
         self.identity = json.loads(self.identity_path.read_bytes())
@@ -62,6 +62,9 @@ class Client:
         self.private = bytes.fromhex(self.identity['private'])
         self.account = hashlib.sha256(self.public).hexdigest()
         self.key = bytes.fromhex(self.identity['content_key'])
+        if (len(self.public) != account_sign.PUBLIC_BYTES or
+                len(self.private) != account_sign.PRIVATE_BYTES or len(self.key) != 32):
+            raise ValueError('Invalid Photos account identity; existing keys were preserved')
         self.device_path = self.identity_path.with_name('device.json')
         if not self.device_path.exists():
             atomic(self.device_path, packed(dict(key=device_seed().hex(), client='photos-' + secrets.token_hex(12))).encode())
@@ -104,7 +107,7 @@ class Client:
         body = packed(dict(user_id_hash=self.account, client_id=self.client_id, public_key=self.public.hex())).encode()
         message = '\n'.join(['daochi-sync-v1', 'POST', '/api/v1/sync/login',
                              hashlib.sha256(body).hexdigest(), challenge['nonce'], '']).encode()
-        signature = ml_dsa_44.sign(self.private, message).hex()
+        signature = account_sign.sign(self.private, message).hex()
         result = self.raw('/api/v1/sync/login', 'POST', body,
                           {'Content-Type': 'application/json', 'X-Daochi-User': self.account, 'X-Daochi-Signature': signature})
         self.token = result['auth_token']
@@ -113,7 +116,7 @@ class Client:
         message = f'daochi-device-registration-v1\n{self.account}\n{APP}\n{self.device_id}\n{self.client_id}\n{public}\n{nonce}\n{expires}\n'.encode()
         body = packed(dict(app_id=APP, device_key_id=self.device_id, client_id=self.client_id,
                            public_key=public, nonce=nonce, expires_at=expires,
-                           signature=ml_dsa_44.sign(self.private, message).hex())).encode()
+                           signature=account_sign.sign(self.private, message).hex())).encode()
         self.raw('/api/v1/account/devices', 'POST', body,
                  {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + self.token})
 
@@ -124,7 +127,7 @@ class Client:
                      expires_at=int(time.time()) + 120, signature_context='daochi-tx-v1')
         message = '\n'.join(['daochi-tx-v1', '6', value['tx_id'], self.account, APP, self.device_id,
                              method, path, value['body_sha256'], value['nonce'], str(value['expires_at']), '']).encode()
-        value['signature'] = ml_dsa_44.sign(self.private, message).hex()
+        value['signature'] = account_sign.sign(self.private, message).hex()
         value['device_signature'] = device_signature(message, self.device_key).hex()
         return packed(value)
 

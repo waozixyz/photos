@@ -524,8 +524,10 @@ The remaining replacement work includes:
   socket framing, connection limits and deadlines also run in Ziran. The remaining
   automatic index mutations and app/Hidden session adapter use Python. Sync content
   encryption/decryption, chunk/metadata nonces and Ed25519 device identities/signatures
-  run in Ziran; post-quantum account signing, pinned-node transport and sync
-  checkpoint orchestration still use Python.
+  run in Ziran. Post-quantum account key generation and ML-DSA-44 signatures
+  use the pinned Oqs package through a private native helper, retaining existing
+  account keys and wire signatures. Pinned-node transport and sync checkpoint
+  orchestration still use Python.
 
 Choose Play video to watch a video in the Photos window. Pause/resume, Replay,
 the position slider, five-second seek buttons, volume and Mute work offline.

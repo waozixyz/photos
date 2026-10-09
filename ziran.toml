@@ -40,3 +40,7 @@ ref = "master"
 [dependencies.sqlite]
 git = "https://github.com/ziranlang/sqlite.git"
 ref = "master"
+
+[dependencies.oqs]
+git = "https://github.com/ziranlang/oqs.git"
+ref = "master"
