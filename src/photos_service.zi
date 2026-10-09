@@ -1,0 +1,192 @@
+// Headless local endpoint. Only same-user peers can send bounded JSON objects.
+// The native broker owns framing, deadlines and a fixed number of connections;
+// its private socketpair passes requests to the remaining library adapter.
+#import "std/byte_text_linux"
+#import "std/c_string"
+Json :: #import "std/json_scan";
+Clock :: #import "std/timer_linux";
+c :: #system_library "c";
+glib :: #system_library "glib-2.0";
+Socket :: (domain: s32, kind: s32, protocol: s32) -> s32 #foreign c "socket";
+Bind :: (fd: s32, address: *void, length: u32) -> s32 #foreign c "bind";
+Listen :: (fd: s32, count: s32) -> s32 #foreign c "listen";
+Accept :: (fd: s32, address: *void, length: *u32, flags: s32) -> s32 #foreign c "accept4";
+Peer :: (fd: s32, level: s32, option: s32, value: *void, length: *u32) -> s32 #foreign c "getsockopt";
+Uid :: () -> u32 #foreign c "getuid";
+Flags :: (fd: s32, command: s32, value: s32) -> s32 #foreign c "fcntl";
+Close :: (fd: s32) -> s32 #foreign c "close";
+Receive :: (fd: s32, bytes: *u8, count: usize, flags: s32) -> s64 #foreign c "recv";
+Send :: (fd: s32, bytes: *u8, count: usize, flags: s32) -> s64 #foreign c "send";
+Errno :: () -> *s32 #foreign c "__errno_location";
+Poll :: (fds: *PollFD, count: usize, timeout: s32) -> s32 #foreign c "poll";
+Mode :: (path: *u8, mode: u32) -> s32 #foreign c "chmod";
+Allocate :: (bytes: usize) -> *void #foreign c "malloc";
+Release :: (bytes: *void) #foreign c "free";
+Wipe :: (bytes: *void, count: usize) #foreign c "explicit_bzero";
+UTF8 :: (bytes: *u8, count: isize, end: **u8) -> s32 #foreign glib "g_utf8_validate";
+Endpoint :: struct { family: u16; path: [108]u8 }
+Credentials :: struct { pid: s32; uid: u32; gid: u32 }
+PollFD :: struct { fd: s32; events: s16; revents: s16 }
+Client :: struct {
+    fd: s32; phase: s32; id: u32; deadline: s64;
+    header: [4]u8; headerAt: s32; body: *u8; length: s32; at: s32
+}
+Limit :: 1048576;
+Capacity :: 16;
+clients: [Capacity]Client;
+Free :: (bytes: *u8, count: s32) {
+    if bytes != null { Wipe(cast(*void)bytes,cast(usize)count); Release(cast(*void)bytes) }
+}
+Drop :: (client: *Client) {
+    if client.phase != 0 { unused Close(client.fd) }
+    Free(client.body,client.length); client.* = .{}; client.fd = -1
+}
+Number :: (bytes: []u8) -> u32 {
+    value: u32; for byte: bytes { value = (value << 8) | cast(u32)byte }; return value
+}
+Header :: (bytes: []u8, value: u32) {
+    for i: 0..3 { bytes[i] = cast(u8)((value >> cast(u32)((3-i)*8)) & 255) }
+}
+Object :: (bytes: *u8, count: s32) -> bool {
+    if bytes == null || count <= 0 || count > Limit || UTF8(bytes,cast(isize)count,null) == 0 { return false }
+    text := TextFromBytes(BytesFromPointer(bytes,cast(u64)count)); start := Json.Space(text,0)
+    if start >= count || text[start] != 123 { return false }
+    end := Json.ValueEnd(text,start,0); return end >= 0 && Json.Space(text,end) == count
+}
+Retry :: () -> bool { code := Errno().*; return code == 4 || code == 11 }
+Cleanup :: () { for index: 0..Capacity-1 { Drop(*clients[index]) } }
+Run :: (listener: s32) -> s32 {
+    for clientIndex1: 0..Capacity-1 { clients[clientIndex1].fd = -1 }
+    txBody: *u8; txLength: s32; txAt: s32; txHeader: [8]u8
+    rxBody: *u8; rxLength: s32; rxAt: s32; rxHeader: [8]u8; rxHeaderAt: s32
+    defer {
+        Free(txBody,txLength); Free(rxBody,rxLength)
+        Cleanup()
+    }
+    // ID zero is a readiness frame. External clients never see bridge IDs.
+    ready: [8]u8
+    if Send(1,*ready[0],8,16384) != 8 { return 3 }
+    serial: u32
+    while true {
+        now := Clock.MonotonicMilliseconds(); if now < 0 { return 3 }
+        for clientIndex2: 0..Capacity-1 {
+            if clients[clientIndex2].phase != 0 && now >= clients[clientIndex2].deadline { Drop(*clients[clientIndex2]) }
+        }
+        if txBody == null {
+            for clientIndex3: 0..Capacity-1 {
+                client := *clients[clientIndex3]
+                if client.phase == 3 {
+                    txBody = client.body; txLength = client.length; txAt = 0
+                    Header(txHeader[:4],client.id); Header(txHeader[4:],cast(u32)txLength)
+                    client.body = null; client.phase = 4; break
+                }
+            }
+        }
+        fds: [Capacity+2]PollFD
+        fds[0].fd = listener; fds[0].events = 1
+        fds[1].fd = 0; fds[1].events = ifx txBody == null then 1 else 5
+        for clientIndex4: 0..Capacity-1 {
+            client := *clients[clientIndex4]; fds[clientIndex4+2].fd = ifx client.phase == 0 then -1 else client.fd
+            fds[clientIndex4+2].events = ifx client.phase == 1 || client.phase == 2 then 1 else ifx client.phase == 5 then 4 else 0
+        }
+        polled := Poll(*fds[0],Capacity+2,100)
+        if polled < 0 { if Retry() { continue }; return 3 }
+        if (fds[1].revents & (8 | 16 | 32)) != 0 { return 0 }
+        if (fds[0].revents & 1) != 0 {
+            // Bound accept work per iteration, including a flood at capacity.
+            for attempt: 0..Capacity-1 {
+                fd := Accept(listener,null,null,524288|2048); if fd < 0 { break }
+                peer: Credentials; size: u32 = 12
+                if Peer(fd,1,17,cast(*void)*peer,*size) != 0 || size != 12 || peer.uid != Uid() { unused Close(fd); continue }
+                index: s32 = -1; for clientIndex5: 0..Capacity-1 { if clients[clientIndex5].phase == 0 { index = cast(s32)clientIndex5; break } }
+                if index < 0 { unused Close(fd); continue }
+                if serial == 4294967295 { unused Close(fd); return 3 }; serial += 1
+                clients[index].fd = fd; clients[index].phase = 1; clients[index].id = serial; clients[index].deadline = now+60000
+            }
+        }
+        for clientIndex6: 0..Capacity-1 {
+            client := *clients[clientIndex6]; events := fds[clientIndex6+2].revents
+            if client.phase == 0 { continue }
+            if (events & (8 | 16 | 32)) != 0 { Drop(client); continue }
+            if (events & 1) != 0 && (client.phase == 1 || client.phase == 2) {
+                destination := ifx client.phase == 1 then *client.header[client.headerAt] else *client.body[client.at]
+                remaining := ifx client.phase == 1 then 4-client.headerAt else client.length-client.at
+                amount := Receive(client.fd,destination,cast(usize)remaining,0)
+                if amount == 0 || (amount < 0 && !Retry()) { Drop(client); continue }
+                if amount < 0 { continue }
+                if client.phase == 1 {
+                    client.headerAt += cast(s32)amount
+                    if client.headerAt == 4 {
+                        size := Number(client.header[:]); if size == 0 || size > Limit { Drop(client); continue }
+                        client.length = cast(s32)size; client.body = cast(*u8)Allocate(cast(usize)size)
+                        if client.body == null { Drop(client); continue }; client.phase = 2
+                    }
+                } else {
+                    client.at += cast(s32)amount
+                    if client.at == client.length {
+                        if !Object(client.body,client.length) { Drop(client); continue }
+                        client.phase = 3; client.deadline = now+60000
+                    }
+                }
+            }
+            if (events & 4) != 0 && client.phase == 5 {
+                destination := ifx client.headerAt < 4 then *client.header[client.headerAt] else *client.body[client.at]
+                remaining := ifx client.headerAt < 4 then 4-client.headerAt else client.length-client.at
+                amount := Send(client.fd,destination,cast(usize)remaining,16384)
+                if amount == 0 || (amount < 0 && !Retry()) { Drop(client); continue }
+                if amount < 0 { continue }
+                if client.headerAt < 4 { client.headerAt += cast(s32)amount } else { client.at += cast(s32)amount }
+                if client.headerAt == 4 && client.at == client.length { Drop(client) }
+            }
+        }
+        if (fds[1].revents & 4) != 0 && txBody != null {
+            destination := ifx txAt < 8 then *txHeader[txAt] else *txBody[txAt-8]
+            remaining := ifx txAt < 8 then 8-txAt else txLength+8-txAt
+            amount := Send(1,destination,cast(usize)remaining,16384)
+            if amount == 0 || (amount < 0 && !Retry()) { return 3 }
+            if amount > 0 { txAt += cast(s32)amount }
+            if txAt == txLength+8 { Free(txBody,txLength); txBody = null; txLength = 0 }
+        }
+        if (fds[1].revents & 1) != 0 {
+            destination := ifx rxHeaderAt < 8 then *rxHeader[rxHeaderAt] else *rxBody[rxAt]
+            remaining := ifx rxHeaderAt < 8 then 8-rxHeaderAt else rxLength-rxAt
+            amount := Receive(0,destination,cast(usize)remaining,0)
+            if amount == 0 || (amount < 0 && !Retry()) { return 3 }
+            if amount < 0 { continue }
+            if rxHeaderAt < 8 {
+                rxHeaderAt += cast(s32)amount
+                if rxHeaderAt == 8 {
+                    size := Number(rxHeader[4:]); if size == 0 || size > Limit { return 3 }
+                    rxLength = cast(s32)size; rxBody = cast(*u8)Allocate(cast(usize)size); if rxBody == null { return 3 }
+                }
+            } else {
+                rxAt += cast(s32)amount
+                if rxAt == rxLength {
+                    id := Number(rxHeader[:4]); valid := Object(rxBody,rxLength)
+                    for clientIndex7: 0..Capacity-1 {
+                        client := *clients[clientIndex7]
+                        if client.phase == 4 && client.id == id {
+                            if valid {
+                                client.body = rxBody; rxBody = null; client.length = rxLength; client.at = 0; client.headerAt = 0
+                                Header(client.header[:],cast(u32)rxLength); client.phase = 5; client.deadline = now+60000
+                            } else { Drop(client) }; break
+                        }
+                    }
+                    Free(rxBody,rxLength); rxBody = null; rxLength = 0; rxAt = 0; rxHeaderAt = 0
+                }
+            }
+        }
+    }
+    return 0
+}
+main :: (argc: s32, argv: **u8) -> s32 {
+    if argc != 2 { return 2 }
+    path := TextFromCString(argv[1]); endpoint: Endpoint; endpoint.family = 1
+    if path.count == 0 || path[0] != 47 || !CopyCString(path,endpoint.path[:]) { return 2 }
+    // The parent holds the exclusive endpoint lock, prepares the private
+    // directory and removes only its own stale socket before this bind.
+    listener := Socket(1,524288|2048|1,0); if listener < 0 { return 3 }; defer { unused Close(listener) }
+    if Bind(listener,cast(*void)*endpoint,110) != 0 || Mode(*endpoint.path[0],384) != 0 || Listen(listener,Capacity) != 0 { return 3 }
+    flags := Flags(0,3,0); if flags < 0 || Flags(0,4,flags|2048) != 0 { return 3 }
+    return Run(listener)
+}

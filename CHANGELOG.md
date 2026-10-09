@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.42
+
+- Keep Photos responsive when a local client sends an incomplete request or disconnects during an operation.
+- Bound simultaneous local connections and retire stalled requests, while retaining private app access and original files.
+- Preserve unrelated files and active Photos endpoints when another instance tries to open the library service.
+
 ## 0.1.41
 
 - Search and jump to historic capture dates, including photos taken before 1970 and calendar years 0001 through 9999.

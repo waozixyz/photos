@@ -1,4 +1,8 @@
 .DEFAULT_GOAL := build
+.PHONY: local-service
+local-service:
+	LDLIBS='-lglib-2.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry photos_service:main --exe -o build/photos-service src/photos_service.zi
+build bundle test: local-service
 .PHONY: app-lock-policy-test
 app-lock-policy-test:
 	$(ZIRAN) build --project $(PACKAGE_FLAGS) --root tests --target=c --entry app_lock_policy_test:main --exe -o build/app-lock-policy tests/app_lock_policy_test.zi

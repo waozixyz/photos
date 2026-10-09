@@ -352,6 +352,14 @@ adapter still uses Python and the existing native Argon2id verifier.
 
 This version is a local photo library with sync, not complete Ente feature parity.
 
+The local Photos endpoint is a headless Ziran service. It authenticates the
+connecting user's OS identity, accepts at most 16 simultaneous connections,
+and handles fragmented request frames without blocking other clients. Each
+request or response is limited to 1 MiB of valid UTF-8 JSON. Incomplete requests
+and stalled replies expire after 60 seconds. Its socket is private to this user;
+opening another instance preserves the active endpoint and unrelated files.
+The library/session adapter and encrypted sync worker still use Python.
+
 Create collage combines two through six visible photos or Live Photo stills.
 Select them in a gallery, then choose Create collage. Switch between balanced
 grid, rows, columns or a leading-photo layout and square, landscape or portrait
@@ -504,8 +512,10 @@ The remaining replacement work includes:
   original copying, folder discovery, camera/provider/album-sidecar reading
   and ordinary import metadata/source-cache writes are Ziran/Kryon.
   Album-definition import publication, automatic-membership import writes and
-  private face-index import writes are native too. The remaining automatic index
-  mutations, authorization adapter and encrypted sync worker use Python.
+  private face-index import writes are native too. Local peer authentication,
+  socket framing, connection limits and deadlines also run in Ziran. The remaining
+  automatic index mutations, app/Hidden session adapter and encrypted sync worker
+  use Python.
 
 Choose Play video to watch a video in the Photos window. Pause/resume, Replay,
 the position slider, five-second seek buttons, volume and Mute work offline.

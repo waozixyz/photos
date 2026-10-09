@@ -45,6 +45,12 @@ def main():
             parser.error('Install the signed Photos bundle through Harmony before registering its catalog entry')
     installed = args.prefix/'lib/photos'
     installed.mkdir(parents=True,exist_ok=True,mode=0o700)
+    service_broker = repo/'build/photos-service/photos_service'
+    if not service_broker.is_file():
+        parser.error('Build the native Photos local service before installing')
+    shutil.copyfile(service_broker,installed/'photos_service.next')
+    os.chmod(installed/'photos_service.next',0o755)
+    os.replace(installed/'photos_service.next',installed/'photos_service')
     metadata_reader = repo/'build/read-metadata/read_metadata'
     if not metadata_reader.is_file():
         parser.error('Build Photos metadata reading before installing')
