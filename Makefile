@@ -17,6 +17,10 @@ build/liboqs/lib/liboqs.a: Makefile ziran.lock $(wildcard ziran.local.toml)
 account-sign: build/liboqs/lib/liboqs.a
 	LDLIBS='$(abspath build/liboqs/lib/liboqs.a) -l:libsodium.so.23 -lm' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry account_sign:main --exe -o build/account-sign src/account_sign.zi
 build bundle test: account-sign
+.PHONY: sync-http
+sync-http:
+	LDLIBS='-l:libcurl.so.4 -l:libsodium.so.23' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry sync_http:main --exe -o build/sync-http src/sync_http.zi
+build bundle test: sync-http
 .PHONY: app-lock-policy-test
 app-lock-policy-test:
 	$(ZIRAN) build --project $(PACKAGE_FLAGS) --root tests --target=c --entry app_lock_policy_test:main --exe -o build/app-lock-policy tests/app_lock_policy_test.zi

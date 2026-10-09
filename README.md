@@ -526,8 +526,10 @@ The remaining replacement work includes:
   encryption/decryption, chunk/metadata nonces and Ed25519 device identities/signatures
   run in Ziran. Post-quantum account key generation and ML-DSA-44 signatures
   use the pinned Oqs package through a private native helper, retaining existing
-  account keys and wire signatures. Pinned-node transport and sync checkpoint
-  orchestration still use Python.
+  account keys and wire signatures. HTTP framing and requests run in a bounded
+  headless Ziran helper using libcurl, with numeric loopback as its only destination,
+  disabled proxies, refused redirects and a fixed set of signed sync routes.
+  Pinned-node identity/policy checks and sync checkpoint orchestration still use Python.
 
 Choose Play video to watch a video in the Photos window. Pause/resume, Replay,
 the position slider, five-second seek buttons, volume and Mute work offline.
@@ -544,6 +546,7 @@ produce a useful message while the rest of the library remains usable.
 
 The native image processor needs GdkPixbuf and GObject on the Linux desktop host;
 Hidden authentication also needs libsodium.
+The private loopback sync transport needs the host's installed libcurl.
 QR detection needs ZBar's installed `libzbar.so.0` and GdkPixbuf; no camera or
 network recognition service is used. ZBar is distributed separately under LGPL 2.1;
 its [C API reference](https://zbar.sourceforge.net/api/zbar_8h.html) describes the

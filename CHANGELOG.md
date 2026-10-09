@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.45
+
+- Keep encrypted backup and restore requests on the private ThinkPad connection even when system proxy settings are configured.
+- Reject redirected, malformed or oversized node responses while retaining queued changes, original photos and private account keys.
+- Check existing encrypted chunks without downloading them again, and retain signed session renewal for interrupted backups.
+
 ## 0.1.44
 
 - Keep existing account identities and encrypted backups usable through the account authentication upgrade, without replacing private keys.

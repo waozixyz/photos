@@ -1,0 +1,83 @@
+// Private single-frame transport. The only destination is numeric loopback;
+// account headers and encrypted bytes never enter arguments, files or logs.
+Http :: #import "std/net_http";
+Curl :: #import "std/net_http_curl_linux";
+Wire :: #import "sync_crypto";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+c :: #system_library "c";
+sodium :: #system_library "sodium";
+Wipe :: (data: *void, count: usize) #foreign sodium "sodium_memzero";
+Allocate :: (count: usize) -> *void #foreign c "malloc";
+Read :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign c "read";
+Errno :: () -> *s32 #foreign c "__errno_location";
+
+HashSuffix :: (text: string, prefix: string) -> bool {
+    if text.count != prefix.count+64 || text[0:prefix.count] != prefix { return false }
+    for byte: text[prefix.count:] {
+        if !((byte >= 48 && byte <= 57) || (byte >= 97 && byte <= 102)) { return false }
+    }
+    return true
+}
+Route :: (path: string, method: u8) -> bool {
+    if method == 1 && (path == "/api/v1/node" ||
+        HashSuffix(path,"/api/v1/sync/challenge?user_id=")) { return true }
+    if method == 2 && (path == "/api/v1/sync/login" ||
+        path == "/api/v1/account/devices" || path == "/api/v1/sync") { return true }
+    return (method == 1 || method == 3 || method == 4) &&
+        HashSuffix(path,"/api/v1/blobs/photos/")
+}
+Header :: (name: string) -> bool {
+    return name == "Content-Type" || name == "Authorization" ||
+        name == "X-Daochi-User" || name == "X-Daochi-Tx" || name == "X-Daochi-Signature"
+}
+main :: () -> s32 {
+    // version, method, port, path bytes, header count, body bytes, response
+    // bound, total timeout in milliseconds. Every integer is network order.
+    frame: [19]u8
+    if !Wire.ReadAll(*frame[0],19) || frame[0] != 1 || frame[1] < 1 || frame[1] > 4 { return 2 }
+    method := frame[1]; port := Wire.Number(frame[2:4]); pathCount := cast(s64)Wire.Number(frame[4:6])
+    count := cast(s64)frame[6]; bodyCount := cast(s64)Wire.Number(frame[7:11])
+    limit := cast(s64)Wire.Number(frame[11:15]); timeout := cast(s32)Wire.Number(frame[15:19])
+    if port == 0 || pathCount == 0 || pathCount > 1024 || count > 5 ||
+        bodyCount > 134217728 || limit > 134217728 || timeout < 1 || timeout > 60000 ||
+        ((method == 1 || method == 4) && bodyCount != 0) { return 2 }
+    pathBytes: [1024]u8
+    if !Wire.ReadAll(*pathBytes[0],pathCount) { return 2 }
+    path := TextFromBytes(pathBytes[0:pathCount]); if !Route(path,method) { return 2 }
+    names: [5][256]u8; values: [5][8192]u8; headers: [5]Http.HttpHeader
+    defer { Wipe(cast(*void)*values[0][0],40960) }
+    index: s64
+    while index < count {
+        sizes: [4]u8; if !Wire.ReadAll(*sizes[0],4) { return 2 }
+        nameCount := cast(s64)Wire.Number(sizes[0:2]); valueCount := cast(s64)Wire.Number(sizes[2:4])
+        if nameCount < 1 || nameCount >= 256 || valueCount >= 8192 ||
+            !Wire.ReadAll(*names[index][0],nameCount) || !Wire.ReadAll(*values[index][0],valueCount) { return 2 }
+        name := TextFromBytes(names[index][0:nameCount]); if !Header(name) { return 2 }
+        for previous: 0..index-1 { if headers[previous].name == name { return 2 } }
+        offset: s64
+        while offset < valueCount {
+            byte := values[index][offset]; if byte < 32 || byte > 126 { return 2 }; offset += 1
+        }
+        headers[index].name = name; headers[index].value = TextFromBytes(values[index][0:valueCount])
+        index += 1
+    }
+    body := cast(*u8)Allocate(cast(usize)(bodyCount+1)); output := cast(*u8)Allocate(cast(usize)(limit+1))
+    defer { Wire.Free(body,bodyCount+1); Wire.Free(output,limit+1) }
+    if body == null || output == null || !Wire.ReadAll(body,bodyCount) { return 2 }
+    extra: u8; amount: s64
+    while true { amount = Read(0,*extra,1); if amount < 0 && Errno().* == 4 { continue }; break }
+    if amount != 0 { return 2 }
+    request: Http.HttpRequest
+    methods: [4]string = .{"GET","POST","PUT","HEAD"}; request.method = methods[method-1]
+    url: Vec(u8); BuilderPrint(*url,"http://127.0.0.1:%",port); BuilderPrint(*url,"%",path); request.url = BuilderFinish(url)
+    request.headers = headers[0:count]; request.body = TextFromBytes(BytesFromPointer(body,cast(u64)bodyCount))
+    result := Curl.SendCurlDirectWithin(request,BytesFromPointer(output,cast(u64)(limit+1)),timeout)
+    if result.truncated { return 3 }
+    if result.code != 0 || result.status < 100 || result.status > 599 { return 4 }
+    reply: [6]u8
+    reply[0] = cast(u8)(result.status >> 8); reply[1] = cast(u8)result.status
+    reply[2] = cast(u8)(result.length >> 24); reply[3] = cast(u8)(result.length >> 16)
+    reply[4] = cast(u8)(result.length >> 8); reply[5] = cast(u8)result.length
+    return ifx Wire.SendAll(*reply[0],6) && Wire.SendAll(output,result.length) then 0 else 4
+}

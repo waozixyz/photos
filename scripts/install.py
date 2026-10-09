@@ -63,6 +63,12 @@ def main():
     shutil.copyfile(account_signer,installed/'account_sign.next')
     os.chmod(installed/'account_sign.next',0o755)
     os.replace(installed/'account_sign.next',installed/'account_sign')
+    transport = repo/'build/sync-http/sync_http'
+    if not transport.is_file():
+        parser.error('Build native Photos loopback transport before installing')
+    shutil.copyfile(transport,installed/'sync_http.next')
+    os.chmod(installed/'sync_http.next',0o755)
+    os.replace(installed/'sync_http.next',installed/'sync_http')
     metadata_reader = repo/'build/read-metadata/read_metadata'
     if not metadata_reader.is_file():
         parser.error('Build Photos metadata reading before installing')

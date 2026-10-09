@@ -11,12 +11,11 @@ import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib.error
-import urllib.request
 from urllib.parse import urlsplit
 from datetime import datetime, timezone
 
 from .sync_crypto import encrypt, decrypt, seal_blob, seal_record, device_seed, device_public, device_signature
-from . import account_sign
+from . import account_sign, sync_http
 
 from .library import atomic, packed, digest_file
 
@@ -36,11 +35,6 @@ def decode(value):
     return base64.urlsafe_b64decode(value + '=' * (-len(value) % 4))
 
 
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        raise ValueError('Photos forbids redirects outside its pinned local node')
-
-
 class Client:
     def __init__(self, library, config, identity_path=None):
         self.library = library
@@ -51,7 +45,6 @@ class Client:
         if not HASH.fullmatch(config.get('node_id', '')):
             raise ValueError('The ThinkPad node identity must be pinned')
         self.node = config['node'].rstrip('/')
-        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         self.identity_path = Path(identity_path or library.root / 'private' / 'identity.json')
         if not self.identity_path.exists():
             public, private = account_sign.generate_keypair()
@@ -78,16 +71,10 @@ class Client:
         self.checked = False
 
     def raw(self, path, method='GET', body=None, headers=None, binary=False, limit=128 * 1024 * 1024):
-        if not path.startswith('/api/v1/') or '?' in path and not path.startswith('/api/v1/sync/challenge?'):
-            raise ValueError('Invalid local sync route')
-        request = urllib.request.Request(self.node + path, data=body, method=method, headers=headers or {})
-        with self.opener.open(request, timeout=60) as response:
-            data = response.read(limit + 1)
-            if len(data) > limit:
-                raise ValueError('Local node response exceeded its safe limit')
-            if binary:
-                return data
-            return json.loads(data) if data else {}
+        data = sync_http.request(self.node,path,method,body,headers,limit)
+        if binary:
+            return data
+        return json.loads(data) if data else {}
 
     def check_node(self):
         value = self.raw('/api/v1/node')
