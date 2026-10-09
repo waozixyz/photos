@@ -220,15 +220,25 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
             Image.new('RGB',(10+index,10),(index,150,100)).save(path)
             batch_ids.append(digest_file(path))
         first.import_folders([batch.parent])
+        # Face-rich records must be split under the real node's byte bound,
+        # with names/corrections encrypted and restored alongside each photo.
+        from photos import people
+        import hashlib
+        face_vector = __import__('base64').b64encode(struct.pack('<128f',1.,*([0.]*127))).decode('ascii')
         for media_id in batch_ids:
             first.db.execute('INSERT INTO semantic_embeddings VALUES(?,?,?,?)', (media_id,semantic.MODEL,vector,''))
+            people.accept_index(first,media_id,dict(model=people.MODEL,faces=[dict(
+                id=hashlib.sha256(f'{media_id}:{i}'.encode()).hexdigest(),rect=[i*100,0,100,100],vector=face_vector,
+                person=dict(id=hashlib.sha256(f'fixture-person:{i}'.encode()).hexdigest(),name=f'Fixture person {i}',ignored=0,updated=1),
+                excluded=[]) for i in range(32)]))
         first.db.commit()
         assert client.sync() == 2 and client.sync() == 0 and peer.sync() == 0
         assert second.query(album='Batch')['count'] == 52
         for media_id in batch_ids:
+            assert people.export_index(first,media_id)==people.export_index(second,media_id)
             assert second.db.execute('SELECT embedding FROM semantic_embeddings WHERE photo_id=?',(media_id,)).fetchone()[0] == vector
         assert Path(peer.materialize(batch_ids[0])).read_bytes() == (batch/'Image 0.png').read_bytes()
-        print('Isolated Daochi v6: signed sync, full 50-photo compact semantic index batch, originals, editing, places, codecs, Live Photo privacy and separation round trip passed')
+        print('Isolated Daochi v6: signed sync, byte-limited face-rich and compact semantic index batches, originals, editing, places, codecs, Live Photo privacy and separation round trip passed')
     finally:
         process.terminate()
         process.wait(timeout=10)

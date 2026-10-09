@@ -27,6 +27,7 @@ def main():
     parser.add_argument('--no-service', action='store_true')
     parser.add_argument('--semantic-models', type=Path, help='Install verified local semantic models from this directory')
     parser.add_argument('--text-models', type=Path, help='Install verified offline text recognition languages from this directory')
+    parser.add_argument('--face-models', type=Path, help='Install verified offline face recognition models from this directory')
     parser.add_argument('--harmony', action='store_true', help='Register an already installed signed Photos package in Harmony')
     args = parser.parse_args()
     if args.ssh_host and (not re.fullmatch('[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+', args.ssh_host) or not args.node):
@@ -44,6 +45,12 @@ def main():
             parser.error('Install the signed Photos bundle through Harmony before registering its catalog entry')
     installed = args.prefix/'lib/photos'
     installed.mkdir(parents=True,exist_ok=True,mode=0o700)
+    for name in ['face-infer','face-pixels','face-match']:
+        target = name.replace('-','_'); source = repo/'build'/name/target
+        if not source.is_file(): parser.error('Build the local face recognition engine before installing')
+        shutil.copyfile(source,installed/(target+'.next'))
+        os.chmod(installed/(target+'.next'),0o755)
+        os.replace(installed/(target+'.next'),installed/target)
     binary = repo/'build/photos-desktop'
     if not binary.is_file():
         parser.error('Build Photos before installing')
@@ -118,7 +125,7 @@ def main():
     icon.parent.mkdir(parents=True,exist_ok=True)
     shutil.copyfile(repo/'assets/photos.svg',icon)
     (installed/'assets').mkdir(exist_ok=True)
-    for name in ['world.png', 'MAP-LICENSE.txt', 'SEMANTIC-MODELS.json', 'CLIP-LICENSE.txt', 'TEXT-MODELS.json', 'TESSERACT-LICENSE.txt']:
+    for name in ['world.png', 'MAP-LICENSE.txt', 'SEMANTIC-MODELS.json', 'CLIP-LICENSE.txt', 'TEXT-MODELS.json', 'TESSERACT-LICENSE.txt','FACE-MODELS.json','SFACE-LICENSE.txt','YUNET-LICENSE.txt']:
         shutil.copyfile(repo/'assets'/name, installed/'assets'/name)
     if args.semantic_models:
         subprocess.run(['python3',str(repo/'scripts/semantic-models.py'),'--source',str(args.semantic_models),
@@ -126,6 +133,9 @@ def main():
     if args.text_models:
         subprocess.run(['python3',str(repo/'scripts/text-models.py'),'--source',str(args.text_models),
                         '--destination',str(installed/'models/ocr')],check=True)
+    if args.face_models:
+        subprocess.run(['python3',str(repo/'scripts/face-models.py'),'--source',str(args.face_models),
+                        '--destination',str(installed/'models/face')],check=True)
     if args.harmony:
         catalog_path = Path.home()/'.config/harmony/apps.json'
         catalog = json.loads(catalog_path.read_bytes()) if catalog_path.is_file() else {}

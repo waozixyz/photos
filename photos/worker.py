@@ -32,7 +32,8 @@ def ui_query(library, request):
                            request.get('album', ''), request.get('offset', 0), sort=request.get('sort', 'newest'),
                            album_mode=request.get('album_mode', 'active'), album_sort=request.get('album_sort', 'name'),
                            memory_date=request.get('memory_date', ''), hidden_access=vault.unlocked(library, request.get('vault_token', '')),
-                           map_bounds=request.get('map_bounds'), map_gallery=request.get('map_gallery', False))
+                           map_bounds=request.get('map_bounds'), map_gallery=request.get('map_gallery', False),
+                           person=request.get('person',''), people_mode=request.get('people_mode','active'))
     result.update(vault.state(library, request.get('vault_token', '')))
     # A native page or slow catalog query may outlast the unlock. Recheck
     # before returning any Hidden paths to the caller.
@@ -53,19 +54,36 @@ def ui_query(library, request):
     fields = ('id', 'name', 'thumbnail', 'display' if modern else 'original', 'date', 'kind', 'favorite',
               'hidden', 'trashed', 'archived', 'width', 'height')
     result['photos'] = [{key: photo[key] for key in fields} for photo in result['photos']]
-    fields = ('name', 'count', 'thumbnail', 'pinned', 'archived', 'smart', 'place')
-    result['albums'] = [{key: album[key] for key in fields} for album in result['albums']]
+    fields = ('name', 'count', 'thumbnail', 'pinned', 'archived', 'smart', 'place', 'id', 'ignored')
+    result['albums'] = [{key: album[key] for key in fields if key in album} for album in result['albums']]
     export = library.setting('export', {})
     result['export_status'] = export.get('status', 'Choose a separate destination for a folder backup')
     result['export_continuous'] = int(bool(export.get('continuous')))
     from . import semantic
     result.update(semantic.state(library))
     semantic.kick(library)
+    from . import people
+    result.update(people.state(library))
+    people.kick(library)
     return result
 
 
 def library_request(library, request, config):
     action = request.get('action', 'query')
+    if action in {'people_enable','people_pause','people_retry','people_disable'}:
+        from . import people
+        if action=='people_retry':
+            with library.db: library.db.execute("DELETE FROM face_scans WHERE error<>''")
+        people.enable(library,action in {'people_enable','people_retry'})
+        if action=='people_disable': library.set_setting('people_enabled',False)
+        return ui_query(library,request)
+    if action in {'person_name','person_ignore','person_remove'}:
+        from . import people
+        ids = request.get('ids') or ([request['id']] if request.get('id') else [])
+        person = people.edit(library,action,request.get('person'),request.get('value',''),ids)
+        result = ui_query(library,{**request,'person':person,'offset':0})
+        result.update(person=person,view='people',status='People updated; originals retained')
+        return result
     if action in {'semantic_enable', 'semantic_pause', 'semantic_retry', 'semantic_disable'}:
         from . import semantic
         if action == 'semantic_disable':
@@ -399,6 +417,8 @@ def run_worker(library, config, once=False):
             return
         from . import semantic
         semantic.kick(library)
+        from . import people
+        people.kick(library)
         if pending:
             continue
         for _ in range(30):

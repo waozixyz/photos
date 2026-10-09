@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.18
+
+- Enable local face indexing and browse people without sending photos or face data to a recognition service.
+- Name people, merge groups with an existing name, ignore groups or correct selected photos while keeping originals unchanged.
+- Find named people in search and retain names, face groups and corrections in encrypted ThinkPad backup and library exports; keep Hidden and Trash out of People.
+- Keep large libraries responsive in Harmony while loading gallery pages and following theme changes.
+
 ## 0.1.17
 
 - Detect text in photos and Live Photos locally, select words or lines over the image, and copy a selection or all recognized text.

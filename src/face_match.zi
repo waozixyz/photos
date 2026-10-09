@@ -1,0 +1,28 @@
+// Local face similarity. Stable person identities and explicit corrections
+// stay in the library; this bounded helper only ranks normalized embeddings.
+#import "std/byte_text_linux"
+libc :: #system_library "c";
+Open :: (path: *u8, mode: *u8) -> *void #foreign libc "fopen";
+Read :: (data: *void, size: usize, count: usize, file: *void) -> usize #foreign libc "fread";
+Close :: (file: *void) -> s32 #foreign libc "fclose";
+Get :: (file: *void) -> s32 #foreign libc "fgetc";
+Valid :: (vector: []float32) -> bool {
+    norm: float64
+    for value: vector { if value != value || value < -1.001 || value > 1.001 { return false }; norm += cast(float64)value * cast(float64)value }
+    return norm >= 0.99 && norm <= 1.01
+}
+main :: (argc: s32, argv: **u8) -> s32 {
+    if argc != 3 { return 2 }
+    mode: [3]u8 = .{114,98,0}; source := Open(argv[1],*mode[0]); if source == null { return 3 }
+    vector: [128]float32; valid := Read(cast(*void)*vector[0],4,128,source) == 128 && Get(source) == -1; unused Close(source)
+    if !valid || !Valid(vector[:]) { return 3 }
+    candidates := Open(argv[2],*mode[0]); if candidates == null { return 3 }; defer { unused Close(candidates) }
+    other: [128]float32; best: s32 = -1; score: float64 = 0.55; index: s32
+    while true {
+        count := Read(cast(*void)*other[0],4,128,candidates)
+        if count == 0 { break }; if count != 128 || index >= 100000 || !Valid(other[:]) { return 3 }
+        dot: float64; for i: 0..127 { dot += cast(float64)vector[i] * cast(float64)other[i] }
+        if dot >= score { best = index; score = dot }; index += 1
+    }
+    print("{\"index\":%,\"score\":%}\n",best,score); return 0
+}

@@ -43,9 +43,9 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if length == 0 || length >= 16384 { return Failure("Gallery request exceeds its limit") }
     json := TextFromBytes(input[:length])
     if Space(json, ValueEnd(json, 0, 0)) != length || json[0] != 123 { return Failure("Choose a valid gallery request") }
-    view: [32]u8; search: [513]u8; album: [513]u8; sort: [16]u8; memory: [11]u8; filter: [513]u8
+    view: [32]u8; search: [513]u8; album: [513]u8; sort: [16]u8; memory: [11]u8; filter: [513]u8; person: [65]u8
     if !Decode(json,"view",view[:]) || !Decode(json,"search",search[:]) || !Decode(json,"album",album[:]) ||
-        !Decode(json,"sort",sort[:]) || !Decode(json,"memory_date",memory[:]) || !Decode(json,"filter",filter[:]) { return Failure("Gallery value exceeds its limit") }
+        !Decode(json,"sort",sort[:]) || !Decode(json,"memory_date",memory[:]) || !Decode(json,"filter",filter[:]) || !Decode(json,"person",person[:]) { return Failure("Gallery value exceeds its limit") }
     order := TextUntilNul(sort[:]); page := Number(json, "offset", 0); limit := Number(json, "limit", 60)
     if order != "newest" && order != "oldest" { return Failure("Choose newest first or oldest first") }
     if limit < 1 { limit = 1 }; if limit > 100 { limit = 100 }
@@ -70,6 +70,10 @@ main :: (argc: s32, argv: **u8) -> s32 {
     // is a gallery item. Incomplete or mismatched privacy updates fail closed.
     Search.AddSQL(*query, " AND coalesce(json_extract(metadata,'$.photosLive.photo'),'')='' AND (json_extract(metadata,'$.photosLive.video') IS NULL OR EXISTS(SELECT 1 FROM photos motion WHERE motion.id=json_extract(photos.metadata,'$.photosLive.video') AND motion.kind='video' AND json_extract(motion.metadata,'$.photosLive.photo')=photos.id AND motion.hidden=photos.hidden AND (motion.trashed>0)=(photos.trashed>0)))")
     if album[0] != 0 && filter[0] == 0 { Search.AddSQL(*query," AND EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=?)"); Search.Bind(*query,TextUntilNul(album[:])) }
+    if name == "people" {
+        Search.AddSQL(*query," AND hidden=0 AND trashed=0 AND EXISTS(SELECT 1 FROM faces WHERE faces.photo_id=photos.id AND faces.person_id=?)")
+        Search.Bind(*query,TextUntilNul(person[:]))
+    }
     if name == "memories" {
         if memory[0] == 0 { unused WriteIsoDay(Clock.UnixNow(),memory[:]) }
         day := Search.Date(TextUntilNul(memory[:]))

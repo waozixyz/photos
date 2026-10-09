@@ -224,6 +224,30 @@ of Live Photos. Failed files remain stored and can be retried. Face recognition,
 video-content search, automatic curation and a Ziran tokenizer/indexing service
 remain unfinished. CLIP's MIT attribution is in `assets/CLIP-LICENSE.txt`.
 
+People provides opt-in local face grouping. Enable People to index local photos,
+pause or resume processing, and retry unavailable originals. Previously completed
+groups remain browsable while paused. Name or merge assigns a name; using an
+existing name merges its groups. Ignore removes a group from active People and
+named-person search; Show ignored lets you unignore it. Select wrong photos in a
+person's gallery, then Not this person moves their matching faces into separate
+unnamed groups and retains the correction. Corrected groups cannot be silently
+merged back by reusing the rejected name. Originals and album memberships stay
+unchanged. Search a name or combine `person:"Ada"` with other filters. A saved
+search using this filter updates as new faces join that named person.
+
+Face detection, five-landmark alignment, embeddings and similarity matching run
+in headless Ziran helpers with the pinned YuNet/SFace models and ONNX Runtime's
+CPU engine; telemetry is disabled. Their licenses are in `assets/`. Recognition
+is a suggestion, especially for children, small faces, occlusion or unusual
+angles. Each photo supports up to 32 clear faces, with a conservative similarity
+threshold; missed or excess faces remain a limitation. Photos with no detected
+faces are marked processed. Videos are not face-indexed. Hidden and Trash are
+excluded, even while Hidden is unlocked. Derived indexes and corrections stay in
+the private local library and authenticated encrypted ThinkPad records; optional
+folder exports include them in sidecars. Enable People independently on a restored
+device. Disable People hides its groups and named-person search while retaining
+the local index for later use. No network recognition or public node is used.
+
 Hidden requires a separate local password, with confirmation when first created.
 The native Ziran helper uses libsodium's Argon2id verifier; passwords never enter
 process arguments or app inspection state. Locked photos cannot be read, exported
@@ -247,7 +271,7 @@ and [export behavior](https://ente.com/help/photos/features/backup-and-sync/expo
 The remaining replacement work includes:
 
 - Mobile clients, permission-aware background camera backup and device space recovery.
-- On-device face grouping, detailed maps, curated memories and automatically curated trip/people albums.
+- Detailed maps, curated memories, automatic trip albums and richer face review/assignment controls.
 - Advanced photo editing, encrypted video streaming, animated editing previews, embedded Android motion photos, HDR display and broader codec/camera coverage.
 - Private sharing, collaboration, public links, comments and account recovery.
   Any sharing design needs to honor the owner's ThinkPad-only sync restriction.
@@ -292,6 +316,7 @@ make map-window-test map-portable-test
 make places-window-test places-portable-test
 make codec-window-test codec-portable-test
 make playback-window-test playback-portable-test
+make face-models people-window-test people-portable-test
 PHOTOS_DAOCHI=/path/to/daochi make sync-test
 ```
 

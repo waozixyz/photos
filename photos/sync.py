@@ -224,6 +224,8 @@ class Client:
         photo.pop('dirty', None)
         from .semantic import encrypted_index
         photo['semantic'] = encrypted_index(self.library, photo['id'])
+        from .people import export_index
+        photo['people'] = export_index(self.library,photo['id'])
         return self.seal_record(photo, COLLECTION, 'photos.media.v1')
 
     def album_record(self, album):
@@ -304,6 +306,9 @@ class Client:
         if 'semantic' in photo:
             from .semantic import accept_index
             accept_index(self.library, photo['id'], photo['semantic'])
+        if 'people' in photo:
+            from .people import accept_index
+            accept_index(self.library,photo['id'],photo['people'])
         columns = ['id', 'name', 'extension', 'kind', 'size', 'taken', 'width', 'height', 'metadata', 'albums',
                    'favorite', 'hidden', 'trashed', 'archived', 'caption', 'tags', 'updated', 'manifest', 'edits']
         for key in ['metadata', 'albums', 'manifest', 'edits']:
@@ -386,9 +391,21 @@ class Client:
                     self.save_manifest(photo, manifest)
                     records.append(self.record(photo, manifest))
         if records:
-            result = self.exchange(records)
-            if result.get('full_snapshot_required') or result.get('status') not in {'ok', 'success', 'synced'}:
-                raise ValueError('Node did not confirm the upload; it remains queued')
+            # Face-rich photos carry larger encrypted records. Split by byte
+            # budget as well as record count to fit the pinned node's request
+            # limit; failed batches retain every dirty marker for safe retry.
+            batches, batch, size = [], [], 0
+            for record in records:
+                length = len(packed(record).encode()) + 1
+                if length>750000: raise ValueError('Photo metadata exceeds the encrypted sync page; it remains queued')
+                if batch and size+length>750000:
+                    batches.append(batch); batch, size = [], 0
+                batch.append(record); size += length
+            if batch: batches.append(batch)
+            for batch in batches:
+                result = self.exchange(batch)
+                if result.get('full_snapshot_required') or result.get('status') not in {'ok', 'success', 'synced'}:
+                    raise ValueError('Node did not confirm the upload; it remains queued')
             for row in rows:
                 self.library.db.execute('UPDATE photos SET dirty=0 WHERE id=? AND updated=?', (row['id'], row['updated']))
             for row in album_rows:

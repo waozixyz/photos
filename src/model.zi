@@ -45,7 +45,16 @@ Photo :: struct {
     height: s32
 }
 Selection :: struct { id: [65]u8 }
-Album :: struct { name: [513]u8; thumbnail: [4097]u8; count: s32; pinned: bool; archived: bool; smart: bool; place: bool }
+Album :: struct { name: [513]u8; thumbnail: [4097]u8; count: s32; pinned: bool; archived: bool; smart: bool; place: bool; id: [65]u8; ignored: bool }
+person: [65]u8;
+person_name: [513]u8;
+person_ignored: bool;
+people_mode: string = "active";
+people_status: [1025]u8;
+people_enabled: bool;
+people_processing: bool;
+people_working: bool;
+people_count: s32;
 place_name: [513]u8;
 place_area: [257]u8;
 picked: Vec(Selection);
@@ -173,6 +182,7 @@ SendRequest :: (action: string, id: string, value: string) {
     BuilderPrint(*out, "{\"gallery_format\":2,\"action\":"); Quoted(*out, action)
     Property(*out, "view", view); Property(*out, "search", TextUntilNul(search[:]))
     Property(*out, "album", TextUntilNul(album[:])); Property(*out, "id", id); Property(*out, "value", value)
+    Property(*out, "person", TextUntilNul(person[:])); Property(*out, "people_mode", people_mode)
     Property(*out, "sort", sort)
     Property(*out, "album_mode", album_mode); Property(*out, "album_sort", album_sort)
     Property(*out, "memory_date", TextUntilNul(memory_date[:]))
@@ -196,13 +206,32 @@ SendRequest :: (action: string, id: string, value: string) {
     if !loading { Set(message[:], Transport.error); if appending { more_due = ticks + 300; appending = false } }
     busy = loading && action != "query" && action != "playback_check" && action != "text_check"; next_refresh = ticks + 300
 }
+HeaderField :: struct { key: [65]u8; at: s32 }
+header_fields: [64]HeaderField;
+header_count: s32;
+ReadHeader :: (json: string) {
+    header_count = 0; at := Space(json,1)
+    while at >= 0 && at < cast(s32)json.count && json[at] != 125 && header_count < 64 {
+        name := ReadString(json,at); if !name.valid { return }
+        next := Space(json,name.after); if next < 0 || next >= cast(s32)json.count || json[next] != 58 { return }
+        value := Space(json,next+1)
+        if name.end-name.start < 65 { Set(header_fields[header_count].key[:],json[name.start:name.end]); header_fields[header_count].at = value; header_count += 1 }
+        at = Space(json,ValueEnd(json,value,0))
+        if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json,at+1) } else { break }
+    }
+}
+Lookup :: (json: string, at: s32, key: string) -> s32 {
+    if at != 0 { return FieldAt(json,at,key) }
+    for i: 0..header_count-1 { if TextUntilNul(header_fields[i].key[:]) == key { return header_fields[i].at } }
+    return -1
+}
 Decode :: (json: string, at: s32, key: string, out: []u8) {
-    size := ReadStringText(json, FieldAt(json, at, key), out)
+    size := ReadStringText(json, Lookup(json, at, key), out)
     if size < 0 || size >= cast(s32)out.count { out[0] = 0 }
     else { out[size] = 0 }
 }
 Number :: (json: string, at: s32, key: string) -> s32 {
-    value := ReadNumber(json, FieldAt(json, at, key))
+    value := ReadNumber(json, Lookup(json, at, key))
     return ifx value.valid then cast(s32)value.value else 0
 }
 PhotoString :: (json: string, at: s32, out: []u8) { if ReadStringText(json, at, out) < 0 { out[0] = 0 } }
@@ -254,8 +283,9 @@ Tick :: () {
         loading = false; busy = false
         if Transport.error != "" { Set(message[:], Transport.error); if editor == "text" { CancelEditor() }; if playback_id[0] != 0 { StopPlayback() }; if appending { more_due = ticks + 300; appending = false }; return }
         json := Transport.Value()
-        if FieldAt(json, 0, "vault_configured") >= 0 { vault_configured = Number(json, 0, "vault_configured") > 0; vault_unlocked = Number(json, 0, "vault_unlocked") > 0 }
-        if FieldAt(json, 0, "vault_token") >= 0 { Decode(json, 0, "vault_token", vault_token[:]) }
+        ReadHeader(json)
+        if Lookup(json, 0, "vault_configured") >= 0 { vault_configured = Number(json, 0, "vault_configured") > 0; vault_unlocked = Number(json, 0, "vault_unlocked") > 0 }
+        if Lookup(json, 0, "vault_token") >= 0 { Decode(json, 0, "vault_token", vault_token[:]) }
         if view == "hidden" && !vault_unlocked {
             TextDetection.Clear()
             StopPlayback(); selected = -1; VecClear(photos); count = 0; ClearSelection(); appending = false; Wipe(edit_preview[:])
@@ -267,7 +297,7 @@ Tick :: () {
             fresh_id: [65]u8; Decode(json, 0, "text_photo", fresh_id[:])
             if editor != "text" || selected < 0 || selected >= count { return }
             if message[0] != 0 || TextUntilNul(fresh_id[:]) != TextUntilNul(photos[selected].id[:]) { TextDetection.Clear(); editor = ""; return }
-            if FieldAt(json, 0, "text_words") >= 0 { TextDetection.LoadLanguages(json); TextDetection.Load(json); Decode(json, 0, "status", message[:]) }
+            if Lookup(json, 0, "text_words") >= 0 { TextDetection.LoadLanguages(json); TextDetection.Load(json); Decode(json, 0, "status", message[:]) }
             text_poll = ticks + 30; text_valid_until = ticks + 150; return
         }
         if playback_request {
@@ -286,8 +316,8 @@ Tick :: () {
             Playback.Lease(2500); playback_poll = ticks + 30
             return
         }
-        if FieldAt(json, 0, "video_job") >= 0 { Decode(json, 0, "video_job", video_job[:]); video_poll = ticks + 30 }
-        if FieldAt(json, 0, "saved_copy") >= 0 {
+        if Lookup(json, 0, "video_job") >= 0 { Decode(json, 0, "video_job", video_job[:]); video_poll = ticks + 30 }
+        if Lookup(json, 0, "saved_copy") >= 0 {
             saved: [65]u8; Decode(json, 0, "saved_copy", saved[:])
             if saved[0] != 0 && (editor == "video" || editor == "video_trim") { editor = ""; edit_preview[0] = 0; edit_session[0] = 0 }
         }
@@ -295,28 +325,35 @@ Tick :: () {
         if view == "map" { Map.Load(json) }
         total = Number(json, 0, "total"); matches = Number(json, 0, "count"); pending = Number(json, 0, "pending")
         Decode(json, 0, "status", message[:])
-        if FieldAt(json, 0, "edit_preview") >= 0 {
+        if Lookup(json, 0, "edit_preview") >= 0 {
             Decode(json, 0, "edit_preview", edit_preview[:]); Decode(json, 0, "edit_session", edit_session[:])
             edit_width = Number(json, 0, "edit_width"); edit_height = Number(json, 0, "edit_height")
         }
-        if FieldAt(json, 0, "video_duration") >= 0 {
+        if Lookup(json, 0, "video_duration") >= 0 {
             video_duration = Number(json, 0, "video_duration")
             if video_adjustments[1] == 0 { video_adjustments[1] = video_duration }
         }
-        if FieldAt(json, 0, "memory_date") >= 0 { Decode(json, 0, "memory_date", memory_date[:]) }
+        if Lookup(json, 0, "memory_date") >= 0 { Decode(json, 0, "memory_date", memory_date[:]) }
         Decode(json, 0, "export_status", export_status[:]); export_continuous = Number(json, 0, "export_continuous") > 0
         Decode(json, 0, "semantic_status", semantic_status[:])
         semantic_enabled = Number(json, 0, "semantic_enabled") > 0; semantic_working = Number(json, 0, "semantic_working") > 0
         semantic_processing = Number(json, 0, "semantic_processing") > 0
+        Decode(json,0,"people_status",people_status[:]); people_enabled = Number(json,0,"people_enabled") > 0
+        people_processing = Number(json,0,"people_processing") > 0; people_working = Number(json,0,"people_working") > 0
+        people_count = Number(json,0,"people_count")
+        if Lookup(json,0,"person") >= 0 { Decode(json,0,"person",person[:]); selected = -1; offset = 0; scroll = 0 }
+        person_detail := Lookup(json,0,"person_detail")
+        person_name[0] = 0; person_ignored = false
+        if person_detail >= 0 { Decode(json,person_detail,"name",person_name[:]); person_ignored = Number(json,person_detail,"ignored") > 0 }
         if mutation { ClearSelection(); editor = "" }
         if Number(json, 0, "place_open") > 0 { selected = -1; detail_id[0] = 0 }
-        if FieldAt(json, 0, "album") >= 0 { Decode(json, 0, "album", album[:]); offset = 0; scroll = 0 }
-        if FieldAt(json, 0, "search") >= 0 { Decode(json, 0, "search", search[:]); search_cursor = 0; search_anchor = 0 }
-        if FieldAt(json, 0, "view") >= 0 {
+        if Lookup(json, 0, "album") >= 0 { Decode(json, 0, "album", album[:]); offset = 0; scroll = 0 }
+        if Lookup(json, 0, "search") >= 0 { Decode(json, 0, "search", search[:]); search_cursor = 0; search_anchor = 0 }
+        if Lookup(json, 0, "view") >= 0 {
             fresh_view: [32]u8; Decode(json, 0, "view", fresh_view[:])
-            for i: 0..cast(s32)12 { if View(i) == TextUntilNul(fresh_view[:]) { view = View(i) } }
+            for i: 0..cast(s32)13 { if View(i) == TextUntilNul(fresh_view[:]) { view = View(i) } }
         }
-        album_detail := FieldAt(json, 0, "album_detail")
+        album_detail := Lookup(json, 0, "album_detail")
         album_description[0] = 0; album_filter[0] = 0; album_pinned = false; album_archived = false; album_place = false
         if album_detail >= 0 {
             Decode(json, album_detail, "description", album_description[:])
@@ -325,7 +362,7 @@ Tick :: () {
             album_archived = Number(json, album_detail, "archived") > 0
             album_place = Number(json, album_detail, "place") > 0
         }
-        detail := FieldAt(json, 0, "detail")
+        detail := Lookup(json, 0, "detail")
         if detail >= 0 {
             Decode(json, detail, "id", detail_id[:]); Decode(json, detail, "caption", detail_caption[:])
             Decode(json, detail, "tags", detail_tags[:]); Decode(json, detail, "albums", detail_albums[:])
@@ -337,7 +374,7 @@ Tick :: () {
         previous: [65]u8
         if selected >= 0 && selected < count { Set(previous[:], TextUntilNul(photos[selected].id[:])) }
         if !appending { selected = -1; last_pick = -1; VecClear(photos); count = 0; feed_base = offset }; revision += 1
-        array := FieldAt(json, 0, "photos"); at := Space(json, array + 1); page_count: s32
+        array := Lookup(json, 0, "photos"); at := Space(json, array + 1); page_count: s32
         while at >= 0 && at < cast(s32)json.count && json[at] != 93 && page_count < 60 {
             empty: Photo; if !VecPush(photos, empty) { Set(message[:], "Unable to load more photos"); break }
             photo := *photos[count]
@@ -347,16 +384,19 @@ Tick :: () {
             count += 1; page_count += 1; at = Space(json, at); if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json, at + 1) }
         }
         appending = false
-        array = FieldAt(json, 0, "albums"); at = Space(json, array + 1); album_count = 0; VecClear(catalog)
+        array = Lookup(json, 0, "albums"); at = Space(json, array + 1); album_count = 0; VecClear(catalog)
         while at >= 0 && at < cast(s32)json.count && json[at] != 93 {
             empty: Album; if !VecPush(catalog, empty) { break }; item := *catalog[album_count]
             Decode(json, at, "name", item.name[:]); Decode(json, at, "thumbnail", item.thumbnail[:]); item.count = Number(json, at, "count")
             item.pinned = Number(json, at, "pinned") > 0; item.archived = Number(json, at, "archived") > 0
             item.smart = Number(json, at, "smart") > 0
             item.place = Number(json, at, "place") > 0
+            Decode(json,at,"id",item.id[:]); item.ignored = Number(json,at,"ignored") > 0
             album_count += 1; at = Space(json, ValueEnd(json, at, 0)); if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json, at + 1) }
         }
-        text: Vec(u8); BuilderPrint(*text, "% photos & videos · % albums · % queued", total, album_count, pending)
+        text: Vec(u8)
+        if view == "people" { BuilderPrint(*text,"% photos & videos · % queued",total,pending) }
+        else { BuilderPrint(*text, "% photos & videos · % albums · % queued", total, album_count, pending) }
         value := BuilderFinish(text); Set(summary[:], value); Release(value)
     }
     if !loading && queued_view >= 0 { target := queued_view; queued_view = -1; Navigate(View(target)); return }
@@ -366,22 +406,22 @@ Tick :: () {
     if !loading && playback_id[0] != 0 && ticks >= playback_poll { playback_poll = ticks + 30; Request("playback_check", TextUntilNul(playback_id[:])); return }
     if !loading && editor == "text" && TextDetection.active && selected >= 0 && selected < count && ticks >= text_poll { text_poll = ticks + 30; Request("text_check", TextUntilNul(photos[selected].id[:])); return }
     if !loading && video_job[0] != 0 && ticks >= video_poll { video_poll = ticks + 60; Request("video_status"); return }
-    if !loading && ticks > next_refresh && ((scroll == 0 && selected < 0) || (view == "hidden" && vault_unlocked)) { if selected < 0 { offset = 0 }; Request() }
+    if !loading && ticks > next_refresh && ((scroll == 0 && selected < 0) || (view == "hidden" && vault_unlocked)) { if selected < 0 && view != "people" { offset = 0 }; Request() }
 }
 Navigate :: (target: string) {
     TextDetection.Clear()
     Viewer.Reset()
     StopPlayback()
     queued_request = false
-    if loading { for i: 0..cast(s32)12 { if View(i) == target { queued_view = i } }; return }
+    if loading { for i: 0..cast(s32)13 { if View(i) == target { queued_view = i } }; return }
     if view == "hidden" && target != "hidden" && vault_token[0] != 0 {
-        for i: 0..cast(s32)12 { if View(i) == target { queued_view = i } }
+        for i: 0..cast(s32)13 { if View(i) == target { queued_view = i } }
         vault_unlocked = false; selected = -1; ClearSelection(); editor = ""; Wipe(edit_value[:]); Wipe(vault_first[:]); Wipe(edit_preview[:])
         Request("vault_lock"); Wipe(vault_token[:]); return
     }
     Wipe(vault_first[:]); if Secret() { Wipe(edit_value[:]) }
     if target == "map" { Map.Reset() }
-    ClearSelection(); editor = ""; view = target; appending = false; feed_base = 0; album[0] = 0; selected = -1; offset = 0; scroll = 0; Request()
+    ClearSelection(); editor = ""; view = target; appending = false; feed_base = 0; album[0] = 0; person[0] = 0; selected = -1; offset = 0; scroll = 0; Request()
 }
 Choose :: (index: s32) {
     if busy || index < 0 || index >= count { return }
@@ -628,7 +668,9 @@ MapGallery :: (index: s32 = -1) {
     Map.OpenGallery(index); RefreshMap()
 }
 MapBack :: () { if loading { return }; Map.gallery = false; Map.dragged = false; RefreshMap() }
-CatalogView :: () -> bool { return view == "albums" || view == "places" }
+CatalogView :: () -> bool { return view == "albums" || view == "places" || (view == "people" && person[0] == 0) }
+PeopleBack :: () { if loading { return }; ClearSelection(); person[0] = 0; search[0] = 0; selected = -1; offset = 0; scroll = 0; Request() }
+PeoplePage :: (direction: s32) { if loading { return }; offset += direction * 60; if offset < 0 { offset = 0 }; scroll = 0; Request() }
 AlbumPlace :: () -> bool { return album_place }
 BeginPlace :: (from_photo: bool = false) {
     place_name[0] = 0
@@ -636,4 +678,4 @@ BeginPlace :: (from_photo: bool = false) {
     else { Set(place_area[:], "0, 0, 1") }
     BeginEdit("place_name", "Name this place", "", "A name such as Home; photos in its radius match automatically")
 }
-View :: (index: s32) -> string { names: [13]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized", "memories", "map", "places", "semantic"}; return names[index] }
+View :: (index: s32) -> string { names: [14]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized", "memories", "map", "places", "semantic", "people"}; return names[index] }

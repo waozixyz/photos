@@ -96,6 +96,17 @@ class Library:
             CREATE TABLE IF NOT EXISTS semantic_embeddings (
                 photo_id TEXT PRIMARY KEY, model TEXT NOT NULL,
                 embedding BLOB, error TEXT NOT NULL DEFAULT '');
+            CREATE TABLE IF NOT EXISTS people (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '',
+                ignored INTEGER NOT NULL DEFAULT 0, updated REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS face_scans (
+                photo_id TEXT PRIMARY KEY, model TEXT NOT NULL, error TEXT NOT NULL DEFAULT '');
+            CREATE TABLE IF NOT EXISTS faces (
+                id TEXT PRIMARY KEY, photo_id TEXT NOT NULL, person_id TEXT NOT NULL,
+                rect TEXT NOT NULL, embedding BLOB NOT NULL,
+                excluded TEXT NOT NULL DEFAULT '[]');
+            CREATE INDEX IF NOT EXISTS faces_person ON faces(person_id,photo_id);
+            CREATE INDEX IF NOT EXISTS faces_photo ON faces(photo_id);
             CREATE TABLE IF NOT EXISTS albums (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL DEFAULT '',
                 cover TEXT NOT NULL DEFAULT '', pinned INTEGER NOT NULL DEFAULT 0,
@@ -306,6 +317,15 @@ class Library:
                  metadata.get('tags', '') if isinstance(metadata.get('tags', ''), str) else '', time.time(),
                  int(metadata.get('archived') is True)))
             self.preview(photo, destination)
+            if 'photosPeople' in metadata:
+                from . import people
+                try: people.accept_index(self,photo_id,metadata['photosPeople'])
+                except ValueError: warning = True
+        # Derived face data lives in its own private tables, never in the
+        # importer metadata blob or ordinary public details.
+        if 'photosPeople' in combined:
+            combined.pop('photosPeople',None)
+            self.db.execute('UPDATE photos SET metadata=? WHERE id=?',(packed(combined),photo_id))
         self.db.execute('INSERT OR REPLACE INTO sources VALUES(?,?,?,?,?)',
                         (str(path), stat.st_size, stat.st_mtime_ns, stamp, photo_id))
         self.db.commit()
@@ -616,31 +636,33 @@ class Library:
                     taken=datetime.fromtimestamp(photo['taken'], timezone.utc).isoformat(),
                     location=f"{geo[0]}, {geo[1]}" if geo else '')
 
-    def query(self, view='photos', search='', album='', offset=0, limit=60, sort='newest', album_mode='active', album_sort='name', memory_date='', hidden_access=True, map_bounds=None, map_gallery=False):
+    def query(self, view='photos', search='', album='', offset=0, limit=60, sort='newest', album_mode='active', album_sort='name', memory_date='', hidden_access=True, map_bounds=None, map_gallery=False, person='', people_mode='active'):
         # Map summaries contain coordinates rather than IDs to hydrate. Hold
         # the writer lock until they are returned, so concurrent Hidden/Trash
         # changes cannot overtake the native query and publish private markers.
-        locked = view == 'map' and not self.db.in_transaction
+        locked = view in {'map','people'} and not self.db.in_transaction
         if locked:
             self.db.execute('BEGIN IMMEDIATE')
         try:
             return self._query(view, search, album, offset, limit, sort, album_mode, album_sort,
-                               memory_date, hidden_access, map_bounds, map_gallery)
+                               memory_date, hidden_access, map_bounds, map_gallery, person, people_mode)
         finally:
             if locked:
                 self.db.rollback()
 
-    def _query(self, view, search, album, offset, limit, sort, album_mode, album_sort, memory_date, hidden_access, map_bounds, map_gallery):
+    def _query(self, view, search, album, offset, limit, sort, album_mode, album_sort, memory_date, hidden_access, map_bounds, map_gallery, person, people_mode):
         from .query import page
         album_detail = self.db.execute('SELECT * FROM albums WHERE name=? AND deleted=0', (album,)).fetchone() if album else None
         smart_filter = album_detail['filter'] if album_detail else ''
         map_request = dict(map_bounds=map_bounds) if map_bounds is not None else {}
         request = dict(view=view, search=search, album=album, offset=max(0, int(offset)),
                         limit=max(1, min(100, int(limit))), sort=sort, memory_date=memory_date,
-                        hidden_access=int(bool(hidden_access)), filter=smart_filter, map_gallery=int(bool(map_gallery)), **map_request)
+                        hidden_access=int(bool(hidden_access)), filter=smart_filter, map_gallery=int(bool(map_gallery)), person=person, **map_request)
         if view == 'semantic':
             from .semantic import search_page
             response = search_page(self, request, page)
+        elif view=='people' and (not person or not self.setting('people_enabled',False)):
+            response = dict(count=0,ids=[])
         else:
             response = page(self, **request)
         count = response['count']
@@ -650,14 +672,14 @@ class Library:
             photo = dict(row)
             # Native ID paging and row hydration are separate reads. A photo
             # hidden by another request in between must not expose its paths.
-            if (photo['hidden'] and (not hidden_access or view in {'map', 'semantic'})) or (view in {'map', 'semantic'} and photo['trashed']):
+            if (photo['hidden'] and (not hidden_access or view in {'map', 'semantic','people'})) or (view in {'map', 'semantic','people'} and photo['trashed']):
                 continue
             from . import live
             try:
                 parts = live.components(self, photo)
             except LibraryError:
                 continue
-            if any(p['hidden'] and (not hidden_access or view in {'map', 'semantic'}) for p in parts):
+            if any(p['hidden'] and (not hidden_access or view in {'map', 'semantic','people'}) for p in parts):
                 continue
             if any(bool(p['trashed']) != bool(photo['trashed']) for p in parts):
                 continue
@@ -675,6 +697,13 @@ class Library:
         album_pending = self.db.execute('SELECT COUNT(*) FROM albums WHERE dirty=1').fetchone()[0]
         result = dict(photos=photos, count=count, albums=albums, total=totals[0], bytes=totals[1], pending=(totals[2] or 0) + album_pending,
                     status=self.setting('status', 'Local library · ThinkPad sync only'), importing=self.setting('import', {}))
+        if view=='people':
+            from . import people
+            result['albums'],result['people_count'] = people.catalog(self,search,people_mode,offset) if not person and self.setting('people_enabled',False) else ([],0)
+            if person:
+                detail = people.group(self,person)
+                # Do not publish the identity of a group with no accessible faces.
+                result['person_detail'] = detail if photos else dict(id=person,name='',ignored=0)
         if view == 'memories':
             result['memory_date'] = response['memory_date']
         if view == 'map':
@@ -714,5 +743,8 @@ class Library:
         metadata = json.loads(photo['metadata'])
         metadata.update(description=photo['caption'], photoTakenTime={'timestamp': str(int(photo['taken']))}, albums=json.loads(photo['albums']))
         metadata.update(tags=photo['tags'], favorite=bool(photo['favorite']), archived=bool(photo['archived']))
+        from .people import export_index
+        index = export_index(self,photo_id)
+        if index is not None: metadata['photosPeople'] = index
         atomic(folder / 'metadata' / (destination.name + '.json'), packed(metadata).encode())
         return str(destination)

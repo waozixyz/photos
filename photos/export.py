@@ -162,6 +162,9 @@ class Export:
             metadata.update(description=photo['caption'], photoTakenTime={'timestamp': str(int(photo['taken']))},
                             albums=json.loads(photo['albums']), tags=photo['tags'], favorite=bool(photo['favorite']),
                             archived=bool(photo['archived']))
+            from .people import export_index
+            index = export_index(self.library,photo['id'])
+            if index is not None: metadata['photosPeople'] = index
             for folder in memberships:
                 relative = folder + '/' + name
                 desired.add(relative)

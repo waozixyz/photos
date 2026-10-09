@@ -1,0 +1,142 @@
+// Headless YuNet/SFace inference for Photos. Tensors and embeddings stay
+// local; ONNX Runtime supplies model operators through its versioned C API.
+#import "std/byte_text_linux"
+libc :: #system_library "c";
+loader :: #system_library "dl";
+math :: #system_library "m";
+OpenLibrary :: (path: *u8, flags: s32) -> *void #foreign loader "dlopen";
+Symbol :: (library: *void, name: *u8) -> *void #foreign loader "dlsym";
+CloseLibrary :: (library: *void) -> s32 #foreign loader "dlclose";
+Open :: (path: *u8, mode: *u8) -> *void #foreign libc "fopen";
+Read :: (bytes: *void, size: usize, count: usize, file: *void) -> usize #foreign libc "fread";
+Write :: (bytes: *void, size: usize, count: usize, file: *void) -> usize #foreign libc "fwrite";
+Copy :: (destination: *void, source: *void, size: usize) -> *void #foreign libc "memcpy";
+Get :: (file: *void) -> s32 #foreign libc "fgetc";
+Close :: (file: *void) -> s32 #foreign libc "fclose";
+Sqrt :: (value: float64) -> float64 #foreign math "sqrt";
+BaseFn :: #type () -> *ApiBase #c_call;
+ApiFn :: #type (version: u32) -> *Api #c_call;
+EnvFn :: #type (severity: s32, label: *u8, out: **void) -> *void #c_call;
+UnaryFn :: #type (value: *void) -> *void #c_call;
+CreateFn :: #type (out: **void) -> *void #c_call;
+OptionFn :: #type (options: *void, value: s32) -> *void #c_call;
+SessionFn :: #type (env: *void, model: *u8, options: *void, out: **void) -> *void #c_call;
+MemoryFn :: #type (allocator: s32, kind: s32, out: **void) -> *void #c_call;
+TensorFn :: #type (memory: *void, bytes: *void, length: usize, shape: *s64, dimensions: usize, kind: s32, out: **void) -> *void #c_call;
+RunFn :: #type (session: *void, options: *void, names: **u8, inputs: **void, count: usize, output_names: **u8, outputs_count: usize, outputs: **void) -> *void #c_call;
+PointerFn :: #type (value: *void, out: **void) -> *void #c_call;
+CountFn :: #type (info: *void, out: *usize) -> *void #c_call;
+ReleaseFn :: #type (value: *void) #c_call;
+// Layout of OrtApi v20 through the last function used here. Reserved slots
+// preserve the official C ABI; typed fields keep calls checked by Ziran.
+ApiBase :: struct { GetApi: ApiFn; version: *void }
+Api :: struct {
+    reserved_0: [3]*void
+    CreateEnv: EnvFn
+    reserved_4: [2]*void
+    DisableTelemetry: UnaryFn
+    CreateSession: SessionFn
+    reserved_8: [1]*void
+    Run: RunFn
+    CreateOptions: CreateFn
+    reserved_11: [12]*void
+    Optimize: OptionFn
+    IntraThreads: OptionFn
+    InterThreads: OptionFn
+    reserved_26: [23]*void
+    CreateTensor: TensorFn
+    reserved_50: [1]*void
+    TensorData: PointerFn
+    reserved_52: [12]*void
+    TensorCount: CountFn
+    TensorInfo: PointerFn
+    reserved_66: [3]*void
+    CreateMemory: MemoryFn
+    reserved_70: [22]*void
+    ReleaseEnv: ReleaseFn
+    ReleaseStatus: ReleaseFn
+    ReleaseMemory: ReleaseFn
+    ReleaseSession: ReleaseFn
+    ReleaseValue: ReleaseFn
+    reserved_97: [2]*void
+    ReleaseInfo: ReleaseFn
+    ReleaseOptions: ReleaseFn
+}
+api: *Api;
+base_call: BaseFn;
+Checked :: (status: *void) -> bool {
+    if status == null { return true }
+    api.ReleaseStatus(status)
+    return false
+}
+Release :: (value: *void, callback: ReleaseFn) { if value != null { callback(value) } }
+Failure :: (message: string) -> s32 { print("%\n", message); return 1 }
+Allocate :: (size: usize) -> *void #foreign libc "malloc";
+Free :: (memory: *void) #foreign libc "free";
+Cleanup :: (outputs: **void, infos: **void) {
+    for cleanup_index: 0..11 { Release(infos[cleanup_index],api.ReleaseInfo); Release(outputs[cleanup_index],api.ReleaseValue) }
+}
+main :: (argc: s32, argv: **u8) -> s32 {
+    if argc != 6 { return Failure("Supply runtime, detect/embed mode, verified face model, tensor and output") }
+    mode := TextFromCString(argv[2]); detector := mode == "detect"
+    if !detector && mode != "embed" { return Failure("Choose detect or embed") }
+    library := OpenLibrary(argv[1], 2); if library == null { return Failure("Install the local face model runtime") }
+    defer { unused CloseLibrary(library) }
+    symbol_name: [14]u8 = .{79,114,116,71,101,116,65,112,105,66,97,115,101,0}
+    entry := Symbol(library, *symbol_name[0]); if entry == null { return Failure("Unsupported local model runtime") }
+    unused Copy(cast(*void)*base_call,cast(*void)*entry,size_of(*void)); base := base_call()
+    if base == null { return Failure("Unsupported local model runtime") }; api = base.GetApi(20)
+    if api == null { return Failure("The local model runtime needs API version 20") }
+    environment: *void; options: *void; session: *void; memory: *void; input: *void
+    outputs: [12]*void; infos: [12]*void
+    defer {
+        Cleanup(*outputs[0],*infos[0])
+        Release(input,api.ReleaseValue); Release(memory,api.ReleaseMemory); Release(session,api.ReleaseSession); Release(options,api.ReleaseOptions); Release(environment,api.ReleaseEnv)
+    }
+    label: [7]u8 = .{80,104,111,116,111,115,0}
+    if !Checked(api.CreateEnv(4,*label[0],*environment)) || !Checked(api.DisableTelemetry(environment)) ||
+        !Checked(api.CreateOptions(*options)) || !Checked(api.IntraThreads(options,2)) || !Checked(api.InterThreads(options,1)) ||
+        !Checked(api.Optimize(options,99)) || !Checked(api.CreateSession(environment,argv[3],options,*session)) { return Failure("Cannot start private local face inference") }
+    side: s64 = ifx detector then 640 else 112; size := cast(usize)(3 * side * side * 4)
+    pixels := Allocate(size); if pixels == null { return Failure("Cannot allocate bounded face tensor") }; defer { Free(pixels) }
+    read_mode: [3]u8 = .{114,98,0}; file := Open(argv[4],*read_mode[0]); if file == null { return Failure("Cannot read face tensor") }
+    ok := Read(pixels,1,size,file) == size && Get(file) == -1; unused Close(file)
+    if !ok { return Failure("Face tensor has an invalid size") }
+    values := cast(*float32)pixels
+    pixel_index: s32
+    while pixel_index < cast(s32)(size / 4) { if values[pixel_index] != values[pixel_index] || values[pixel_index] < 0.0 || values[pixel_index] > 255.0 { return Failure("Face tensor contains invalid pixels") }; pixel_index += 1 }
+    shape: [4]s64 = .{1,3,side,side}
+    if !Checked(api.CreateMemory(1,0,*memory)) || !Checked(api.CreateTensor(memory,pixels,size,*shape[0],4,1,*input)) { return Failure("Cannot create face tensor") }
+    input_name: [6]u8 = .{105,110,112,117,116,0}; embed_name: [5]u8 = .{100,97,116,97,0}; result_name: [4]u8 = .{102,99,49,0}
+    labels: [12][8]u8 = .{.{99,108,115,95,56,0},.{99,108,115,95,49,54,0},.{99,108,115,95,51,50,0},
+        .{111,98,106,95,56,0},.{111,98,106,95,49,54,0},.{111,98,106,95,51,50,0},
+        .{98,98,111,120,95,56,0},.{98,98,111,120,95,49,54,0},.{98,98,111,120,95,51,50,0},
+        .{107,112,115,95,56,0},.{107,112,115,95,49,54,0},.{107,112,115,95,51,50,0}}
+    names: [1]*u8 = .{ifx detector then *input_name[0] else *embed_name[0]}; inputs: [1]*void = .{input}
+    output_names: [12]*u8
+    name_index: s32
+    while name_index < 12 { output_names[name_index] = *labels[name_index][0]; name_index += 1 }; if !detector { output_names[0] = *result_name[0] }
+    count: usize = ifx detector then 12 else 1
+    if !Checked(api.Run(session,null,*names[0],*inputs[0],1,*output_names[0],count,*outputs[0])) { return Failure("Cannot infer local faces") }
+    write_mode: [3]u8 = .{119,98,0}; target := Open(argv[5],*write_mode[0]); if target == null { return Failure("Cannot save face inference") }
+    defer { unused Close(target) }
+    sizes: [3]usize = .{6400,1600,400}; normalized: [128]float32
+    output_index: s32
+    while output_index < cast(s32)count {
+        i := output_index; output_index += 1
+        expected := ifx detector then sizes[i % 3] * (ifx i < 6 then 1 else (ifx i < 9 then 4 else 10)) else 128
+        length: usize; data: *void
+        if !Checked(api.TensorInfo(outputs[i],*infos[i])) || !Checked(api.TensorCount(infos[i],*length)) || length != expected ||
+            !Checked(api.TensorData(outputs[i],*data)) || data == null { return Failure("Face model produced invalid output") }
+        result := cast(*float32)data; norm: float64
+        value_index: s32
+        while value_index < cast(s32)length { value := cast(float64)result[value_index]; if value != value || value < -1000000.0 || value > 1000000.0 { return Failure("Face model produced invalid values") }; if !detector { norm += value * value }; value_index += 1 }
+        if !detector {
+            if norm < 0.000000000001 { return Failure("Face model produced an empty embedding") }; norm = Sqrt(norm)
+            normalize_index: s32
+            while normalize_index < 128 { normalized[normalize_index] = cast(float32)(cast(float64)result[normalize_index] / norm); normalize_index += 1 }; data = cast(*void)*normalized[0]
+        }
+        if Write(data,4,length,target) != length { return Failure("Cannot save complete face inference") }
+    }
+    return 0
+}

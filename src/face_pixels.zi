@@ -1,0 +1,152 @@
+// Native YuNet preprocessing, box suppression and five-landmark SFace alignment.
+// The source is read only and transient RGB tensors never leave the device.
+#import "std/byte_text_linux"
+#import "std/c_string"
+#import "std/text_buffer"
+pixbuf :: #system_library "gdk_pixbuf-2.0";
+object :: #system_library "gobject-2.0";
+libc :: #system_library "c";
+math :: #system_library "m";
+Load :: (path: *u8, error: **void) -> *void #foreign pixbuf "gdk_pixbuf_new_from_file";
+Orient :: (image: *void) -> *void #foreign pixbuf "gdk_pixbuf_apply_embedded_orientation";
+Width :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_width";
+Height :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_height";
+Channels :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_n_channels";
+Stride :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_rowstride";
+Pixels :: (image: *void) -> *u8 #foreign pixbuf "gdk_pixbuf_get_pixels";
+Unref :: (image: *void) #foreign object "g_object_unref";
+NewImage :: (colors: s32, alpha: s32, bits: s32, width: s32, height: s32) -> *void #foreign pixbuf "gdk_pixbuf_new";
+SaveImage :: (image: *void, path: *u8, format: *u8, keys: **u8, values: **u8, error: **void) -> s32 #foreign pixbuf "gdk_pixbuf_savev";
+Open :: (path: *u8, mode: *u8) -> *void #foreign libc "fopen";
+Read :: (bytes: *void, size: usize, count: usize, file: *void) -> usize #foreign libc "fread";
+Write :: (bytes: *void, size: usize, count: usize, file: *void) -> usize #foreign libc "fwrite";
+Close :: (file: *void) -> s32 #foreign libc "fclose";
+Get :: (file: *void) -> s32 #foreign libc "fgetc";
+Allocate :: (count: usize, size: usize) -> *void #foreign libc "calloc";
+Free :: (memory: *void) #foreign libc "free";
+Sqrt :: (value: float64) -> float64 #foreign math "sqrt";
+Exp :: (value: float64) -> float64 #foreign math "exp";
+Candidate :: struct { x: float64; y: float64; width: float64; height: float64; score: float64; points: [10]float64 }
+pixels: *u8;
+width: s32;
+height: s32;
+stride: s32;
+channels: s32;
+Channel :: (x: s32, y: s32, channel: s32) -> float64 {
+    if x < 0 || y < 0 || x >= width || y >= height { return 0.0 }
+    index := y * stride + x * channels; value := cast(float64)pixels[index + channel]
+    if channels == 4 { alpha := cast(float64)pixels[index + 3] / 255.0; value = value * alpha + 255.0 * (1.0 - alpha) }
+    return value
+}
+Sample :: (x: float64, y: float64, channel: s32) -> float32 {
+    ix := cast(s32)x; iy := cast(s32)y; if x < cast(float64)ix { ix -= 1 }; if y < cast(float64)iy { iy -= 1 }
+    dx := x - cast(float64)ix; dy := y - cast(float64)iy
+    top := Channel(ix,iy,channel)*(1.0-dx) + Channel(ix+1,iy,channel)*dx
+    bottom := Channel(ix,iy+1,channel)*(1.0-dx) + Channel(ix+1,iy+1,channel)*dx
+    return cast(float32)(top*(1.0-dy)+bottom*dy)
+}
+Save :: (path: *u8, data: *void, size: usize) -> bool {
+    mode: [3]u8 = .{119,98,0}; file := Open(path,*mode[0]); if file == null { return false }
+    written := Write(data,1,size,file); closed := Close(file); return written == size && closed == 0
+}
+Overlap :: (a: Candidate, b: Candidate) -> float64 {
+    left := ifx a.x > b.x then a.x else b.x; top := ifx a.y > b.y then a.y else b.y
+    right := ifx a.x+a.width < b.x+b.width then a.x+a.width else b.x+b.width
+    bottom := ifx a.y+a.height < b.y+b.height then a.y+a.height else b.y+b.height
+    if right <= left || bottom <= top { return 0.0 }
+    intersection := (right-left)*(bottom-top)
+    return intersection/(a.width*a.height+b.width*b.height-intersection)
+}
+main :: (argc: s32, argv: **u8) -> s32 {
+    if argc != 5 { return 2 }; mode := TextFromCString(argv[4])
+    if mode != "prepare" && mode != "align" { return 2 }
+    image := Load(argv[1],null); if image == null { return 3 }; defer { Unref(image) }
+    oriented := Orient(image); if oriented == null { return 3 }; defer { Unref(oriented) }
+    width = Width(oriented); height = Height(oriented); stride = Stride(oriented); channels = Channels(oriented); pixels = Pixels(oriented)
+    if width <= 0 || height <= 0 || cast(s64)width*cast(s64)height > 100000000 || (channels != 3 && channels != 4) || stride < width*channels || pixels == null { return 3 }
+    factor := 640.0/cast(float64)(ifx width > height then width else height)
+    if mode == "prepare" {
+        memory := Allocate(1228800,4); if memory == null { return 3 }; defer { Free(memory) }; tensor := cast(*float32)memory
+        rw := cast(s32)(cast(float64)width*factor); rh := cast(s32)(cast(float64)height*factor)
+        if rw < 1 { rw = 1 }; if rh < 1 { rh = 1 }
+        for y: 0..rh - 1 { for x: 0..rw - 1 { for channel: 0..2 {
+            tensor[channel*409600+y*640+x] = Sample((cast(float64)x+0.5)/factor-0.5,(cast(float64)y+0.5)/factor-0.5,cast(s32)(2-channel))
+        } } }
+        if !Save(argv[2],memory,4915200) { return 3 }; print("{\"width\":%,\"height\":%}\n",width,height); return 0
+    }
+    mode_read: [3]u8 = .{114,98,0}; file := Open(argv[3],*mode_read[0]); if file == null { return 3 }
+    values: [134400]float32; valid := Read(cast(*void)*values[0],4,134400,file) == 134400 && Get(file) == -1; unused Close(file)
+    if !valid { return 3 }
+    for number: values { if number != number || number < -1000000.0 || number > 1000000.0 { return 3 } }
+    // Each tensor family concatenates the 8/16/32-stride outputs (8400 cells).
+    candidates: [256]Candidate; count: s32; base: s32
+    strides: [3]s32 = .{8,16,32}
+    for step: strides {
+        side := 640/step; size := side*side
+        for index: 0..size - 1 {
+            cls := cast(float64)values[base+index]; obj := cast(float64)values[8400+base+index]
+            if cls < 0.0 { cls = 0.0 }; if cls > 1.0 { cls = 1.0 }; if obj < 0.0 { obj = 0.0 }; if obj > 1.0 { obj = 1.0 }
+            score := Sqrt(cls*obj); if score < 0.9 { continue }
+            at := 16800+(base+index)*4; kp := 50400+(base+index)*10
+            if values[at+2] < -10.0 || values[at+2] > 10.0 || values[at+3] < -10.0 || values[at+3] > 10.0 { continue }
+            face: Candidate; face.score = score
+            face.width = Exp(cast(float64)values[at+2])*cast(float64)step/factor
+            face.height = Exp(cast(float64)values[at+3])*cast(float64)step/factor
+            face.x = (cast(float64)(index%side)+cast(float64)values[at])*cast(float64)step/factor-face.width/2.0
+            face.y = (cast(float64)(index/side)+cast(float64)values[at+1])*cast(float64)step/factor-face.height/2.0
+            for j: 0..4 {
+                face.points[j*2] = (cast(float64)values[kp+j*2]+cast(float64)(index%side))*cast(float64)step/factor
+                face.points[j*2+1] = (cast(float64)values[kp+j*2+1]+cast(float64)(index/side))*cast(float64)step/factor
+            }
+            if face.x < 0.0 { face.width += face.x; face.x = 0.0 }; if face.y < 0.0 { face.height += face.y; face.y = 0.0 }
+            if face.x+face.width > cast(float64)width { face.width = cast(float64)width-face.x }
+            if face.y+face.height > cast(float64)height { face.height = cast(float64)height-face.y }
+            if face.width < 20.0 || face.height < 20.0 { continue }
+            position := count; if position > 255 { position = 255 }; if count == 256 && face.score <= candidates[255].score { continue }
+            while position > 0 && face.score > candidates[position-1].score { candidates[position] = candidates[position-1]; position -= 1 }
+            candidates[position] = face; if count < 256 { count += 1 }
+        }
+        base += size
+    }
+    chosen: [32]Candidate; chosen_count: s32
+    for index: 0..count - 1 {
+        face := candidates[index]; duplicate: bool
+        for previous: 0..chosen_count - 1 { if Overlap(face,chosen[previous]) > 0.3 { duplicate = true; break } }
+        if duplicate { continue }; if chosen_count >= 32 { return 5 }; chosen[chosen_count] = face; chosen_count += 1
+    }
+    dst: [10]float64 = .{38.2946,51.6963,73.5318,51.5014,56.0252,71.7366,41.5493,92.3655,70.7299,92.2041}
+    tensor: [37632]float32; folder := TextFromCString(argv[2]); output: Vec(u8); BuilderPrint(*output,"{\"faces\":[")
+    for index: 0..chosen_count - 1 {
+        face := chosen[index]; mx: float64; my: float64; dx: float64; dy: float64
+        for j: 0..4 { mx += face.points[j*2]/5.0; my += face.points[j*2+1]/5.0; dx += dst[j*2]/5.0; dy += dst[j*2+1]/5.0 }
+        a: float64; b: float64; variance: float64
+        for j: 0..4 {
+            sx := face.points[j*2]-mx; sy := face.points[j*2+1]-my; tx := dst[j*2]-dx; ty := dst[j*2+1]-dy
+            a += sx*tx+sy*ty; b += sx*ty-sy*tx; variance += sx*sx+sy*sy
+        }
+        if variance < 0.000001 { return 3 }; a /= variance; b /= variance; determinant := a*a+b*b
+        if determinant < 0.000001 { return 3 }; tx := dx-a*mx+b*my; ty := dy-b*mx-a*my
+        for y: 0..111 { for x: 0..111 {
+            sx := (a*(cast(float64)x-tx)+b*(cast(float64)y-ty))/determinant
+            sy := (-b*(cast(float64)x-tx)+a*(cast(float64)y-ty))/determinant
+            for channel: 0..2 { tensor[channel*12544+y*112+x] = Sample(sx,sy,cast(s32)channel) }
+        } }
+        name: Vec(u8); BuilderPrint(*name,"%/face-%.tensor",folder,index); path := BuilderFinish(name); bytes: [4097]u8
+        if !CopyCString(path,bytes[:]) || !Save(*bytes[0],cast(*void)*tensor[0],150528) { return 3 }
+        portrait := NewImage(0,0,8,112,112); if portrait == null { return 3 }
+        rgb := Pixels(portrait); row := Stride(portrait)
+        for py: 0..111 { for px: 0..111 { for pc: 0..2 {
+            value := tensor[pc*12544+py*112+px]; if value < 0.0 { value = 0.0 }; if value > 255.0 { value = 255.0 }
+            rgb[py*row+px*3+pc] = cast(u8)value
+        } } }
+        png_name: Vec(u8); BuilderPrint(*png_name,"%/face-%.png",folder,index); png_path := BuilderFinish(png_name)
+        png: [4]u8 = .{112,110,103,0}
+        saved := CopyCString(png_path,bytes[:]) && SaveImage(portrait,*bytes[0],*png[0],null,null,null) != 0
+        Unref(portrait); if !saved { return 3 }
+        x := cast(s32)(face.x/cast(float64)width*10000.0); y := cast(s32)(face.y/cast(float64)height*10000.0)
+        w := cast(s32)(face.width/cast(float64)width*10000.0); h := cast(s32)(face.height/cast(float64)height*10000.0)
+        if w < 1 { w = 1 }; if h < 1 { h = 1 }
+        BuilderPrint(*output,"%{\"rect\":[%,%,%,%],\"confidence\":%}",ifx index == 0 then "" else ",",x,y,w,h,face.score)
+    }
+    BuilderPrint(*output,"]}"); result := BuilderFinish(output); print("%\n",result); return 0
+}
