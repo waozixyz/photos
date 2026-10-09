@@ -1,7 +1,6 @@
 """Encrypted Daochi v6 sync, exclusively to the pinned ThinkPad node."""
 import base64
 import hashlib
-import hmac
 import json
 import os
 from pathlib import Path
@@ -16,9 +15,7 @@ import urllib.request
 from urllib.parse import urlsplit
 from datetime import datetime, timezone
 
-from nacl.bindings import crypto_aead_xchacha20poly1305_ietf_encrypt as encrypt
-from nacl.bindings import crypto_aead_xchacha20poly1305_ietf_decrypt as decrypt
-from nacl.signing import SigningKey
+from .sync_crypto import encrypt, decrypt, seal_blob, seal_record, device_seed, device_public, device_signature
 from pqcrypto.sign import ml_dsa_44
 
 from .library import atomic, packed, digest_file
@@ -67,10 +64,11 @@ class Client:
         self.key = bytes.fromhex(self.identity['content_key'])
         self.device_path = self.identity_path.with_name('device.json')
         if not self.device_path.exists():
-            atomic(self.device_path, packed(dict(key=bytes(SigningKey.generate()).hex(), client='photos-' + secrets.token_hex(12))).encode())
+            atomic(self.device_path, packed(dict(key=device_seed().hex(), client='photos-' + secrets.token_hex(12))).encode())
         device = json.loads(self.device_path.read_bytes())
-        self.device = SigningKey(bytes.fromhex(device['key']))
-        self.device_id = hashlib.sha256(bytes(self.device.verify_key)).hexdigest()
+        self.device_key = bytes.fromhex(device['key'])
+        self.device_public = device_public(self.device_key)
+        self.device_id = hashlib.sha256(self.device_public).hexdigest()
         self.client_id = device['client']
         self.token = None
         self.auth_lock = threading.Lock()
@@ -110,7 +108,7 @@ class Client:
         result = self.raw('/api/v1/sync/login', 'POST', body,
                           {'Content-Type': 'application/json', 'X-Daochi-User': self.account, 'X-Daochi-Signature': signature})
         self.token = result['auth_token']
-        public = bytes(self.device.verify_key).hex()
+        public = self.device_public.hex()
         nonce, expires = secrets.token_hex(32), int(time.time()) + 120
         message = f'daochi-device-registration-v1\n{self.account}\n{APP}\n{self.device_id}\n{self.client_id}\n{public}\n{nonce}\n{expires}\n'.encode()
         body = packed(dict(app_id=APP, device_key_id=self.device_id, client_id=self.client_id,
@@ -127,7 +125,7 @@ class Client:
         message = '\n'.join(['daochi-tx-v1', '6', value['tx_id'], self.account, APP, self.device_id,
                              method, path, value['body_sha256'], value['nonce'], str(value['expires_at']), '']).encode()
         value['signature'] = ml_dsa_44.sign(self.private, message).hex()
-        value['device_signature'] = self.device.sign(message).signature.hex()
+        value['device_signature'] = device_signature(message, self.device_key).hex()
         return packed(value)
 
     def request(self, path, method='GET', body=None, binary=False):
@@ -159,9 +157,7 @@ class Client:
         # Bind the nonce to the actual chunk bytes as well as their address.
         # Even a modified local original cannot reuse a nonce for other bytes.
         # Identical retries remain resumable; metadata uses random nonces.
-        nonce_input = self.aad(photo_id, part) + hashlib.sha256(plain).digest()
-        nonce = hmac.new(self.key, nonce_input, hashlib.sha256).digest()[:24]
-        data = nonce + encrypt(plain, self.aad(photo_id, part), nonce, self.key)
+        data = seal_blob(plain, self.aad(photo_id, part), self.key)
         digest = hashlib.sha256(data).hexdigest()
         path = f'/api/v1/blobs/{APP}/{digest}'
         try:
@@ -235,9 +231,9 @@ class Client:
         return self.seal_record(album, ALBUM_COLLECTION, 'photos.album.v1')
 
     def seal_record(self, value, collection, schema):
-        nonce = secrets.token_bytes(24)
         aad = dict(account_id=self.account, app_id=APP, collection=collection, id=value['id'], schema=schema)
-        cipher = encrypt(packed(value).encode(), packed(aad).encode(), nonce, self.key)
+        sealed = seal_record(packed(value).encode(), packed(aad).encode(), self.key)
+        nonce, cipher = sealed[:24], sealed[24:]
         envelope = dict(profile='daochi-record-v1', alg='xchacha20poly1305', key_id='main',
                         nonce=encode(nonce), aad=aad, ciphertext=encode(cipher))
         return dict(collection=collection, id=value['id'], key_id='main', nonce=encode(nonce),

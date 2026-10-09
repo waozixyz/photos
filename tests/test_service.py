@@ -64,6 +64,9 @@ class ServiceTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(self.path.parent.stat().st_mode), 0o700)
         self.assertIsNone(self.server.child.poll())
+        limits = Path('/proc', str(self.server.child.pid), 'limits').read_text()
+        core = next(line for line in limits.splitlines() if line.startswith('Max core file size'))
+        self.assertEqual(core.split()[4:6], ['0', '0'])
 
     def test_invalid_lengths_json_depth_utf8_and_truncated_clients_never_dispatch(self):
         bodies = [b'[]', b'null', b'{"x":NaN}', b'{} trailing', b'{"x":"\xff"}',

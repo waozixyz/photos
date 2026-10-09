@@ -51,6 +51,12 @@ def main():
     shutil.copyfile(service_broker,installed/'photos_service.next')
     os.chmod(installed/'photos_service.next',0o755)
     os.replace(installed/'photos_service.next',installed/'photos_service')
+    cryptography = repo/'build/sync-crypto/sync_crypto'
+    if not cryptography.is_file():
+        parser.error('Build native Photos encryption before installing')
+    shutil.copyfile(cryptography,installed/'sync_crypto.next')
+    os.chmod(installed/'sync_crypto.next',0o755)
+    os.replace(installed/'sync_crypto.next',installed/'sync_crypto')
     metadata_reader = repo/'build/read-metadata/read_metadata'
     if not metadata_reader.is_file():
         parser.error('Build Photos metadata reading before installing')

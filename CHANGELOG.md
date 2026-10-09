@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.43
+
+- Keep existing encrypted photo and album backups usable through the encryption upgrade, preserving account and content keys.
+- Continue resumable backup uploads of unchanged originals, with changed bytes receiving distinct encrypted chunks.
+- Retain existing device identities and signed backup requests through the device authentication upgrade.
+- Reject altered encrypted content before returning a restored photo or album, retaining local originals when encryption cannot finish.
+
 ## 0.1.42
 
 - Keep Photos responsive when a local client sends an incomplete request or disconnects during an operation.

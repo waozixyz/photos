@@ -3,6 +3,10 @@
 local-service:
 	LDLIBS='-lglib-2.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry photos_service:main --exe -o build/photos-service src/photos_service.zi
 build bundle test: local-service
+.PHONY: sync-crypto
+sync-crypto:
+	LDLIBS='-l:libsodium.so.23' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry sync_crypto:main --exe -o build/sync-crypto src/sync_crypto.zi
+build bundle test: sync-crypto
 .PHONY: app-lock-policy-test
 app-lock-policy-test:
 	$(ZIRAN) build --project $(PACKAGE_FLAGS) --root tests --target=c --entry app_lock_policy_test:main --exe -o build/app-lock-policy tests/app_lock_policy_test.zi

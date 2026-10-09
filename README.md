@@ -358,7 +358,15 @@ and handles fragmented request frames without blocking other clients. Each
 request or response is limited to 1 MiB of valid UTF-8 JSON. Incomplete requests
 and stalled replies expire after 60 seconds. Its socket is private to this user;
 opening another instance preserves the active endpoint and unrelated files.
-The library/session adapter and encrypted sync worker still use Python.
+Photo/chunk and album/metadata encryption, authenticated decryption, metadata
+nonce generation and resumable chunk nonce derivation now run in a headless
+Ziran helper over a private binary channel. It retains the existing
+XChaCha20-Poly1305 backup format and content keys. An altered tag, account,
+address, key or nonce returns no plaintext. A missing or interrupted helper
+pauses that operation and preserves originals and keys. Ed25519 device seed
+generation, public keys and transaction signatures also run in Ziran and retain
+existing device identities. Post-quantum account signing, network
+transport/checkpoints and the library/session adapter still use Python.
 
 Create collage combines two through six visible photos or Live Photo stills.
 Select them in a gallery, then choose Create collage. Switch between balanced
@@ -514,8 +522,10 @@ The remaining replacement work includes:
   Album-definition import publication, automatic-membership import writes and
   private face-index import writes are native too. Local peer authentication,
   socket framing, connection limits and deadlines also run in Ziran. The remaining
-  automatic index mutations, app/Hidden session adapter and encrypted sync worker
-  use Python.
+  automatic index mutations and app/Hidden session adapter use Python. Sync content
+  encryption/decryption, chunk/metadata nonces and Ed25519 device identities/signatures
+  run in Ziran; post-quantum account signing, pinned-node transport and sync
+  checkpoint orchestration still use Python.
 
 Choose Play video to watch a video in the Photos window. Pause/resume, Replay,
 the position slider, five-second seek buttons, volume and Mute work offline.

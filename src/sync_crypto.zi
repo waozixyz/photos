@@ -1,0 +1,95 @@
+// Binary stdin/stdout protocol; content keys and plaintext never enter arguments,
+// text diagnostics or files. Libsodium verifies before any plaintext is emitted.
+sodium :: #system_library "sodium";
+c :: #system_library "c";
+Init :: () -> s32 #foreign sodium "sodium_init";
+Random :: (bytes: *void, count: usize) #foreign sodium "randombytes_buf";
+Wipe :: (bytes: *void, count: usize) #foreign sodium "sodium_memzero";
+Hash :: (output: *u8, input: *u8, count: u64) -> s32 #foreign sodium "crypto_hash_sha256";
+Hmac :: (output: *u8, input: *u8, count: u64, key: *u8) -> s32 #foreign sodium "crypto_auth_hmacsha256";
+DeviceKeys :: (public: *u8, private: *u8, seed: *u8) -> s32 #foreign sodium "crypto_sign_seed_keypair";
+Sign :: (output: *u8, size: *u64, input: *u8, count: u64, key: *u8) -> s32 #foreign sodium "crypto_sign_detached";
+Encrypt :: (output: *u8, size: *u64, input: *u8, count: u64, aad: *u8, aadCount: u64,
+    secret: *u8, nonce: *u8, key: *u8) -> s32 #foreign sodium "crypto_aead_xchacha20poly1305_ietf_encrypt";
+Decrypt :: (output: *u8, size: *u64, secret: *u8, input: *u8, count: u64, aad: *u8,
+    aadCount: u64, nonce: *u8, key: *u8) -> s32 #foreign sodium "crypto_aead_xchacha20poly1305_ietf_decrypt";
+Read :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign c "read";
+Write :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign c "write";
+Allocate :: (bytes: usize) -> *void #foreign c "malloc";
+Release :: (bytes: *void) #foreign c "free";
+Errno :: () -> *s32 #foreign c "__errno_location";
+ReadAll :: (bytes: *u8, count: s64) -> bool {
+    at: s64
+    while at < count {
+        amount := Read(0,*bytes[at],cast(usize)(count-at))
+        if amount < 0 && Errno().* == 4 { continue }
+        if amount <= 0 { return false }; at += amount
+    }
+    return true
+}
+SendAll :: (bytes: *u8, count: s64) -> bool {
+    at: s64
+    while at < count {
+        amount := Write(1,*bytes[at],cast(usize)(count-at))
+        if amount < 0 && Errno().* == 4 { continue }
+        if amount <= 0 { return false }; at += amount
+    }
+    return true
+}
+Number :: (bytes: []u8) -> u32 {
+    value: u32; for byte: bytes { value = (value << 8) | cast(u32)byte }; return value
+}
+Free :: (bytes: *u8, count: s64) {
+    if bytes != null { Wipe(cast(*void)bytes,cast(usize)count); Release(cast(*void)bytes) }
+}
+main :: () -> s32 {
+    if Init() < 0 { return 2 }
+    // version, mode, input length, AAD length, 32-byte key, 24-byte nonce.
+    // 1 encrypt; 2 decrypt; 3 resumable blob; 4 randomly sealed metadata;
+    // 5 Ed25519 device signature; 6 device public key; 7 new device seed.
+    header: [66]u8
+    defer { Wipe(cast(*void)*header[0],66) }
+    if !ReadAll(*header[0],66) || header[0] != 1 || header[1] < 1 || header[1] > 7 { return 2 }
+    mode := header[1]; inputCount := cast(s64)Number(header[2:6]); aadCount := cast(s64)Number(header[6:10])
+    if inputCount > 134217744 || aadCount > 1048576 || (mode != 2 && inputCount > 134217728) || (mode == 2 && inputCount < 16) { return 2 }
+    if mode >= 5 {
+        if aadCount != 0 || (mode >= 6 && inputCount != 0) { return 2 }
+        check: s32 = 42
+        while check < 66 { if header[check] != 0 { return 2 }; check += 1 }
+        if mode == 7 { check = 10; while check < 42 { if header[check] != 0 { return 2 }; check += 1 } }
+    }
+    input := cast(*u8)Allocate(cast(usize)(inputCount+1)); aad := cast(*u8)Allocate(cast(usize)(aadCount+32))
+    outputCount := ifx mode == 5 then 64 else ifx mode >= 6 then 32 else inputCount+40
+    output := cast(*u8)Allocate(cast(usize)outputCount)
+    defer { Free(input,inputCount+1); Free(aad,aadCount+32); Free(output,outputCount) }
+    if input == null || aad == null || output == null || !ReadAll(aad,aadCount) || !ReadAll(input,inputCount) { return 2 }
+    // A second frame or trailing bytes are forbidden in this one-shot helper.
+    extra: u8; amount: s64
+    while true { amount = Read(0,*extra,1); if amount < 0 && Errno().* == 4 { continue }; break }
+    if amount != 0 { return 2 }
+    if mode >= 5 {
+        if mode == 7 { Random(cast(*void)output,32); return ifx SendAll(output,32) then 0 else 2 }
+        public: [32]u8; private: [64]u8; signatureCount: u64
+        defer { Wipe(cast(*void)*private[0],64) }
+        if DeviceKeys(*public[0],*private[0],*header[10]) != 0 { return 2 }
+        if mode == 6 { return ifx SendAll(*public[0],32) then 0 else 2 }
+        if Sign(output,*signatureCount,input,cast(u64)inputCount,*private[0]) != 0 || signatureCount != 64 { return 2 }
+        return ifx SendAll(output,64) then 0 else 2
+    }
+    size: u64; prefix: s64
+    if mode == 3 {
+        if Hash(*aad[aadCount],input,cast(u64)inputCount) != 0 { return 2 }
+        hash: [32]u8; defer { Wipe(cast(*void)*hash[0],32) }
+        if Hmac(*hash[0],aad,cast(u64)(aadCount+32),*header[10]) != 0 { return 2 }
+        for index: 0..23 { header[42+index] = hash[index] }
+    } else if mode == 4 { Random(cast(*void)*header[42],24) }
+    if mode == 2 {
+        if Decrypt(output,*size,null,input,cast(u64)inputCount,aad,cast(u64)aadCount,*header[42],*header[10]) != 0 { return 1 }
+        if size != cast(u64)(inputCount-16) { return 2 }
+    } else {
+        if mode == 3 || mode == 4 { prefix = 24; for index: 0..23 { output[index] = header[42+index] } }
+        if Encrypt(*output[prefix],*size,input,cast(u64)inputCount,aad,cast(u64)aadCount,null,*header[42],*header[10]) != 0 { return 2 }
+        if size != cast(u64)(inputCount+16) { return 2 }
+    }
+    return ifx SendAll(output,cast(s64)size+prefix) then 0 else 2
+}

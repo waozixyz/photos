@@ -88,7 +88,7 @@ class Server:
             environment = {k: v for k, v in os.environ.items() if k not in
                            {'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS', 'SESSION_MANAGER'}}
             try:
-                self.child = subprocess.Popen([str(program()), str(self.path)], stdin=child_channel,
+                self.child = subprocess.Popen(['prlimit', '--core=0', '--', str(program()), str(self.path)], stdin=child_channel,
                                               stdout=child_channel, env=environment, close_fds=True)
             finally:
                 child_channel.close()
