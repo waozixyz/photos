@@ -67,7 +67,7 @@ def ui_query(library, request):
                            memory_date=request.get('memory_date', ''), hidden_access=vault.unlocked(library, request.get('vault_token', '')),
                            map_bounds=request.get('map_bounds'), map_gallery=request.get('map_gallery', False),
                            person=request.get('person',''), people_mode=request.get('people_mode','active'),
-                           lane_year=request.get('lane_year',0), jump_day=request.get('jump_day',''))
+                           lane_year=request.get('lane_year',0), jump_day=request.get('jump_day',''), large_type=request.get('large_type','all'))
     result.update(vault.state(library, request.get('vault_token', '')))
     result.update(guest_active=0, guest_configured=int(vault.configured(library) or app_lock.enabled(library)))
     # A native page or slow catalog query may outlast the unlock. Recheck
@@ -88,6 +88,7 @@ def ui_query(library, request):
             photo['original'] = photo['display']
     fields = ('id', 'name', 'thumbnail', 'display' if modern else 'original', 'date', 'kind', 'favorite',
               'hidden', 'trashed', 'archived', 'width', 'height')
+    if request.get('view') == 'large': fields += ('storage_size',)
     result['photos'] = [{key: photo[key] for key in fields} for photo in result['photos']]
     fields = ('name', 'count', 'thumbnail', 'pinned', 'archived', 'smart', 'place', 'id', 'ignored')
     result['albums'] = [{key: album[key] for key in fields if key in album} for album in result['albums']]

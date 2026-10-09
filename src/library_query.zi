@@ -27,6 +27,7 @@ Number :: (json: string, key: string, default_value: s32) -> s32 {
     if !value.valid || value.value < 0.0 || value.value > 2147483647.0 { return default_value }
     return cast(s32)value.value
 }
+Storage :: #import "storage";
 Failure :: (message: string) -> s32 { print("{\"error\":\"%\"}\n", message); return 1 }
 Prepare :: (database: *void, sql: string, query: *Search.Predicate, statement: **void) -> bool {
     if SqlitePrepareText(database, sql, -1, statement, null) != SQLITE_OK { return false }
@@ -56,6 +57,16 @@ main :: (argc: s32, argv: **u8) -> s32 {
     query: Search.Predicate
     slideshow := !guest.active && Number(json,"slideshow",0) == 1
     name := ifx guest.active then "photos" else TextUntilNul(view[:]); hidden := !guest.active && Number(json,"hidden_access",0) == 1
+    if name == "large" {
+        type: [9]u8
+        if !Decode(json,"large_type",type[:]) { return Failure("Choose All files, Photos only or Videos only") }
+        value := TextUntilNul(type[:])
+        if value != "" && value != "all" && value != "photos" && value != "videos" { return Failure("Choose All files, Photos only or Videos only") }
+        Search.AddSQL(*query,"hidden=0 AND trashed=0 AND "); Search.AddSQL(*query,Storage.BackedSQL)
+        Search.AddSQL(*query," AND "); Search.AddSQL(*query,Storage.LargeBytesSQL); Search.AddSQL(*query," > 10485760 AND ")
+        if value == "photos" || value == "videos" { Search.AddSQL(*query,"kind=? AND "); Search.Bind(*query,ifx value == "photos" then "photo" else "video") }
+        if jump[0] != 0 { return Failure("Large files are ordered by size; open the timeline to jump to a date") }
+    }
     if name == "trash" { Search.AddSQL(*query, "trashed>0"); if !hidden { Search.AddSQL(*query, " AND hidden=0") } }
     else if name == "hidden" { Search.AddSQL(*query, ifx hidden then "trashed=0 AND hidden=1" else "0") }
     else {
@@ -177,7 +188,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
         target := SqliteColumnInt64(statement,0); unused SqliteFinalize(statement); statement = null; query.count -= 1
         if matches == 0 { page = 0 } else { page = cast(s32)(ifx target >= matches then matches-1 else target) }
     }
-    rows: Vec(u8); BuilderPrint(*rows,"SELECT id FROM photos WHERE %",where)
+    rows: Vec(u8); BuilderPrint(*rows,"SELECT id,% FROM photos WHERE %",ifx name == "large" then Storage.LargeBytesSQL else "size",where)
     check: [65]u8
     if slideshow && !Decode(json,"slide_id",check[:]) { return Failure("Choose a valid slideshow photo") }
     if check[0] != 0 { BuilderPrint(*rows," AND id=?"); Search.Bind(*query,TextUntilNul(check[:])); page = 0 }
@@ -185,12 +196,13 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if guest.active && guest.selection { BuilderPrint(*rows,"(SELECT ordinal FROM guest_selection g WHERE g.id=photos.id) ASC,") }
     if slideshow && Number(json,"slide_shuffle",0) == 1 { BuilderPrint(*rows,"photos_order(id,%) ASC,",Number(json,"slide_seed",1)) }
     if name == "semantic" { BuilderPrint(*rows,"% DESC,",Semantic.RankSQL) }
-    BuilderPrint(*rows,"taken %,id LIMIT % OFFSET %",ifx order == "newest" then "DESC" else "ASC",limit,page)
+    if name == "large" { BuilderPrint(*rows,"% DESC,",Storage.LargeBytesSQL) }
+    BuilderPrint(*rows,"taken %,id LIMIT % OFFSET %",ifx order == "newest" || name == "large" then "DESC" else "ASC",limit,page)
     rows_sql := BuilderFinish(rows)
     if !Prepare(database,rows_sql,*query,*statement) { return Failure("Cannot prepare the gallery page") }
     defer { unused SqliteFinalize(statement) }
     output: Vec(u8); BuilderPrint(*output,"{\"count\":%,\"memory_date\":\"%\",\"ids\":[",matches,TextUntilNul(memory[:]))
-    count: s32
+    count: s32; sizes: Vec(u8)
     while true {
         result := SqliteStep(statement)
         if result == SQLITE_DONE { break }
@@ -199,8 +211,10 @@ main :: (argc: s32, argv: **u8) -> s32 {
         if id.count != 64 { return Failure("Gallery contains an invalid photo identity") }
         for byte: id { if !(byte >= 48 && byte <= 57 || byte >= 97 && byte <= 102) { return Failure("Gallery contains an invalid photo identity") } }
         BuilderPrint(*output,"%\"%\"",ifx count == 0 then "" else ",",id); count += 1
+        if name == "large" { BuilderPrint(*sizes,"% %",ifx count == 1 then "" else ",",SqliteColumnInt64(statement,1)) }
     }
     BuilderPrint(*output,"]")
+    if name == "large" { BuilderPrint(*output,",\"storage_sizes\":[%]",BuilderFinish(sizes)) }
     if slideshow { BuilderPrint(*output,",\"slide_offset\":%",page) }
     if !guest.active && jump[0] != 0 { BuilderPrint(*output,",\"jump_offset\":%",page) }
     if name == "lane" {

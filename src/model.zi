@@ -59,6 +59,7 @@ Photo :: struct {
     live: bool
     width: s32
     height: s32
+    storage_size: s64
 }
 SlideAlbum :: struct { name: [513]u8 }
 slide_albums: Vec(SlideAlbum);
@@ -185,6 +186,7 @@ semantic_processing: bool;
 semantic_working: bool;
 view: string = "photos";
 sort: string = "newest";
+large_type: s32;
 album: [513]u8;
 search: [513]u8;
 input: [4097]u8;
@@ -259,6 +261,7 @@ SendRequest :: (action: string, id: string, value: string) {
     Property(*out, "album", TextUntilNul(album[:])); Property(*out, "id", id); Property(*out, "value", value)
     Property(*out, "person", TextUntilNul(person[:])); Property(*out, "people_mode", people_mode)
     Property(*out, "sort", sort)
+    if view == "large" { Property(*out,"large_type",ifx large_type == 1 then "photos" else (ifx large_type == 2 then "videos" else "all")) }
     Property(*out, "album_mode", album_mode); Property(*out, "album_sort", album_sort)
     Property(*out, "memory_date", TextUntilNul(memory_date[:]))
     Property(*out, "edit_session", TextUntilNul(edit_session[:]))
@@ -323,6 +326,16 @@ Number :: (json: string, at: s32, key: string) -> s32 {
     return ifx value.valid then cast(s32)value.value else 0
 }
 PhotoString :: (json: string, at: s32, out: []u8) { if ReadStringText(json, at, out) < 0 { out[0] = 0 } }
+StorageSize :: (json: string, at: s32) -> s64 {
+    end := ValueEnd(json,at,0); value: s64
+    if at < 0 || end <= at || end-at > 19 { return 0 }
+    for i: at..end-1 {
+        digit := cast(s64)json[i]-48
+        if digit < 0 || digit > 9 || value > (9223372036854775807-digit)/10 { return 0 }
+        value = value*10+digit
+    }
+    return value
+}
 ReadPhoto :: (json: string, start: s32, photo: *Photo) -> s32 {
     // Each gallery field is scanned once. Repeated object lookups multiplied
     // path parsing by every field and exhausted the portable frame budget.
@@ -339,6 +352,7 @@ ReadPhoto :: (json: string, start: s32, photo: *Photo) -> s32 {
         else if name == "display" { PhotoString(json, at, photo.display[:]) }
         else if name == "original" && photo.display[0] == 0 { PhotoString(json, at, photo.display[:]) }
         else if name == "date" { PhotoString(json, at, photo.date[:]) }
+        else if name == "storage_size" { photo.storage_size = StorageSize(json,at) }
         else if name == "kind" { PhotoString(json, at, photo.kind[:]); photo.live = TextUntilNul(photo.kind[:]) == "live"; if photo.live { Set(photo.kind[:], "photo") } }
         else {
             value := ReadNumber(json, at); number := ifx value.valid then cast(s32)value.value else 0
@@ -656,9 +670,9 @@ Navigate :: (target: string) {
     Viewer.Reset()
     StopPlayback()
     queued_request = false
-    if loading { for i: 0..cast(s32)15 { if View(i) == target { queued_view = i } }; return }
+    if loading { for i: 0..cast(s32)16 { if View(i) == target { queued_view = i } }; return }
     if view == "hidden" && target != "hidden" && vault_token[0] != 0 {
-        for i: 0..cast(s32)15 { if View(i) == target { queued_view = i } }
+        for i: 0..cast(s32)16 { if View(i) == target { queued_view = i } }
         vault_unlocked = false; selected = -1; ClearSelection(); editor = ""; Wipe(edit_value[:]); Wipe(vault_first[:]); Wipe(edit_preview[:])
         Request("vault_lock"); Wipe(vault_token[:]); return
     }
@@ -1107,6 +1121,8 @@ FinishCrop :: (apply: bool) {
 }
 Find :: () { date_jumped = false; if view != "auto_people" { ClearSelection() }; CancelEditor(); offset = 0; scroll = 0; selected = -1; Request() }
 ToggleSort :: () { if loading { return }; sort = ifx sort == "newest" then "oldest" else "newest"; Find() }
+LargeFiles :: () { if loading { return }; search[0] = 0; large_type = 0; Navigate("large") }
+LargeType :: (kind: s32) { if loading || kind < 0 || kind > 2 { return }; large_type = kind; Find() }
 AlbumFilter :: () { album_mode = ifx album_mode == "active" then "archived" else (ifx album_mode == "archived" then "empty" else "active"); Find() }
 AlbumSort :: () { album_sort = ifx album_sort == "name" then "newest" else (ifx album_sort == "newest" then "oldest" else "name"); Find() }
 Edit :: (out: []u8, start: s32, end: s32, replacement: string) {
@@ -1160,4 +1176,4 @@ BeginPlace :: (from_photo: bool = false) {
     else { Set(place_area[:], "0, 0, 1") }
     BeginEdit("place_name", "Name this place", "", "A name such as Home; photos in its radius match automatically")
 }
-View :: (index: s32) -> string { names: [16]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized", "memories", "map", "places", "semantic", "people", "lane", "auto_people"}; return names[index] }
+View :: (index: s32) -> string { names: [17]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized", "memories", "map", "places", "semantic", "people", "lane", "auto_people", "large"}; return names[index] }

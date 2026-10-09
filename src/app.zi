@@ -60,6 +60,7 @@ LayoutFeed :: (cols: s32, height: float32) -> float32 {
     for i: 0..Model.count - 1 {
         group := i == 0
         if i > 0 { group = TextUntilNul(Model.photos[i].date[:]) != TextUntilNul(Model.photos[i-1].date[:]) }
+        if Model.view == "large" { group = false }
         if group { if column > 0 { y += height }; column = 0; y += 42.0 }
         unused VecPush(item_y, y); unused VecPush(item_column, column); unused VecPush(group_start, group)
         column += 1; if column >= cols { column = 0; y += height }
@@ -729,10 +730,11 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session,654,"Restore backup keys",.{x+206.0,body.y+430.0,182.0,38.0},!Model.loading) { Model.BeginEdit("recovery_restore_path","Restore backup keys","","Full path to your recovery file; restore into a new empty library with backup stopped") }
         if Action(session,662,"Recover app password",.{x+404.0,body.y+430.0,192.0,38.0},!Model.loading) { Model.BeginRecoveryReset(1) }
         if Action(session,663,"Recover Hidden password",.{x+612.0,body.y+430.0,222.0,38.0},!Model.loading) { Model.BeginRecoveryReset(2) }
-        Label(session,650,"Gallery selection",.{x+18.0,body.y+482.0,width-36.0,30.0},22)
+        Label(session,650,"Gallery and storage",.{x+18.0,body.y+482.0,width-36.0,30.0},22)
         if Action(session,651,ifx Model.swipe_selection_enabled then "Swipe to select: on" else "Swipe to select: off",.{x+18.0,body.y+520.0,210.0,38.0},!Model.loading) {
             Model.Apply("swipe_selection",ifx Model.swipe_selection_enabled then "off" else "on")
         }
+        if Action(session,664,"Large files",.{x+244.0,body.y+520.0,148.0,38.0},!Model.loading) { Model.LargeFiles() }
     } else if Model.selected >= 0 && Model.selected < Model.count {
         photo: *Photo = *Model.photos[Model.selected]
         if Action(session, 50, "Back", .{x, body.y, 68.0, 36.0}) { Model.selected = -1; Viewer.Reset(); return 0 }
@@ -838,6 +840,12 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
             body.y += 44.0; body.height -= 44.0
         }
         if !Model.CatalogView() {
+            if Model.view == "large" {
+                Label(session,665,"Large files · backed-up originals over 10 MiB",.{x,body.y,width,30.0},20)
+                choices: [3]string = .{"All files","Photos only","Videos only"}
+                for i: 0..cast(s32)2 { if Action(session,666+i,choices[i],.{x+cast(float32)i*146.0,body.y+38.0,138.0,36.0},!Model.loading && Model.large_type != i) { Model.LargeType(i) } }
+                body.y += 84.0; body.height -= 84.0
+            }
             if Model.view == "people" {
                 Label(session,458,ifx Model.person_name[0] != 0 then TextUntilNul(Model.person_name[:]) else "Unnamed person",.{x,body.y,width,26.0},20)
                 step := (width-24.0)/3.0
@@ -903,7 +911,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                 }
             }
             if !Model.selecting {
-                if Action(session, 60, ifx Model.view == "semantic" then "Closest first" else (ifx Model.sort == "newest" then "Newest first" else "Oldest first"), .{x + width - 132.0, body.y, 132.0, 36.0}, !Model.loading && Model.view != "semantic") { Model.ToggleSort() }
+                if Action(session, 60, ifx Model.view == "large" then "Largest first" else (ifx Model.view == "semantic" then "Closest first" else (ifx Model.sort == "newest" then "Newest first" else "Oldest first")), .{x + width - 132.0, body.y, 132.0, 36.0}, !Model.loading && Model.view != "semantic" && Model.view != "large") { Model.ToggleSort() }
             }
             body.y += 44.0; body.height -= 44.0
             if width < 620.0 && Model.JumpGallery() && !Model.selecting {
@@ -997,8 +1005,17 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                 photo: *Photo = *Model.photos[i]
                 clicked := PhotoAction(session, cast(s32)(100 + i), TextUntilNul(photo.name[:]), .{bx, by, cell, cell})
                 ImageAt(session, cast(u64)(1000000 + i), TextUntilNul(photo.thumbnail[:]), TextUntilNul(photo.name[:]), .{bx + 3.0, by + 3.0, cell - 6.0, cell - 6.0}, true)
-                if TextUntilNul(photo.kind[:]) == "video" { Label(session, cast(u64)(2100000 + i), "Video", .{bx + 8.0, by + cell - 30.0, cell - 16.0, 22.0}, 12) }
-                if photo.live { Label(session, cast(u64)(2200000 + i), "Live Photo", .{bx + 8.0, by + cell - 30.0, cell - 16.0, 22.0}, 12) }
+                kind_y := ifx Model.view == "large" then by+8.0 else by+cell-30.0
+                if TextUntilNul(photo.kind[:]) == "video" { Label(session, cast(u64)(2100000 + i), "Video", .{bx + 8.0, kind_y, cell - 16.0, 22.0}, 12) }
+                if photo.live { Label(session, cast(u64)(2200000 + i), "Live Photo", .{bx + 8.0, kind_y, cell - 16.0, 22.0}, 12) }
+                if Model.view == "large" {
+                    label: Vec(u8); unit: s64 = 1048576; suffix := "MiB"
+                    if photo.storage_size >= 1073741824 { unit = 1073741824; suffix = "GiB" }
+                    BuilderPrint(*label,"%.% %",photo.storage_size/unit,(photo.storage_size%unit)*10/unit,suffix)
+                    text := BuilderFinish(label)
+                    badge: BoxProps; badge.key = cast(u64)(2400000+i); badge.bounds = .{bx+6.0,by+cell-32.0,cell-12.0,26.0}; badge.fill = BackgroundColor(); Box(session,badge)
+                    Label(session,cast(u64)(2500000+i),text,.{bx+12.0,by+cell-30.0,cell-24.0,22.0},13); Model.Release(text)
+                }
                 if Model.IsPicked(TextUntilNul(photo.id[:])) {
                     badge: BoxProps; badge.key = cast(u64)(2300000 + i); badge.bounds = .{bx + 6.0, by + 6.0, 82.0, 28.0}; badge.fill = BackgroundColor(); Box(session, badge)
                     Label(session, cast(u64)(2200000 + i), "Selected", .{bx + 12.0, by + 8.0, 72.0, 24.0}, 14)

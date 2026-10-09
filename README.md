@@ -645,3 +645,19 @@ Hidden access, exports keys, changes originals or escapes Guest view. Keep a
 recovery file before losing local credentials; another account's file cannot
 recover your library. A 24-word recovery phrase and system authentication remain
 unfinished.
+
+Large files
+-----------
+
+Open Local sync > Large files to review originals backed up to your pinned
+ThinkPad node that are larger than 10 MiB. The gallery sorts by original byte
+size, largest first, with All files, Photos only and Videos only filters.
+Archived originals are included; Hidden, Trash and originals without a backup
+manifest are excluded. A paired Live Photo appears once with the combined
+still and motion size, after both originals are backed up. Existing gallery
+selection, album and recoverable Trash actions work here. Trash continues to
+retain originals; this view does not permanently reclaim node storage.
+
+This follows Ente's [large-file review](https://ente.photos/help/photos/features/albums-and-organization/storage-optimization#view-large-files)
+within the ThinkPad-only policy. Mobile space recovery, cache management and
+similar-image review remain unfinished.

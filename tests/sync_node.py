@@ -60,6 +60,10 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         camera_exif[34665] = {36867: '1960:01:02 03:04:05'}
         Image.new('RGB',(500,300),'#4c9180').save(source/'fixture.jpg',exif=camera_exif)
         Image.new('RGB',(300,500),'#ce9157').save(source/'second.jpg')
+        # A real large immutable original spans multiple encrypted chunks.
+        # JPEG permits trailing data; retain it byte-for-byte through backup.
+        with (source/'second.jpg').open('ab') as large:
+            large.write(b'\0' * (11 * 2**20))
         imported_metadata = {'unknownCameraFields': {'empty': None, 'integer': 10**100,
                              'values': [True, False, '日本語\n\0']}}
         (source/'fixture.jpg.json').write_text(packed({**imported_metadata,
@@ -68,6 +72,7 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         (source/'.photos-album.json').write_bytes(packed(imported_album).encode('utf-16'))
         first = Library(folder/'desktop')
         first.import_folders([source.parent])
+        assert first.query('large')['count'] == 0
         assert first.album_details('Fixture')['description'] == imported_album['description']
         assert first.album_details('Fixture')['pinned'] == 0
         imported_provenance = {first.album_details('Fixture')['id']: ['f'*64]}
@@ -86,6 +91,11 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         existing_bytes = existing_identity.read_bytes()
         client = Client(first, config)
         assert client.sync() == 0
+        large_id = digest_file(source/'second.jpg')
+        large_bytes = (source/'second.jpg').stat().st_size
+        backed = first.query('large')
+        assert [(p['id'],p['storage_size']) for p in backed['photos']] == [(large_id,large_bytes)]
+        assert first.query('large',large_type='videos')['count'] == 0
         assert existing_identity.read_bytes() == existing_bytes
         photo_id = digest_file(source/'fixture.jpg')
         from photos import semantic
@@ -103,6 +113,9 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         peer = Client(second, config)
         assert peer.sync() == 0
         assert second.query()['total'] == 2
+        restored_large = second.query('large')
+        assert [(p['id'],p['storage_size']) for p in restored_large['photos']] == [(large_id,large_bytes)]
+        assert Path(peer.materialize(large_id)).read_bytes() == (source/'second.jpg').read_bytes()
         assert second.album_details('Fixture')['description'] == imported_album['description']
         assert second.album_details('Fixture')['pinned'] == 0
         assert json.loads(second.photo(digest_file(source/'fixture.jpg'))['edits'])['auto_albums'] == imported_provenance

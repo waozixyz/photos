@@ -1,0 +1,3 @@
+// Storage review counts a paired Live Photo once, including its motion original.
+LargeBytesSQL :: "(size+coalesce((SELECT motion.size FROM photos motion WHERE motion.id=json_extract(photos.metadata,'$.photosLive.video')),0))";
+BackedSQL :: "json_type(manifest,'$.chunks')='array' AND json_array_length(manifest,'$.chunks')>0 AND (json_extract(metadata,'$.photosLive.video') IS NULL OR EXISTS(SELECT 1 FROM photos motion WHERE motion.id=json_extract(photos.metadata,'$.photosLive.video') AND json_type(motion.manifest,'$.chunks')='array' AND json_array_length(motion.manifest,'$.chunks')>0))";

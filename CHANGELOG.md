@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.51
+
+- Review backed-up originals larger than 10 MiB, ordered from largest to smallest with photo and video filters.
+- See the combined original size of a paired Live Photo once, while Hidden, Trash and pending originals stay out of storage review.
+- Select large files for ordinary album actions or recoverable Trash while retaining their original bytes.
+
 ## 0.1.50
 
 - Recover a forgotten app PIN or password using your encrypted recovery file and its separate password, then unlock with a confirmed new app password.

@@ -1,4 +1,11 @@
 .DEFAULT_GOAL := build
+.PHONY: storage-window-test storage-portable-test storage-hosted-test
+storage-window-test: build
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/storage_window.py
+storage-portable-test: bundle
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_STORAGE_PORTABLE=1 $(PYTHON) tests/storage_window.py
+storage-hosted-test: bundle
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_STORAGE_PORTABLE=1 PHOTOS_STORAGE_HOSTED=1 $(PYTHON) tests/storage_window.py
 .PHONY: local-service
 local-service:
 	LDLIBS='-lglib-2.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry photos_service:main --exe -o build/photos-service src/photos_service.zi
