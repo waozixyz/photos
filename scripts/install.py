@@ -45,9 +45,15 @@ def main():
     binary = repo/'build/photos-desktop'
     if not binary.is_file():
         parser.error('Build Photos before installing')
+    processor = repo/'build/image-editor/image_edit'
+    if not processor.is_file():
+        parser.error('Build the Photos image processor before installing')
     shutil.copyfile(binary,installed/'photos-desktop.next')
     os.chmod(installed/'photos-desktop.next',0o755)
     os.replace(installed/'photos-desktop.next',installed/'photos-desktop')
+    shutil.copyfile(processor,installed/'image_edit.next')
+    os.chmod(installed/'image_edit.next',0o755)
+    os.replace(installed/'image_edit.next',installed/'image_edit')
     shutil.copyfile(repo/'scripts/worker.py',installed/'worker.py')
     shutil.copyfile(repo/'scripts/service.py',installed/'service.py')
     shutil.copytree(repo/'photos',installed/'photos',dirs_exist_ok=True,ignore=shutil.ignore_patterns('__pycache__'))

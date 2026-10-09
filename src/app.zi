@@ -122,6 +122,33 @@ BulkBar :: (session: Session, bounds: Rectangle) {
     if Action(session, 67, "Export selection", BulkBounds(bounds, 6), ready) { Model.BeginEdit("export", "Export selected originals", "", "Destination folder; empty uses Pictures/Photos Export") }
     if Action(session, 68, "Remove from album", BulkBounds(bounds, 7), ready && Model.album[0] != 0) { Model.Apply("album_remove", TextUntilNul(Model.album[:])) }
     if Action(session, 69, ifx Model.view == "archive" then "Unarchive" else "Archive", BulkBounds(bounds, 8), ready) { Model.Apply("archived_set", ifx Model.view == "archive" then "0" else "1") }
+    if Action(session, 214, "Edit location", BulkBounds(bounds, 9), ready) { Model.BeginEdit("location", "Set location for selection", "", "Latitude, longitude; leave empty to remove location") }
+}
+
+ImageEditor :: (session: Session, body: Rectangle) {
+    x := body.x; y := body.y; width := body.width
+    Label(session, 250, "Edit photo", .{x, y, width, 32.0}, 24)
+    step := (width - 24.0) / 4.0
+    ready := !Model.loading
+    if Action(session, 251, "Rotate right", .{x, y + 42.0, step, 36.0}, ready) { Model.ImageChange(0, 90) }
+    if Action(session, 252, ifx Model.image_adjustments[1] == 0 then "Flip horizontal" else "Undo horizontal", .{x + step + 8.0, y + 42.0, step, 36.0}, ready) { Model.ImageChange(1, 1) }
+    if Action(session, 253, ifx Model.image_adjustments[2] == 0 then "Flip vertical" else "Undo vertical", .{x + 2.0 * (step + 8.0), y + 42.0, step, 36.0}, ready) { Model.ImageChange(2, 1) }
+    crop_labels: [4]string = .{"Crop: original", "Crop: square", "Crop: 4:3", "Crop: 16:9"}
+    if Action(session, 254, crop_labels[Model.image_adjustments[6]], .{x + 3.0 * (step + 8.0), y + 42.0, step, 36.0}, ready) { Model.ImageChange(6, 1) }
+    ImageAt(session, 5000000, TextUntilNul(Model.edit_preview[:]), "Preview of edited photo", .{x, y + 90.0, width, body.height - 288.0})
+    captions: [3]string = .{"Brightness", "Contrast", "Saturation"}
+    unit := (width - 24.0) / 3.0
+    for i: 0..2 {
+        bx := x + cast(float32)i * (unit + 12.0); by := y + body.height - 184.0
+        caption: Vec(u8); BuilderPrint(*caption, "% · % / 100", captions[i], Model.image_adjustments[i + 3]); value := BuilderFinish(caption)
+        Label(session, cast(u64)(260 + i), value, .{bx, by, unit, 24.0}, 15); Model.Release(value)
+        if Action(session, cast(s32)(270 + i * 2), "-", .{bx, by + 30.0, (unit - 8.0) / 2.0, 36.0}, ready && Model.image_adjustments[i + 3] > 0) { Model.ImageChange(cast(s32)i + 3, -10) }
+        if Action(session, cast(s32)(271 + i * 2), "+", .{bx + (unit + 8.0) / 2.0, by + 30.0, (unit - 8.0) / 2.0, 36.0}, ready && Model.image_adjustments[i + 3] < 200) { Model.ImageChange(cast(s32)i + 3, 10) }
+    }
+    Label(session, 280, "Save a separate PNG copy; your original stays intact.", .{x, y + body.height - 94.0, width, 24.0}, 14)
+    if Action(session, 281, "Reset", .{x, y + body.height - 56.0, unit, 38.0}, ready) { Model.ImageReset() }
+    if Action(session, 282, "Save copy", .{x + unit + 12.0, y + body.height - 56.0, unit, 38.0}, ready && Model.ImageChanged()) { Model.ImageRequest("image_save") }
+    if Action(session, 283, "Cancel", .{x + 2.0 * (unit + 12.0), y + body.height - 56.0, unit, 38.0}, ready) { Model.Apply("image_close") }
 }
 
 #program_export
@@ -141,9 +168,9 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
     sidebar: float32 = ifx viewport.width < 800.0 then 126.0 else 166.0
     x := left + sidebar + 14.0; width := viewport.width - sidebar - 38.0
     Label(session, 2, "Photos", .{left, top + 2.0, sidebar, 36.0}, 28)
-    labels: [9]string = .{"Photos", "Albums", "Favorites", "Videos", "Hidden", "Trash", "Local sync", "Archive", "Uncategorized"}
-    views: [9]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized"}
-    for i: 0..8 {
+    labels: [10]string = .{"Photos", "Albums", "Favorites", "Videos", "Hidden", "Trash", "Local sync", "Archive", "Uncategorized", "Memories"}
+    views: [10]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized", "memories"}
+    for i: 0..9 {
         if Action(session, cast(s32)(10 + i), labels[i], .{left, top + 58.0 + cast(float32)i * 47.0, sidebar, 39.0}) { Model.Navigate(views[i]) }
     }
     Label(session, 3, "ThinkPad only", .{left, viewport.y + viewport.height - 76.0, sidebar, 22.0}, 13)
@@ -158,7 +185,9 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, 44, "Sync", .{x + width - 78.0, y, 78.0, 39.0}) { Model.Request("sync") }
     }
     body := Rectangle.{x, y + 52.0, width, viewport.height - 216.0}
-    if Model.editor != "" {
+    if Model.editor == "image" {
+        ImageEditor(session, body)
+    } else if Model.editor != "" {
         Label(session, 91, Model.editor_title, .{x + 12.0, body.y + 12.0, width - 24.0, 34.0}, 22)
         committed := Field(session, .{x + 12.0, body.y + 64.0, width - 24.0, 44.0}, false, key, modifiers, typed)
         Label(session, 92, Model.editor_hint, .{x + 12.0, body.y + 124.0, width - 24.0, 26.0}, 13)
@@ -185,7 +214,10 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, 53, ifx photo.favorite then "Unfavorite" else "Favorite", .{x + 258.0, body.y, 106.0, 36.0}, !Model.loading) { SelectedAction("favorite") }
         if Action(session, 54, ifx photo.trashed then "Restore" else "Trash", .{x + 374.0, body.y, 76.0, 36.0}, !Model.loading) { SelectedAction(ifx photo.trashed then "restore" else "trash") }
         image := ifx photo.original[0] != 0 && TextUntilNul(photo.kind[:]) == "photo" then TextUntilNul(photo.original[:]) else TextUntilNul(photo.thumbnail[:])
-        ImageAt(session, 3000, image, TextUntilNul(photo.name[:]), .{x, body.y + 48.0, width, body.height - 320.0})
+        ready := !Model.loading && TextUntilNul(Model.detail_id[:]) == TextUntilNul(photo.id[:])
+        if Action(session, 215, "Edit image", .{x, body.y + 44.0, 126.0, 36.0}, ready && TextUntilNul(photo.kind[:]) == "photo" && !photo.trashed) { Model.BeginImageEdit() }
+        if Action(session, 216, "Edit location", .{x + 138.0, body.y + 44.0, 138.0, 36.0}, ready) { Model.BeginEdit("location", "Edit photo location", TextUntilNul(Model.detail_location[:]), "Latitude, longitude; leave empty to remove location") }
+        ImageAt(session, 3000, image, TextUntilNul(photo.name[:]), .{x, body.y + 92.0, width, body.height - 364.0})
         Label(session, 75, TextUntilNul(photo.name[:]), .{x, body.y + body.height - 262.0, width, 24.0}, 17)
         details: Vec(u8); BuilderPrint(*details, "% · % x % · % bytes", TextUntilNul(Model.detail_taken[:]), photo.width, photo.height, Model.detail_size)
         text := BuilderFinish(details); Label(session, 76, text, .{x, body.y + body.height - 232.0, width, 22.0}, 13); Model.Release(text)
@@ -193,7 +225,6 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         Label(session, 78, TextUntilNul(Model.detail_albums[:]), .{x, body.y + body.height - 172.0, width, 22.0}, 13)
         Label(session, 79, TextUntilNul(Model.detail_tags[:]), .{x, body.y + body.height - 142.0, width, 22.0}, 13)
         Label(session, 96, TextUntilNul(Model.detail_location[:]), .{x, body.y + body.height - 114.0, width, 22.0}, 13)
-        ready := !Model.loading && TextUntilNul(Model.detail_id[:]) == TextUntilNul(photo.id[:])
         step := (width - 32.0) / 5.0
         bottom := body.y + body.height - 82.0
         if Action(session, 55, "Add to album", .{x, bottom, step, 36.0}, ready) { Model.BeginEdit("album_add", "Add photo to album", "", "Enter an album name") }
@@ -242,7 +273,13 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                 body.y += 44.0; body.height -= 44.0
                 if Model.album_description[0] != 0 { Label(session, 208, TextUntilNul(Model.album_description[:]), .{x, body.y, width, 28.0}, 14); body.y += 32.0; body.height -= 32.0 }
             }
-            if Model.selecting { BulkBar(session, .{x, body.y, width, 80.0}); height: float32 = ifx width < 720.0 then 132.0 else 88.0; body.y += height; body.height -= height }
+            if Model.view == "memories" && !Model.selecting {
+                text: Vec(u8); BuilderPrint(*text, "On this day · % · earlier years (UTC)", TextUntilNul(Model.memory_date[:]))
+                value := BuilderFinish(text); Label(session, 217, value, .{x, body.y + 4.0, width - 130.0, 26.0}, 14); Model.Release(value)
+                if Action(session, 218, "Choose day", .{x + width - 118.0, body.y, 118.0, 34.0}, !Model.loading) { Model.BeginEdit("memory_date", "Choose a memories day", TextUntilNul(Model.memory_date[:]), "YYYY-MM-DD; shows the same day in earlier years") }
+                body.y += 42.0; body.height -= 42.0
+            }
+            if Model.selecting { BulkBar(session, .{x, body.y, width, 80.0}); height: float32 = ifx width < 720.0 then 176.0 else 88.0; body.y += height; body.height -= height }
         }
         pointer := Input.PointerSample(session)
         ScrollDevice.BeginScrollFrame(session, .{pointer.x, pointer.y}, pointer.pressed, pointer.down, pointer.released, PointerWheelTake(session, body), cast(float64)Model.ticks / 60.0)

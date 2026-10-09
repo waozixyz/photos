@@ -36,6 +36,25 @@ Use the dedicated editors to change captions, tags, file names and capture dates
 Dates without an explicit time-zone offset use UTC. Left/right arrows browse
 photos and Escape returns to the grid when no text field has focus.
 
+Edit image opens a native editor with rotation, horizontal and vertical flips,
+centered square/4:3/16:9 crops, brightness, contrast and saturation. Preview and
+reset changes, then Save copy to add a separate PNG original to the library.
+Your source photo stays untouched. Copies keep capture dates, captions, tags,
+locations, albums, favorites, Hidden/Archive state, transparency and color profiles;
+they are backed up and exported like other originals. Raster transformations run
+in a headless Ziran processor using installed GdkPixbuf codecs. Animated images
+are refused to avoid losing frames. Freeform cropping, drawing, advanced filters
+and RAW/HEIC editing remain unfinished. Repeating an identical edit reuses the
+existing copy and preserves any later changes to its metadata or Trash state.
+
+Edit location accepts latitude and longitude separated by a comma; an empty value
+removes location. Apply it to a photo or selection. Corrections survive source
+rescans and remain in encrypted sync and export sidecars. Memories shows photos
+from the same capture day in earlier years, using UTC, and Choose day lets you
+browse another day. Hidden, Trash and individually or album-archived photos stay
+excluded. This is an on-this-day gallery; face-based Memory Lane and curated
+stories remain unfinished.
+
 Use Select, Ctrl-click or Shift-click to select up to 1000 items. Select loaded
 selects the photos already loaded into the feed, including those outside the
 visible rows; scrolling loads more. Apply favorites, hiding, Trash, restore, album
@@ -72,7 +91,7 @@ JPEG, PNG, WebP, GIF and common video containers import directly. RAW/HEIC files
 are retained even when the local image decoder cannot preview them. Video
 thumbnails need ffmpeg. Videos can be stored, synced, previewed and exported;
 in-app video playback is not implemented. Facial recognition, semantic image
-search, photo editing, public links and phone camera backup are not implemented.
+search, public links and phone camera backup are not implemented.
 This version is a local photo library with sync, not complete Ente feature parity.
 Hidden is currently a gallery filter, without Ente's authenticated lock screen.
 Trash retains originals indefinitely, without automatic expiry or permanent deletion.
@@ -85,14 +104,15 @@ and [export behavior](https://ente.com/help/photos/features/backup-and-sync/expo
 The remaining replacement work includes:
 
 - Mobile clients, permission-aware background camera backup and device space recovery.
-- On-device face grouping, semantic search, maps, memories and smart albums.
-- Photo editing, video playback, Live Photo pairing and broader HEIC/RAW previews.
+- On-device face grouping, semantic search, maps, curated memories and smart albums.
+- Advanced photo editing, video playback/editing, Live Photo pairing and broader HEIC/RAW previews.
 - Private sharing, collaboration, public links, comments and account recovery.
   Any sharing design needs to honor the owner's ThinkPad-only sync restriction.
 - An authenticated hidden vault and a deliberate deletion/retention policy.
 - A Ziran library/sync service. The native UI and portable app are Ziran/Kryon;
   the SQLite importer, metadata service and encrypted sync worker remain Python.
 
+The native image processor needs GdkPixbuf and GObject on the Linux desktop host.
 Unit and synthetic round-trip checks validate tested flows; an independent
 cryptographic audit remains outside their scope. Full-original restore verification belongs
 in private receipts, rather than storing library inventories in the repository.

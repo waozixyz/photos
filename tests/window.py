@@ -53,7 +53,14 @@ with tempfile.TemporaryDirectory() as folder:
                 time.sleep(.1)
             raise AssertionError('Photos did not finish rendering')
         def action(label=None,control=None):
-            button=next(c for c in state()['controls'] if (c['label']==label if label else c['control']==str(control)) and c['enabled'])
+            button=None
+            for _ in range(100):
+                snapshot=state()
+                button=next((c for c in snapshot['controls'] if (c['label']==label if label else c['control']==str(control)) and c['enabled']),None)
+                if button:break
+                assert process.poll() is None
+                time.sleep(.1)
+            assert button, (label,control,snapshot)
             xdo('mousemove','--window',window,int(button['x']+button['width']/2),int(button['y']+button['height']/2));xdo('click','1');time.sleep(.3)
         state('photos', 4)
         subprocess.run(['import','-window',window,str(output/'library.png')],check=True)
@@ -82,7 +89,7 @@ with tempfile.TemporaryDirectory() as folder:
         action('Rename album');enter('Empty renamed');action('Save')
         action('Pin album');assert library.album_details('Empty renamed')['pinned']==1
         action('Archive album');assert library.album_details('Empty renamed')['archived']==1
-        action('Albums');action('Active albums');state('albums')
+        action('Albums');state('albums');action('Active albums');state('albums')
         action('Empty renamed');action('Unarchive album');action('Delete empty album');state('albums')
         action('Archived albums');action('Empty albums');state('albums')
         subprocess.run(['import','-window',window,str(output/'albums.png')],check=True)
@@ -129,7 +136,39 @@ with tempfile.TemporaryDirectory() as folder:
         subprocess.run(['import','-window',window,str(output/'narrow.png')],check=True)
         action('Select');action('Select loaded')
         subprocess.run(['import','-window',window,str(output/'selection-narrow.png')],check=True)
-        print('Private Xvfb: gallery, sorting, batch organization, empty albums, album description/cover/pin/archive/delete, caption/date editors, archive/uncategorized, continuous export/stop and narrow layout verified')
+        action('Done');xdo('windowsize',window,1180,880)
+        ids = [row[0] for row in library.db.execute('SELECT id FROM photos')]
+        library.edit_many(ids, 'archived_set', '0')
+        action('Photos');state('photos',4);action(control=100)
+        parent = library.query()['photos'][0]
+        original_bytes = library.original(parent).read_bytes()
+        action('Edit image');assert state()['editor']=='image'
+        action('Rotate right');action('Flip horizontal');action('Flip vertical');action('Crop: original')
+        action(control=271);action(control=273);action(control=275)
+        subprocess.run(['import','-window',window,str(output/'editing.png')],check=True)
+        action('Reset');action('Rotate right');action('Save copy')
+        assert state()['editor']==''
+        assert library.query()['total']==5
+        assert library.original(library.photo(parent['id'])).read_bytes()==original_bytes
+        copy = library.db.execute('SELECT * FROM photos WHERE id NOT IN (?,?,?,?)', ids).fetchone()
+        assert (copy['width'],copy['height'])==(500,700)
+        assert json.loads(copy['metadata'])['photosEdit']['parent']==parent['id']
+        action('Edit image');action('Rotate right');action('Cancel')
+        assert library.query()['total']==5 and state()['editor']==''
+        action('Edit location');enter('-25.3, -57.6');action('Save')
+        assert library.details(parent['id'])['location']=='-25.3, -57.6'
+        action('Photos');action('Select');action('Select loaded');action('Edit location');enter('1, 2');action('Save')
+        assert all(library.details(row[0])['location']=='1.0, 2.0' for row in library.db.execute('SELECT id FROM photos'))
+        library.edit_many([parent['id']], 'taken', '2024-10-08T12:00:00Z')
+        action('Memories');action('Choose day');enter('2026-10-08');action('Save')
+        assert state('memories')['nodes']==1
+        subprocess.run(['import','-window',window,str(output/'memories.png')],check=True)
+        xdo('windowsize',window,720,880);action(control=100);action('Edit image');state()
+        subprocess.run(['import','-window',window,str(output/'editing-narrow.png')],check=True)
+        for control in state()['controls']:
+            assert 0 <= control['x'] and control['x']+control['width']<=720.1, control
+        action('Cancel')
+        print('Private Xvfb: organization/export baseline plus photo editor/preview/reset/copy/cancel, single and bulk coordinates, memories and narrow editor verified')
     finally:
         service.shutdown();service.server_close()
         process.terminate()

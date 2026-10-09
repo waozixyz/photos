@@ -118,7 +118,22 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         first.import_folders([source.parent]); client.sync(); peer.sync()
         empty_id = digest_file(empty)
         assert Path(peer.materialize(empty_id)).read_bytes() == b''
-        print('Isolated Daochi v6: signed login, encrypted original restore, photo edits, empty albums, descriptions/covers/pinning, album rename/archive/delete and Trash restore round-trip passed')
+        from photos import editing
+        second.edit(photo_id, 'location', '-25.3, -57.6')
+        copy_id = editing.save(second, photo_id, [90, 1, 0, 120, 100, 80, 1])
+        assert peer.sync() == 0; assert client.sync() == 0
+        assert first.details(photo_id)['location'] == '-25.3, -57.6'
+        assert first.details(copy_id)['location'] == '-25.3, -57.6'
+        assert json.loads(first.photo(copy_id)['metadata'])['photosEdit']['parent'] == photo_id
+        restored = Path(client.materialize(copy_id))
+        assert digest_file(restored) == copy_id
+        assert restored.read_bytes() == second.original(second.photo(copy_id)).read_bytes()
+        with Image.open(restored) as copy:
+            assert copy.size == (300, 300)
+        assert (source/'fixture.jpg').read_bytes() == original.read_bytes()
+        second.edit(photo_id, 'location', ''); peer.sync(); client.sync()
+        assert first.details(photo_id)['location'] == ''
+        print('Isolated Daochi v6: signed album/photo/Trash baseline plus edited PNG copy, metadata, location correction/removal and full copy restore passed')
     finally:
         process.terminate()
         process.wait(timeout=10)

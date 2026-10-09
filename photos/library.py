@@ -1,6 +1,7 @@
 """A merged, content-addressed library. Imported folders are always read-only."""
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -211,6 +212,11 @@ class Library:
             self._ensure_album(name)
         combined = json.loads(existing['metadata']) if existing else {}
         combined.update(metadata)
+        if 'location' in edits:
+            combined.pop('geoData', None)
+            combined.pop('geoDataExif', None)
+            if edits['location'] is not None:
+                combined['geoData'] = edits['location']
         if existing:
             if packed(albums) != existing['albums'] or packed(combined) != existing['metadata']:
                 corrected = taken if metadata.get('photoTakenTime') and not edits.get('taken') else existing['taken']
@@ -352,6 +358,29 @@ class Library:
             edits['taken'] = True
             self.db.execute('UPDATE photos SET taken=?,edits=?,updated=?,dirty=1 WHERE id=?',
                             (timestamp, packed(edits), time.time(), photo_id))
+        elif action == 'location':
+            if not isinstance(value, str):
+                raise LibraryError('Enter latitude, longitude, or leave empty to remove location')
+            geo = None
+            if value.strip():
+                try:
+                    parts = value.split(',')
+                    if len(parts) != 2:
+                        raise ValueError()
+                    latitude, longitude = (float(part.strip()) for part in parts)
+                    if not math.isfinite(latitude) or not math.isfinite(longitude) or not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+                        raise ValueError()
+                    geo = dict(latitude=latitude, longitude=longitude)
+                except ValueError:
+                    raise LibraryError('Enter valid coordinates: latitude -90 to 90, longitude -180 to 180') from None
+            metadata = json.loads(photo['metadata'])
+            metadata.pop('geoData', None)
+            metadata.pop('geoDataExif', None)
+            if geo is not None:
+                metadata['geoData'] = geo
+            edits['location'] = geo
+            self.db.execute('UPDATE photos SET metadata=?,edits=?,updated=?,dirty=1 WHERE id=?',
+                            (packed(metadata), packed(edits), time.time(), photo_id))
         elif action == 'rename':
             if not isinstance(value, str) or not value.strip() or value.strip() in {'.', '..'} or any(c in value for c in '/\\') or any(ord(c) < 32 for c in value) or len(value.encode()) > 512:
                 raise LibraryError('Enter a file name without a folder path')
@@ -459,7 +488,7 @@ class Library:
     def details(self, photo_id):
         photo = self.photo(photo_id)
         metadata = json.loads(photo['metadata'])
-        geo = metadata.get('geoDataExif') or metadata.get('geoData') or {}
+        geo = metadata.get('geoData') or metadata.get('geoDataExif') or {}
         return dict(id=photo_id, name=photo['name'],
                     caption=photo['caption'].encode()[:8192].decode('utf-8', 'ignore'),
                     tags=photo['tags'].encode()[:8192].decode('utf-8', 'ignore'),
@@ -470,7 +499,7 @@ class Library:
                     taken=datetime.fromtimestamp(photo['taken'], timezone.utc).isoformat(),
                     location=f"{geo.get('latitude', '')}, {geo.get('longitude', '')}" if isinstance(geo, dict) and 'latitude' in geo else '')
 
-    def query(self, view='photos', search='', album='', offset=0, limit=60, sort='newest', album_mode='active', album_sort='name'):
+    def query(self, view='photos', search='', album='', offset=0, limit=60, sort='newest', album_mode='active', album_sort='name', memory_date=''):
         if sort not in {'newest', 'oldest'}:
             raise LibraryError('Choose newest first or oldest first')
         where, args = ['trashed=0', 'hidden=0'], []
@@ -486,6 +515,16 @@ class Library:
             where.append('(archived=1 OR EXISTS(SELECT 1 FROM json_each(photos.albums) j JOIN albums a ON a.name=j.value WHERE a.archived=1 AND a.deleted=0))')
         elif view == 'uncategorized':
             where.append('json_array_length(albums)=0')
+        elif view == 'memories':
+            try:
+                day = datetime.strptime(memory_date, '%Y-%m-%d').date() if memory_date else datetime.now(timezone.utc).date()
+                if memory_date and day.isoformat() != memory_date:
+                    raise ValueError()
+            except (TypeError, ValueError):
+                raise LibraryError('Choose a valid day, for example 2026-10-08') from None
+            where.extend(["strftime('%m-%d',taken,'unixepoch')=?", 'taken<?', 'archived=0',
+                          'NOT EXISTS(SELECT 1 FROM json_each(photos.albums) j JOIN albums a ON a.name=j.value WHERE a.archived=1 AND a.deleted=0)'])
+            args.extend([day.strftime('%m-%d'), datetime(day.year, 1, 1, tzinfo=timezone.utc).timestamp()])
         elif view == 'photos' and not album and not search:
             # Archive removes items only from the home timeline. Albums and
             # search retain them, unlike Hidden and Trash.
@@ -515,6 +554,8 @@ class Library:
         album_pending = self.db.execute('SELECT COUNT(*) FROM albums WHERE dirty=1').fetchone()[0]
         result = dict(photos=photos, count=count, albums=albums, total=totals[0], bytes=totals[1], pending=(totals[2] or 0) + album_pending,
                     status=self.setting('status', 'Local library · ThinkPad sync only'), importing=self.setting('import', {}))
+        if view == 'memories':
+            result['memory_date'] = day.isoformat()
         if album:
             row = self.db.execute('SELECT * FROM albums WHERE name=? AND deleted=0', (album,)).fetchone()
             if row:

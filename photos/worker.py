@@ -29,7 +29,8 @@ def process(request, config):
 def ui_query(library, request):
     result = library.query(request.get('view', 'photos'), request.get('search', ''),
                            request.get('album', ''), request.get('offset', 0), sort=request.get('sort', 'newest'),
-                           album_mode=request.get('album_mode', 'active'), album_sort=request.get('album_sort', 'name'))
+                           album_mode=request.get('album_mode', 'active'), album_sort=request.get('album_sort', 'name'),
+                           memory_date=request.get('memory_date', ''))
     # The gallery needs only these fields. Full metadata and encrypted sync
     # manifests stay in the store rather than being decoded on every UI poll.
     fields = ('id', 'name', 'thumbnail', 'original', 'date', 'kind', 'favorite',
@@ -45,6 +46,32 @@ def ui_query(library, request):
 
 def library_request(library, request, config):
     action = request.get('action', 'query')
+    if action == 'memory_date':
+        request = {**request, 'view': 'memories', 'memory_date': request.get('value', ''), 'offset': 0}
+        result = ui_query(library, request)
+        result['view'] = 'memories'
+        return result
+    if action in {'image_preview', 'image_save', 'image_close'}:
+        from . import editing
+        if action == 'image_close':
+            editing.close(library, request.get('edit_session', ''))
+            return ui_query(library, request)
+        photo = library.photo(request['id'])
+        if not library.original(photo).exists():
+            if not config.get('node'):
+                raise LibraryError('Download the original before editing')
+            Client(library, config).materialize(photo['id'])
+        if action == 'image_preview':
+            result = ui_query(library, request)
+            result.update(editing.preview(library, photo['id'], request.get('value'), request.get('edit_session', '')))
+            return result
+        copy_id = editing.save(library, photo['id'], request.get('value'))
+        editing.close(library, request.get('edit_session', ''))
+        result = ui_query(library, request)
+        result['status'] = 'Edited copy saved; original retained'
+        result['saved_copy'] = copy_id
+        result['detail'] = library.details(photo['id'])
+        return result
     if action == 'query':
         result = ui_query(library, request)
         if config.get('node'):

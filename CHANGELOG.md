@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.7
+
+- Preview photo rotation, horizontal and vertical flips, centered crop presets, brightness, contrast and saturation, then save a separate PNG copy while keeping the original.
+- Keep capture dates, captions, tags, locations, album memberships, privacy settings, transparency and color profiles in edited copies.
+- Correct or remove location coordinates for a photo or selection, preserving corrections during source rescans, export and encrypted sync.
+- Browse memories from the same capture day in earlier years, or choose another day; Hidden, Trash and archived photos stay excluded.
+
 ## 0.1.6
 
 - Create empty albums, edit descriptions, choose covers, pin favorites and browse active, archived or empty albums.

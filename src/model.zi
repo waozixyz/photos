@@ -35,6 +35,10 @@ last_pick: s32 = -1;
 editor: string;
 editor_title: string;
 editor_hint: string;
+image_adjustments: [7]s32 = .{0, 0, 0, 100, 100, 100, 0};
+edit_preview: [4097]u8;
+edit_session: [33]u8;
+memory_date: [11]u8;
 edit_value: [8193]u8;
 detail_id: [65]u8;
 detail_caption: [8193]u8;
@@ -125,7 +129,9 @@ SendRequest :: (action: string, id: string, value: string) {
     Property(*out, "album", TextUntilNul(album[:])); Property(*out, "id", id); Property(*out, "value", value)
     Property(*out, "sort", sort)
     Property(*out, "album_mode", album_mode); Property(*out, "album_sort", album_sort)
-    mutation = action != "query" && action != "open" && action != "sync" && action != "import"
+    Property(*out, "memory_date", TextUntilNul(memory_date[:]))
+    Property(*out, "edit_session", TextUntilNul(edit_session[:]))
+    mutation = action != "query" && action != "open" && action != "sync" && action != "import" && action != "image_preview"
     if mutation && picked_count > 0 && (action == "album_add" || action == "album_remove" || !StartsWithFoldASCII(action, "album_")) {
         BuilderPrint(*out, ",\"ids\":[")
         for i: 0..picked_count - 1 { if i > 0 { BuilderPrint(*out, ",") }; Quoted(*out, TextUntilNul(picked[i].id[:])) }
@@ -157,12 +163,14 @@ Tick :: () {
         Decode(json, 0, "error", message[:]); if message[0] != 0 { if appending { more_due = ticks + 300; appending = false }; return }
         total = Number(json, 0, "total"); matches = Number(json, 0, "count"); pending = Number(json, 0, "pending")
         Decode(json, 0, "status", message[:])
+        if FieldAt(json, 0, "edit_preview") >= 0 { Decode(json, 0, "edit_preview", edit_preview[:]); Decode(json, 0, "edit_session", edit_session[:]) }
+        if FieldAt(json, 0, "memory_date") >= 0 { Decode(json, 0, "memory_date", memory_date[:]) }
         Decode(json, 0, "export_status", export_status[:]); export_continuous = Number(json, 0, "export_continuous") > 0
         if mutation { ClearSelection(); editor = "" }
         if FieldAt(json, 0, "album") >= 0 { Decode(json, 0, "album", album[:]); offset = 0; scroll = 0 }
         if FieldAt(json, 0, "view") >= 0 {
             fresh_view: [32]u8; Decode(json, 0, "view", fresh_view[:])
-            for i: 0..cast(s32)8 { if View(i) == TextUntilNul(fresh_view[:]) { view = View(i) } }
+            for i: 0..cast(s32)9 { if View(i) == TextUntilNul(fresh_view[:]) { view = View(i) } }
         }
         album_detail := FieldAt(json, 0, "album_detail")
         album_description[0] = 0; album_pinned = false; album_archived = false
@@ -216,7 +224,7 @@ Tick :: () {
 }
 Navigate :: (target: string) {
     queued_request = false
-    if loading { for i: 0..cast(s32)8 { if View(i) == target { queued_view = i } }; return }
+    if loading { for i: 0..cast(s32)9 { if View(i) == target { queued_view = i } }; return }
     ClearSelection(); editor = ""; view = target; appending = false; feed_base = 0; album[0] = 0; selected = -1; offset = 0; scroll = 0; Request()
 }
 Choose :: (index: s32) {
@@ -260,6 +268,30 @@ Apply :: (action: string, value: string = "") {
     id := ifx selected >= 0 && selected < count then TextUntilNul(photos[selected].id[:]) else ""
     Request(action, id, value)
 }
+ImageValue :: () -> string {
+    out: Vec(u8); BuilderPrint(*out, "[")
+    for i: 0..6 { if i > 0 { BuilderPrint(*out, ",") }; BuilderPrint(*out, "%", image_adjustments[i]) }
+    BuilderPrint(*out, "]"); return BuilderFinish(out)
+}
+ImageRequest :: (action: string = "image_preview") {
+    if loading { return }
+    value := ImageValue(); Apply(action, value); Release(value)
+}
+BeginImageEdit :: () {
+    if loading || selected < 0 || selected >= count { return }
+    editor = "image"; focused = false; search_focused = false; edit_preview[0] = 0; edit_session[0] = 0
+    image_adjustments = .{0, 0, 0, 100, 100, 100, 0}; ImageRequest()
+}
+ImageChange :: (index: s32, delta: s32) {
+    if loading { return }
+    if index == 0 { image_adjustments[index] = (image_adjustments[index] + 90) % 360 }
+    else if index == 1 || index == 2 { image_adjustments[index] = 1 - image_adjustments[index] }
+    else if index == 6 { image_adjustments[index] = (image_adjustments[index] + 1) % 4 }
+    else { image_adjustments[index] += delta; if image_adjustments[index] < 0 { image_adjustments[index] = 0 }; if image_adjustments[index] > 200 { image_adjustments[index] = 200 } }
+    ImageRequest()
+}
+ImageReset :: () { if loading { return }; image_adjustments = .{0, 0, 0, 100, 100, 100, 0}; ImageRequest() }
+ImageChanged :: () -> bool { return image_adjustments[0] != 0 || image_adjustments[1] != 0 || image_adjustments[2] != 0 || image_adjustments[3] != 100 || image_adjustments[4] != 100 || image_adjustments[5] != 100 || image_adjustments[6] != 0 }
 Find :: () { ClearSelection(); editor = ""; offset = 0; scroll = 0; selected = -1; Request() }
 ToggleSort :: () { if loading { return }; sort = ifx sort == "newest" then "oldest" else "newest"; Find() }
 AlbumFilter :: () { album_mode = ifx album_mode == "active" then "archived" else (ifx album_mode == "archived" then "empty" else "active"); Find() }
@@ -280,4 +312,4 @@ More :: () {
     offset = count + feed_base; appending = true; Request()
 }
 
-View :: (index: s32) -> string { names: [9]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized"}; return names[index] }
+View :: (index: s32) -> string { names: [10]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized", "memories"}; return names[index] }

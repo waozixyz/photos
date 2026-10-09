@@ -1,4 +1,5 @@
 """A real signed-app player talks only to this test's private Photos service."""
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -147,7 +148,38 @@ with tempfile.TemporaryDirectory() as folder:
             assert library.setting('export')['continuous']
             click(620, 484)  # Stop export
             assert not library.setting('export')['continuous']
-            print('Portable Photos: gallery, batch organization, archive/sort, empty albums, descriptions, pinning and continuous export controls verified')
+            def wait_for(check, reason):
+                for _ in range(100):
+                    if check(): return
+                    assert process.poll() is None
+                    time.sleep(.05)
+                raise AssertionError((reason,calls[-5:]))
+            click(65, 90);click(260, 300)
+            parent_id = next(r['id'] for r in reversed(calls) if r['action']=='open')
+            original_bytes = library.original(library.photo(parent_id)).read_bytes()
+            click(255, 210)  # Edit image
+            wait_for(lambda: any(r['action']=='image_preview' for r in calls), 'Portable editor did not open')
+            click(310, 208)  # Rotate right
+            wait_for(lambda: any(r['action']=='image_preview' and json.loads(r['value'])[0]==90 for r in calls), 'Portable rotation did not reach Ziran image processor')
+            subprocess.run(['import','-window',window,str(shot.with_name('portable-editing.png'))],check=True)
+            click(680, 775)  # Save copy
+            wait_for(lambda: library.query()['total']==3, 'Portable edited copy was not saved')
+            assert library.original(library.photo(parent_id)).read_bytes()==original_bytes
+            click(399, 210)  # Edit location
+            click(500, 234)
+            xdo('type','--delay',45,'--clearmodifiers','--','-25.3, -57.6');time.sleep(.2);click(251,339)
+            wait_for(lambda: library.details(parent_id)['location']=='-25.3, -57.6', 'Portable coordinate edit was not saved')
+            library.edit(parent_id,'taken','2024-10-08T12:00:00Z')
+            click(65,512)  # Memories
+            click(1108,208)  # Choose day
+            click(500,234)
+            xdo('keydown','ctrl');time.sleep(.1);xdo('key','a');time.sleep(.1);xdo('keyup','ctrl');time.sleep(.1)
+            xdo('type','--delay',45,'--clearmodifiers','--','2026-10-08');time.sleep(.2);click(251,339)
+            wait_for(lambda: any(r['action']=='memory_date' and r['value']=='2026-10-08' for r in calls), 'Portable memories day was not saved')
+            time.sleep(.5)
+            subprocess.run(['import','-window',window,str(shot.with_name('portable-memories.png'))],check=True)
+            assert library.query('memories',memory_date='2026-10-08')['count']==1
+            print('Portable Photos: organization/export baseline plus native image editor/save-copy, coordinates and memories verified')
         finally:
             process.terminate()
             try:

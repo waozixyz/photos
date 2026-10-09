@@ -1,0 +1,113 @@
+// Headless raster transformations. Codec I/O is GdkPixbuf; editing is Ziran.
+// This process owns only its decoded buffers and the supplied output file.
+#import "std/byte_text_linux"
+pixbuf :: #system_library "gdk_pixbuf-2.0";
+object :: #system_library "gobject-2.0";
+Load :: (path: *u8, error: **void) -> *void #foreign pixbuf "gdk_pixbuf_new_from_file";
+Orient :: (image: *void) -> *void #foreign pixbuf "gdk_pixbuf_apply_embedded_orientation";
+Width :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_width";
+Height :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_height";
+Channels :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_n_channels";
+Stride :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_rowstride";
+Pixels :: (image: *void) -> *u8 #foreign pixbuf "gdk_pixbuf_get_pixels";
+New :: (color_space: s32, alpha: s32, bits: s32, width: s32, height: s32) -> *void #foreign pixbuf "gdk_pixbuf_new";
+Scale :: (image: *void, width: s32, height: s32, interpolation: s32) -> *void #foreign pixbuf "gdk_pixbuf_scale_simple";
+Option :: (image: *void, name: *u8) -> *u8 #foreign pixbuf "gdk_pixbuf_get_option";
+Save :: (image: *void, path: *u8, format: *u8, names: **u8, values: **u8, error: **void) -> s32 #foreign pixbuf "gdk_pixbuf_savev";
+Unref :: (image: *void) #foreign object "g_object_unref";
+
+Integer :: (text: string) -> s32 {
+    if text.count == 0 || text.count > 4 { return -1 }
+    result: s32
+    for i: 0..cast(s32)text.count - 1 {
+        if text[i] < 48 || text[i] > 57 { return -1 }
+        result = result * 10 + cast(s32)text[i] - 48
+    }
+    return result
+}
+Clamp :: (value: float64) -> u8 {
+    if value < 0.0 { return 0 }; if value > 255.0 { return 255 }
+    return cast(u8)(value + 0.5)
+}
+Gray :: (red: u8, green: u8, blue: u8) -> float64 {
+    return cast(float64)red * 0.299 + cast(float64)green * 0.587 + cast(float64)blue * 0.114
+}
+main :: (argc: s32, argv: **u8) -> s32 {
+    if argc != 11 { print("Expected source, output, seven adjustments and preview limit\n"); return 2 }
+    values: [7]s32
+    for i: 0..6 { values[i] = Integer(TextFromCString(argv[i + 3])) }
+    preview := Integer(TextFromCString(argv[10]))
+    if (values[0] != 0 && values[0] != 90 && values[0] != 180 && values[0] != 270) ||
+        values[1] < 0 || values[1] > 1 || values[2] < 0 || values[2] > 1 ||
+        values[3] < 0 || values[3] > 200 || values[4] < 0 || values[4] > 200 ||
+        values[5] < 0 || values[5] > 200 || values[6] < 0 || values[6] > 3 || (preview != 0 && preview != 1280) {
+        print("Invalid photo adjustments\n"); return 2
+    }
+    loaded := Load(argv[1], null)
+    if loaded == null { print("Unable to decode this image\n"); return 3 }
+    defer { Unref(loaded) }
+    source := Orient(loaded)
+    if source == null { print("Unable to orient this image\n"); return 3 }
+    defer { Unref(source) }
+    width := Width(source); height := Height(source); channels := Channels(source)
+    if width < 1 || height < 1 || cast(s64)width * cast(s64)height > 100000000 || (channels != 3 && channels != 4) {
+        print("Unsupported image dimensions or channels\n"); return 3
+    }
+    rotated_width := ifx values[0] == 90 || values[0] == 270 then height else width
+    rotated_height := ifx values[0] == 90 || values[0] == 270 then width else height
+    out_width := rotated_width; out_height := rotated_height
+    if values[6] != 0 {
+        ratio: float64 = ifx values[6] == 1 then 1.0 else (ifx values[6] == 2 then 4.0 / 3.0 else 16.0 / 9.0)
+        proposed_width := cast(s32)(cast(float64)rotated_height * ratio + 0.5)
+        proposed_height := cast(s32)(cast(float64)rotated_width / ratio + 0.5)
+        if proposed_width < out_width { out_width = proposed_width }; if out_width < 1 { out_width = 1 }
+        if proposed_height < out_height { out_height = proposed_height }; if out_height < 1 { out_height = 1 }
+    }
+    left := (rotated_width - out_width) / 2; top := (rotated_height - out_height) / 2
+    output := New(0, ifx channels == 4 then 1 else 0, 8, out_width, out_height)
+    if output == null { print("Unable to allocate edited image\n"); return 3 }
+    defer { Unref(output) }
+    input := Pixels(source); bytes := Pixels(output); input_stride := Stride(source); output_stride := Stride(output)
+    brightness := cast(float64)values[3] / 100.0; contrast := cast(float64)values[4] / 100.0; saturation := cast(float64)values[5] / 100.0
+    luminance: float64
+    for y: 0..height - 1 {
+        for x: 0..width - 1 {
+            rx: s32 = cast(s32)x; ry: s32 = cast(s32)y
+            if values[0] == 90 { rx = height - 1 - cast(s32)y; ry = cast(s32)x }
+            else if values[0] == 180 { rx = width - 1 - cast(s32)x; ry = height - 1 - cast(s32)y }
+            else if values[0] == 270 { rx = cast(s32)y; ry = width - 1 - cast(s32)x }
+            if values[1] == 1 { rx = rotated_width - 1 - rx }; if values[2] == 1 { ry = rotated_height - 1 - ry }
+            rx -= left; ry -= top
+            if rx < 0 || ry < 0 || rx >= out_width || ry >= out_height { continue }
+            at := y * input_stride + x * channels; to := ry * output_stride + rx * channels
+            for color: 0..2 { bytes[to + color] = Clamp(cast(float64)input[at + color] * brightness) }
+            if channels == 4 { bytes[to + 3] = input[at + 3] }
+            luminance += Gray(bytes[to], bytes[to + 1], bytes[to + 2])
+        }
+    }
+    mean := cast(float64)cast(s32)(luminance / (cast(float64)out_width * cast(float64)out_height) + 0.5)
+    for y: 0..out_height - 1 {
+        for x: 0..out_width - 1 {
+            at := y * output_stride + x * channels
+            for color: 0..2 { bytes[at + color] = Clamp(mean + (cast(float64)bytes[at + color] - mean) * contrast) }
+            gray := Gray(bytes[at], bytes[at + 1], bytes[at + 2])
+            for color: 0..2 { bytes[at + color] = Clamp(gray + (cast(float64)bytes[at + color] - gray) * saturation) }
+        }
+    }
+    scaled: *void
+    defer { if scaled != null { Unref(scaled) } }
+    result := output
+    if preview > 0 && (out_width > preview || out_height > preview) {
+        factor := cast(float64)preview / cast(float64)(ifx out_width > out_height then out_width else out_height)
+        small_width := cast(s32)(cast(float64)out_width * factor); small_height := cast(s32)(cast(float64)out_height * factor)
+        if small_width < 1 { small_width = 1 }; if small_height < 1 { small_height = 1 }
+        scaled = Scale(output, small_width, small_height, 2)
+        if scaled == null { print("Unable to resize preview\n"); return 3 }; result = scaled
+    }
+    format: [4]u8 = .{112, 110, 103, 0}
+    profile_name: [12]u8 = .{105, 99, 99, 45, 112, 114, 111, 102, 105, 108, 101, 0}
+    profile := Option(loaded, *profile_name[0]); keys: [2]*u8; contents: [2]*u8
+    if profile != null { keys[0] = *profile_name[0]; contents[0] = profile }
+    if Save(result, argv[2], *format[0], *keys[0], *contents[0], null) == 0 { print("Unable to save edited image\n"); return 3 }
+    return 0
+}
