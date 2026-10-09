@@ -1,0 +1,37 @@
+// Collage preview and saved pixels share layouts and source framing.
+Slot :: struct { x: s32; y: s32; width: s32; height: s32 }
+Frame :: struct { x: float64; y: float64; width: float64; height: float64 }
+Cell :: (index: s32, count: s32) -> [2]s32 {
+    start := 100 + index*9800/count + (ifx index > 0 then 50 else 0)
+    end := 100 + (index+1)*9800/count - (ifx index+1 < count then 50 else 0)
+    return .{start,end-start}
+}
+Bounds :: (count: s32, layout: s32, index: s32) -> Slot {
+    result: Slot
+    if count < 2 || count > 6 || index < 0 || index >= count || layout < 0 || layout > 3 { return result }
+    columns := count; rows: s32 = 1; column := index; row: s32
+    if layout == 2 { columns = 1; rows = count; column = 0; row = index }
+    else if layout == 0 && count > 3 {
+        rows = 2; columns = (count+1)/2
+        if index >= columns { row = 1; column = index-columns; columns = count-columns }
+    } else if layout == 3 {
+        x := Cell(ifx index == 0 then 0 else 1,2)
+        y := Cell(ifx index == 0 then 0 else index-1,ifx index == 0 then 1 else count-1)
+        return .{x[0],y[0],x[1],y[1]}
+    }
+    x := Cell(column,columns); y := Cell(row,rows)
+    return .{x[0],y[0],x[1],y[1]}
+}
+Framing :: (width: s32, height: s32, slot_width: float64, slot_height: float64, cx: s32, cy: s32, zoom: s32) -> Frame {
+    result: Frame
+    if width < 1 || height < 1 || slot_width <= 0.0 || slot_height <= 0.0 || zoom < 100 || zoom > 400 { return result }
+    scale := slot_width/cast(float64)width
+    if slot_height/cast(float64)height > scale { scale = slot_height/cast(float64)height }
+    scale *= cast(float64)zoom/100.0
+    result.width = slot_width/scale; result.height = slot_height/scale
+    result.x = cast(float64)width*cast(float64)cx/10000.0-result.width/2.0
+    result.y = cast(float64)height*cast(float64)cy/10000.0-result.height/2.0
+    if result.x < 0.0 { result.x = 0.0 }; if result.x > cast(float64)width-result.width { result.x = cast(float64)width-result.width }
+    if result.y < 0.0 { result.y = 0.0 }; if result.y > cast(float64)height-result.height { result.y = cast(float64)height-result.height }
+    return result
+}

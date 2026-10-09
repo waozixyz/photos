@@ -1,4 +1,9 @@
 .DEFAULT_GOAL := build
+.PHONY: collage-window-test collage-portable-test
+collage-window-test: build
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/collage_window.py
+collage-portable-test: bundle
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_COLLAGE_PORTABLE=1 $(PYTHON) tests/collage_window.py
 ZIRAN ?= ziran
 PYTHON ?= build/venv/bin/python
 PREFIX ?= $(HOME)/.local

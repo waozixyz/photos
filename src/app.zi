@@ -1,3 +1,4 @@
+Collage :: #import "collage";
 using UI :: #import "kryon/Widgets";
 using Model :: #import "model";
 #import "std/date_parse"
@@ -139,6 +140,30 @@ BulkBar :: (session: Session, bounds: Rectangle) {
     if Action(session, 214, "Edit location", BulkBounds(bounds, 9), ready) { Model.BeginEdit("location", "Set location for selection", "", "Latitude, longitude; leave empty to remove location") }
     if Action(session,519,"Tag person",BulkBounds(bounds,10),ready && Model.people_enabled && Model.view!="hidden" && Model.view!="trash") { Model.BeginEdit("person_tag","Tag person in selection","","One person's name; existing names reuse that person") }
     if Action(session,520,"Remove person tag",BulkBounds(bounds,11),ready && Model.people_enabled && Model.view!="hidden" && Model.view!="trash") { Model.BeginEdit("person_untag","Remove manual person tag","","One person's name; detected faces stay assigned") }
+    if bounds.width < 620.0 && Model.picked_count >= 2 && Model.picked_count <= 6 {
+        if Action(session,521,"Create collage",BulkBounds(bounds,12),Model.CollageReady()) { Model.BeginCollage() }
+    }
+}
+
+CollageEditor :: (session: Session, body: Rectangle) {
+    x := body.x; y := body.y; width := body.width; step := (width-24.0)/4.0
+    Label(session,531,"Create collage",.{x,y,width,32.0},24)
+    ready := Collage.active && (!Model.loading || (Model.collage_request && Model.collage_checking))
+    layouts: [4]string = .{"Grid layout","Rows layout","Columns layout","Leading photo"}
+    shapes: [3]string = .{"Square","Landscape","Portrait"}
+    if Action(session,522,layouts[Collage.layout],.{x,y+42.0,step,36.0},ready) { Collage.layout = (Collage.layout+1)%4 }
+    if Action(session,523,shapes[Collage.shape],.{x+step+8.0,y+42.0,step,36.0},ready) { Collage.shape = (Collage.shape+1)%3 }
+    if Action(session,524,ifx Collage.swapping then "Cancel swapping" else "Swap photos",.{x+2.0*(step+8.0),y+42.0,step,36.0},ready) { Collage.SwapMode() }
+    if Action(session,525,"Save copy",.{x+3.0*(step+8.0),y+42.0,step,36.0},ready) { Model.CollageRequest("collage_save") }
+    if Action(session,526,"Previous photo",.{x,y+86.0,step,36.0},ready) { Collage.Choose(-1) }
+    if Action(session,527,"Next photo",.{x+step+8.0,y+86.0,step,36.0},ready) { Collage.Choose(1) }
+    if Action(session,528,"Zoom +",.{x+2.0*(step+8.0),y+86.0,step,36.0},ready) { Collage.Zoom(25) }
+    if Action(session,529,"Zoom -",.{x+3.0*(step+8.0),y+86.0,step,36.0},ready) { Collage.Zoom(-25) }
+    if Action(session,530,"Cancel",.{x,y+130.0,94.0,36.0}) { Model.CancelEditor(); return }
+    if Action(session,532,"Reset frame",.{x+104.0,y+130.0,132.0,36.0},ready) { Collage.Reset() }
+    Label(session,533,ifx Collage.swapping then "Tap two photos to swap their positions; tap the first again to cancel" else "Drag a photo to frame it; use the wheel or Zoom to magnify",.{x+248.0,y+132.0,width-248.0,32.0},13)
+    canvas := Rectangle.{x,y+176.0,width,body.height-176.0}
+    Collage.Draw(session,canvas,ready); Record(534,"Collage area",canvas,ready)
 }
 
 ImageEditor :: (session: Session, body: Rectangle) {
@@ -372,6 +397,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Model.playback_expanded { PlaybackViewer(session, .{viewport.x + 12.0, viewport.y + 12.0, viewport.width - 24.0, viewport.height - 24.0}); return 0 }
     }
     if (Model.editor == "text" || Model.editor == "qr") && key == Input.KeyEscape { Model.CancelEditor(); key = 0 }
+    if Model.editor == "collage" && key == Input.KeyEscape { Model.CancelEditor(); key = 0 }
     if (Model.editor == "image_crop" || Model.editor == "video_crop") && key == Input.KeyEscape { Model.FinishCrop(false) }
     if !Model.focused && !Model.search_focused && Model.editor == "" {
         if key == Input.KeyEscape { if Viewer.expanded { Viewer.expanded = false } else if Model.selected >= 0 { Model.selected = -1; Viewer.Reset() } else { Model.ClearSelection() } }
@@ -405,7 +431,9 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, 44, "Sync", .{x + width - 78.0, y, 78.0, 39.0}) { Model.Request("sync") }
     }
     body := Rectangle.{x, y + 52.0, width, viewport.height - 216.0}
-    if Model.editor == "qr" {
+    if Model.editor == "collage" {
+        CollageEditor(session,body)
+    } else if Model.editor == "qr" {
         if Model.selected < 0 || Model.selected >= Model.count { Model.CancelEditor(); return 0 }
         photo := *Model.photos[Model.selected]
         Label(session,510,"QR codes",.{x,body.y,width,32.0},24)
@@ -652,7 +680,10 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                 if Action(session, 46, "Select loaded", .{x + 88.0, body.y, 126.0, 36.0}) { Model.SelectLoaded() }
                 if Action(session, 47, "Clear", .{x + 224.0, body.y, 70.0, 36.0}) { Model.ClearSelection(); Model.selecting = true }
                 text: Vec(u8); BuilderPrint(*text, "% selected", Model.picked_count); value := BuilderFinish(text)
-                Label(session, 48, value, .{x + 304.0, body.y + 7.0, width - 304.0, 26.0}); Model.Release(value)
+                Label(session, 48, value, .{x + 304.0, body.y + 7.0, width - (ifx width >= 620.0 then 474.0 else 304.0), 26.0}); Model.Release(value)
+                if width >= 620.0 && Model.picked_count >= 2 && Model.picked_count <= 6 {
+                    if Action(session,521,"Create collage",.{x+width-154.0,body.y,154.0,36.0},Model.CollageReady()) { Model.BeginCollage() }
+                }
             } else if Model.album[0] != 0 {
                 Label(session, 48, TextUntilNul(Model.album[:]), .{x + 88.0, body.y + 7.0, width - (ifx width >= 620.0 then 512.0 else 376.0), 26.0})
                 if width >= 620.0 && Model.view == "photos" {
@@ -712,7 +743,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                 if Action(session, 218, "Choose day", .{x + width - 118.0, body.y, 118.0, 34.0}, !Model.loading) { Model.BeginEdit("memory_date", "Choose a memories day", TextUntilNul(Model.memory_date[:]), "YYYY-MM-DD; shows the same day in earlier years") }
                 body.y += 42.0; body.height -= 42.0
             }
-            if Model.selecting { BulkBar(session, .{x, body.y, width, 80.0}); height: float32 = ifx width < 720.0 then 176.0 else 88.0; body.y += height; body.height -= height }
+            if Model.selecting { BulkBar(session, .{x, body.y, width, 80.0}); height: float32 = ifx width < 720.0 then 176.0 else 88.0; if width < 620.0 && Model.picked_count >= 2 && Model.picked_count <= 6 { height += 44.0 }; body.y += height; body.height -= height }
         }
         pointer := Input.PointerSample(session)
         ScrollDevice.BeginScrollFrame(session, .{pointer.x, pointer.y}, pointer.pressed, pointer.down, pointer.released, PointerWheelTake(session, body), cast(float64)Model.ticks / 60.0)

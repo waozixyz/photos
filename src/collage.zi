@@ -1,0 +1,92 @@
+// Private collage preview; source rectangles use the same math as the compositor.
+using UI :: #import "kryon/Widgets";
+Input :: #import "kryon/tree_input";
+Layout :: #import "collage_layout";
+#import "std/json_scan"
+#import "std/text"
+#import "std/text_buffer"
+#import "std/byte_text_linux"
+Item :: struct { id: [65]u8; path: [4097]u8; cx: s32; cy: s32; zoom: s32 }
+items: [6]Item;
+count: s32;
+chosen: s32;
+layout: s32;
+shape: s32;
+active: bool;
+swapping: bool;
+swap_from: s32 = -1;
+dragging: bool;
+drag_x: float32;
+drag_y: float32;
+Clear :: () { count = 0; active = false; dragging = false; swapping = false; swap_from = -1; for i: 0..5 { items[i].id[0] = 0; items[i].path[0] = 0 } }
+Load :: (json: string) -> bool {
+    Clear(); chosen = 0; layout = 0; shape = 0
+    at := FieldAt(json,0,"collage_photos"); if at < 0 || json[at] != 91 { return false }; at = Space(json,at+1)
+    while at >= 0 && at < cast(s32)json.count && json[at] != 93 {
+        if count >= 6 { Clear(); return false }; item := *items[count]
+        size := ReadStringText(json,FieldAt(json,at,"id"),item.id[:]); if size != 64 { Clear(); return false }; item.id[size] = 0
+        size = ReadStringText(json,FieldAt(json,at,"path"),item.path[:]); if size <= 0 || size >= 4097 { Clear(); return false }; item.path[size] = 0
+        item.cx = 5000; item.cy = 5000; item.zoom = 100; count += 1
+        at = Space(json,ValueEnd(json,at,0)); if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json,at+1) } else { break }
+    }
+    active = count >= 2; if !active { Clear() }; return active
+}
+Quote :: (out: *Vec(u8), value: string) {
+    BuilderPrint(out,"\"")
+    for i: 0..cast(s32)value.count-1 { BuilderPrint(out,"%",value[i:i+1]) }
+    BuilderPrint(out,"\"")
+}
+Spec :: () -> string {
+    out: Vec(u8); BuilderPrint(*out,"{\"layout\":%,\"shape\":%,\"items\":[",layout,shape)
+    for i: 0..count-1 {
+        item := *items[i]; BuilderPrint(*out,"%{\"id\":",ifx i == 0 then "" else ","); Quote(*out,TextUntilNul(item.id[:]))
+        BuilderPrint(*out,",\"cx\":%,\"cy\":%,\"zoom\":%}",item.cx,item.cy,item.zoom)
+    }
+    BuilderPrint(*out,"]}"); return BuilderFinish(out)
+}
+Choose :: (delta: s32) { if count > 0 { chosen = (chosen+count+delta)%count }; dragging = false }
+Zoom :: (delta: s32) { if !active { return }; item := *items[chosen]; item.zoom += delta; if item.zoom < 100 { item.zoom = 100 }; if item.zoom > 400 { item.zoom = 400 }; dragging = false }
+Reset :: () { if !active { return }; items[chosen].cx = 5000; items[chosen].cy = 5000; items[chosen].zoom = 100; dragging = false }
+SwapMode :: () { swapping = !swapping; swap_from = -1; dragging = false }
+Draw :: (session: Session, canvas: Rectangle, enabled: bool) {
+    if !active || canvas.width <= 0.0 || canvas.height <= 0.0 { return }
+    width: float32 = ifx shape == 2 then 1536.0 else 2048.0; height: float32 = ifx shape == 1 then 1536.0 else 2048.0
+    scale := canvas.width/width; if canvas.height/height < scale { scale = canvas.height/height }
+    shown := Rectangle.{canvas.x+(canvas.width-width*scale)/2.0,canvas.y+(canvas.height-height*scale)/2.0,width*scale,height*scale}
+    background: BoxProps; background.key = 5600000; background.bounds = shown; background.fill = Color.{255,255,255,255}; Box(session,background)
+    pointer := Input.PointerSample(session)
+    for i: 0..count-1 {
+        slot := Layout.Bounds(count,layout,cast(s32)i); item := *items[i]
+        bounds := Rectangle.{shown.x+shown.width*cast(float32)slot.x/10000.0,shown.y+shown.height*cast(float32)slot.y/10000.0,
+            shown.width*cast(float32)slot.width/10000.0,shown.height*cast(float32)slot.height/10000.0}
+        if enabled && pointer.pressed && Input.PointInBounds(pointer.x,pointer.y,bounds) {
+            chosen = cast(s32)i
+            if swapping {
+                if swap_from == i { swap_from = -1 }
+                else if swap_from >= 0 { temporary := items[i]; items[i] = items[swap_from]; items[swap_from] = temporary; swap_from = -1 }
+                else { swap_from = cast(s32)i }
+            } else { dragging = true; drag_x = pointer.x; drag_y = pointer.y }
+        }
+        image: ImageProps; image.key = cast(u64)(5600100+i); image.asset_path = TextUntilNul(item.path[:]); image.alt_text = "Collage photo tile"; image.bounds = bounds; image.fit = ImageFit.ImageFitStretch
+        dimensions := ImageTextureFor(image)
+        if dimensions.width <= 0 || dimensions.height <= 0 { continue }
+        source := Layout.Framing(dimensions.width,dimensions.height,cast(float64)bounds.width,cast(float64)bounds.height,item.cx,item.cy,item.zoom)
+        if enabled && !swapping && chosen == i {
+            wheel := PointerWheelTake(session,bounds)
+            if wheel != 0.0 { Zoom(ifx wheel > 0.0 then 25 else -25) }
+            if dragging && (pointer.down || pointer.released) {
+                item.cx -= cast(s32)(cast(float64)(pointer.x-drag_x)/cast(float64)bounds.width*source.width/cast(float64)dimensions.width*10000.0)
+                item.cy -= cast(s32)(cast(float64)(pointer.y-drag_y)/cast(float64)bounds.height*source.height/cast(float64)dimensions.height*10000.0)
+                if item.cx < 0 { item.cx = 0 }; if item.cx > 10000 { item.cx = 10000 }
+                if item.cy < 0 { item.cy = 0 }; if item.cy > 10000 { item.cy = 10000 }
+                drag_x = pointer.x; drag_y = pointer.y
+            }
+        }
+        source = Layout.Framing(dimensions.width,dimensions.height,cast(float64)bounds.width,cast(float64)bounds.height,item.cx,item.cy,item.zoom)
+        image.source = .{cast(float32)source.x,cast(float32)source.y,cast(float32)source.width,cast(float32)source.height}; Image(session,image)
+        if chosen == i || swap_from == i {
+            box: BoxProps; box.key = cast(u64)(5600200+i); box.bounds = bounds; box.fill = Color.{0,0,0,0}; box.border = Color.{70,150,240,255}; Box(session,box)
+        }
+    }
+    if pointer.released || !pointer.down || !enabled { dragging = false }
+}

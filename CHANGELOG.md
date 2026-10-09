@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.23
+
+- Create collages from two through six photos or Live Photo stills, choosing layouts and square, landscape or portrait shapes.
+- Swap positions, zoom and drag each photo's framing, then save a separate PNG in Collages for normal backup and export.
+- Preserve source files and albums, exclude private and animated inputs, and clear previews when access ends.
+
 ## 0.1.22
 
 - Tag people in photos, Live Photo stills and videos without requiring a detected face, individually or in a selection.

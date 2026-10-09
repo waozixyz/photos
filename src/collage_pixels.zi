@@ -1,0 +1,84 @@
+// Headless collage compositor. The source framing matches the Kryon preview.
+Layout :: #import "collage_layout";
+#import "std/json_scan"
+#import "std/byte_text_linux"
+libc :: #system_library "libc";
+pixbuf :: #system_library "gdk_pixbuf-2.0";
+object :: #system_library "gobject-2.0";
+Read :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign libc "read";
+Load :: (path: *u8, error: **void) -> *void #foreign pixbuf "gdk_pixbuf_new_from_file";
+Orient :: (image: *void) -> *void #foreign pixbuf "gdk_pixbuf_apply_embedded_orientation";
+Width :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_width";
+Height :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_height";
+Channels :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_n_channels";
+Stride :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_rowstride";
+Pixels :: (image: *void) -> *u8 #foreign pixbuf "gdk_pixbuf_get_pixels";
+New :: (space: s32, alpha: s32, bits: s32, width: s32, height: s32) -> *void #foreign pixbuf "gdk_pixbuf_new";
+Save :: (image: *void, path: *u8, format: *u8, names: **u8, values: **u8, error: **void) -> s32 #foreign pixbuf "gdk_pixbuf_savev";
+Unref :: (image: *void) #foreign object "g_object_unref";
+Item :: struct { path: [4097]u8; cx: s32; cy: s32; zoom: s32 }
+Number :: (json: string, at: s32, name: string, min: s32, max: s32) -> s32 {
+    value := ReadNumber(json,FieldAt(json,at,name))
+    if !value.valid || value.value < cast(float64)min || value.value > cast(float64)max { return -1 }
+    result := cast(s32)value.value; return ifx cast(float64)result == value.value then result else -1
+}
+Sample :: (bytes: *u8, stride: s32, channels: s32, width: s32, height: s32, x: float64, y: float64, channel: s32) -> u8 {
+    sx := x; sy := y
+    if sx < 0.0 { sx = 0.0 }; if sy < 0.0 { sy = 0.0 }
+    if sx > cast(float64)(width-1) { sx = cast(float64)(width-1) }; if sy > cast(float64)(height-1) { sy = cast(float64)(height-1) }
+    left := cast(s32)sx; top := cast(s32)sy
+    right := ifx left+1 < width then left+1 else left; bottom := ifx top+1 < height then top+1 else top
+    dx := sx-cast(float64)left; dy := sy-cast(float64)top
+    positions: [4]s32 = .{top*stride+left*channels,top*stride+right*channels,bottom*stride+left*channels,bottom*stride+right*channels}
+    weights: [4]float64 = .{(1.0-dx)*(1.0-dy),dx*(1.0-dy),(1.0-dx)*dy,dx*dy}
+    result: float64
+    for i: 0..3 {
+        alpha := ifx channels == 4 then cast(float64)bytes[positions[i]+3]/255.0 else 1.0
+        result += weights[i]*(cast(float64)bytes[positions[i]+channel]*alpha+255.0*(1.0-alpha))
+    }
+    if result > 255.0 { result = 255.0 }; if result < 0.0 { result = 0.0 }; return cast(u8)(result+0.5)
+}
+Paint :: (output: *void, item: *Item, slot: Layout.Slot) -> bool {
+    loaded := Load(*item.path[0],null); if loaded == null { return false }; defer { Unref(loaded) }
+    source := Orient(loaded); if source == null { return false }; defer { Unref(source) }
+    width := Width(source); height := Height(source); channels := Channels(source)
+    if width < 1 || height < 1 || cast(s64)width*height > 100000000 || (channels != 3 && channels != 4) { return false }
+    ow := Width(output); oh := Height(output)
+    x := slot.x*ow/10000; y := slot.y*oh/10000
+    sw := (slot.x+slot.width)*ow/10000-x; sh := (slot.y+slot.height)*oh/10000-y
+    framing := Layout.Framing(width,height,cast(float64)sw,cast(float64)sh,item.cx,item.cy,item.zoom)
+    src := Pixels(source); dst := Pixels(output); source_stride := Stride(source); dest_stride := Stride(output)
+    for row: 0..sh-1 { for column: 0..sw-1 {
+        sx := framing.x+(cast(float64)column+0.5)*framing.width/cast(float64)sw-0.5
+        sy := framing.y+(cast(float64)row+0.5)*framing.height/cast(float64)sh-0.5
+        for c: 0..2 { dst[(y+row)*dest_stride+(x+column)*3+c] = Sample(src,source_stride,channels,width,height,sx,sy,cast(s32)c) }
+    } }
+    return true
+}
+Run :: (path: *u8) -> s32 {
+    buffer: [65537]u8; length: s32
+    while length < 65536 {
+        amount := Read(0,*buffer[length],cast(usize)(65536-length)); if amount < 0 { return 2 }; if amount == 0 { break }; length += cast(s32)amount
+    }
+    if length < 1 || length >= 65536 { return 2 }
+    json := TextFromBytes(buffer[:length]); if json[0] != 123 || Space(json,ValueEnd(json,0,0)) != length { return 2 }
+    layout := Number(json,0,"layout",0,3); shape := Number(json,0,"shape",0,2)
+    if layout < 0 || shape < 0 { return 2 }
+    items: [6]Item; count: s32; at := FieldAt(json,0,"items")
+    if at < 0 || json[at] != 91 { return 2 }; at = Space(json,at+1)
+    while at >= 0 && at < length && json[at] != 93 {
+        if count >= 6 { return 2 }; item := *items[count]
+        size := ReadStringText(json,FieldAt(json,at,"path"),item.path[:]); if size <= 0 || size >= 4097 { return 2 }; item.path[size] = 0
+        item.cx = Number(json,at,"cx",0,10000); item.cy = Number(json,at,"cy",0,10000); item.zoom = Number(json,at,"zoom",100,400)
+        if item.cx < 0 || item.cy < 0 || item.zoom < 0 { return 2 }; count += 1
+        at = Space(json,ValueEnd(json,at,0)); if at < 0 || at >= length { return 2 }
+        if json[at] == 44 { at = Space(json,at+1) } else if json[at] != 93 { return 2 }
+    }
+    if count < 2 { return 2 }
+    width: s32 = ifx shape == 2 then 1536 else 2048; height: s32 = ifx shape == 1 then 1536 else 2048
+    output := New(0,0,8,width,height); if output == null { return 3 }; defer { Unref(output) }
+    bytes := Pixels(output); stride := Stride(output)
+    for y: 0..height-1 { for x: 0..width*3-1 { bytes[y*stride+x] = 255 } }
+    for i: 0..count-1 { if !Paint(output,*items[i],Layout.Bounds(count,layout,cast(s32)i)) { return 3 } }
+    png: [4]u8 = .{112,110,103,0}; if Save(output,path,*png[0],null,null,null) == 0 { return 4 }; return 0
+}

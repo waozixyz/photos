@@ -5,6 +5,7 @@ Viewer :: #import "viewer";
 Map :: #import "map";
 TextDetection :: #import "text_detection";
 QRDetection :: #import "qr_detection";
+Collage :: #import "collage";
 #if #defined(POSIX_THREADS) {
     Clock :: #import "kryon/ClockLinux";
 } else {
@@ -18,6 +19,10 @@ qr_request: bool;
 qr_check_pending: bool;
 qr_poll: s64;
 qr_valid_until: s64;
+collage_request: bool;
+collage_checking: bool;
+collage_poll: s64;
+collage_valid_until: s64;
 playback_id: [65]u8;
 playback_path: [4097]u8;
 playback_started: bool;
@@ -223,6 +228,8 @@ SendRequest :: (action: string, id: string, value: string) {
     qr_check_pending = action == "qr_check"
     qr_request = action == "detect_qr" || action == "qr_check"
     playback_request = action == "playback_check"
+    collage_request = action == "collage_begin" || action == "collage_check"
+    collage_checking = action == "collage_check"
     if action != "query" && !slide_request { offset = ifx selected >= 0 then feed_base + selected / 60 * 60 else feed_base; appending = false }
     out: Vec(u8)
     BuilderPrint(*out, "{\"gallery_format\":2,\"action\":"); Quoted(*out, action)
@@ -246,8 +253,8 @@ SendRequest :: (action: string, id: string, value: string) {
         region := ifx Map.gallery then Map.gallery_bounds else Map.bounds
         BuilderPrint(*out, ",\"map_bounds\":[%,%,%,%],\"map_gallery\":%", region[0], region[1], region[2], region[3], ifx Map.gallery then 1 else 0)
     }
-    mutation = !qr_request && action != "text_check" && action != "detect_text" && action != "query" && action != "open" && action != "sync" && action != "import" && action != "image_preview" && action != "video_preview" && action != "video_begin" && action != "video_save" && action != "video_status" && action != "video_cancel" && action != "playback_check"
-    if action == "album_auto_people" || action == "album_auto_people_remove" || (mutation && picked_count > 0 && (action == "album_add" || action == "album_remove" || !StartsWithFoldASCII(action, "album_"))) {
+    mutation = !collage_request && !qr_request && action != "text_check" && action != "detect_text" && action != "query" && action != "open" && action != "sync" && action != "import" && action != "image_preview" && action != "video_preview" && action != "video_begin" && action != "video_save" && action != "video_status" && action != "video_cancel" && action != "playback_check"
+    if action == "collage_begin" || action == "album_auto_people" || action == "album_auto_people_remove" || (mutation && picked_count > 0 && (action == "album_add" || action == "album_remove" || !StartsWithFoldASCII(action, "album_"))) {
         BuilderPrint(*out, ",\"ids\":[")
         for i: 0..picked_count - 1 { if i > 0 { BuilderPrint(*out, ",") }; Quoted(*out, TextUntilNul(picked[i].id[:])) }
         BuilderPrint(*out, "]")
@@ -257,7 +264,7 @@ SendRequest :: (action: string, id: string, value: string) {
     loading = Transport.Start(request)
     Release(request)
     if !loading { Set(message[:], Transport.error); if appending { more_due = ticks + 300; appending = false } }
-    busy = loading && action != "query" && action != "playback_check" && action != "text_check" && !slide_request && !qr_request; next_refresh = ticks + 300
+    busy = loading && action != "query" && action != "playback_check" && action != "text_check" && !slide_request && !qr_request && !collage_request; next_refresh = ticks + 300
 }
 HeaderField :: struct { key: [65]u8; at: s32 }
 header_fields: [64]HeaderField;
@@ -327,6 +334,7 @@ Tick :: () {
     }
     if editor == "text" && TextDetection.active && ticks > text_valid_until { CancelEditor(); Set(message[:], "Text access ended; reopen the photo to retry") }
     if editor == "qr" && QRDetection.active && (now < 0 || now >= qr_valid_until) { CancelEditor(); Set(message[:], "QR access ended; reopen the photo to retry") }
+    if editor == "collage" && Collage.active && (now < 0 || now >= collage_valid_until) { RevokeCollage(); Set(message[:], "Collage access ended; select the photos again") }
     if playback_id[0] != 0 {
         valid := editor == "playback" && selected >= 0 && selected < count
         if valid { valid = TextUntilNul(photos[selected].id[:]) == TextUntilNul(playback_id[:]) && !photos[selected].trashed && (!photos[selected].hidden || vault_unlocked) }
@@ -339,9 +347,17 @@ Tick :: () {
     if !initialized { initialized = true; Request() }
     if Transport.Poll() {
         loading = false; busy = false
-        if Transport.error != "" { Set(message[:], Transport.error); if slide_active { StopSlides() }; if editor == "text" || editor == "qr" { CancelEditor() }; if playback_id[0] != 0 { StopPlayback() }; if appending { more_due = ticks + 300; appending = false }; return }
+        if Transport.error != "" { Set(message[:], Transport.error); if slide_active { StopSlides() }; if editor == "collage" { RevokeCollage() }; if editor == "text" || editor == "qr" { CancelEditor() }; if playback_id[0] != 0 { StopPlayback() }; if appending { more_due = ticks + 300; appending = false }; return }
         json := Transport.Value()
         ReadHeader(json)
+        if collage_request {
+            collage_request = false
+            Decode(json,0,"error",message[:]); if editor != "collage" { return }
+            if message[0] != 0 { RevokeCollage(); return }
+            if !collage_checking { if !Collage.Load(json) { CancelEditor(); Set(message[:],"Collage photos could not be opened"); return } }
+            else if Number(json,0,"collage_checked") != 1 { RevokeCollage(); return }
+            Decode(json,0,"status",message[:]); now = Clock.Milliseconds(); collage_poll = now+500; collage_valid_until = now+2500; return
+        }
         if slide_request {
             slide_request = false
             if !slide_active { return }
@@ -405,6 +421,7 @@ Tick :: () {
         if Lookup(json, 0, "saved_copy") >= 0 {
             saved: [65]u8; Decode(json, 0, "saved_copy", saved[:])
             if saved[0] != 0 && (editor == "video" || editor == "video_trim") { editor = ""; edit_preview[0] = 0; edit_session[0] = 0 }
+            if saved[0] != 0 && editor == "collage" { Collage.Clear(); editor = "" }
         }
         Decode(json, 0, "error", message[:]); if message[0] != 0 { if appending { more_due = ticks + 300; appending = false }; return }
         if view == "map" { Map.Load(json) }
@@ -515,6 +532,7 @@ Tick :: () {
     if !loading && playback_id[0] != 0 && ticks >= playback_poll { playback_poll = ticks + 30; Request("playback_check", TextUntilNul(playback_id[:])); return }
     if !loading && editor == "text" && TextDetection.active && selected >= 0 && selected < count && ticks >= text_poll { text_poll = ticks + 30; Request("text_check", TextUntilNul(photos[selected].id[:])); return }
     if !loading && editor == "qr" && QRDetection.active && selected >= 0 && selected < count && now >= qr_poll { qr_poll = now+500; Request("qr_check",TextUntilNul(photos[selected].id[:])); return }
+    if !loading && editor == "collage" && Collage.active && now >= collage_poll { collage_poll = now+500; CollageRequest("collage_check"); return }
     if !loading && video_job[0] != 0 && ticks >= video_poll { video_poll = ticks + 60; Request("video_status"); return }
     if !loading && ticks > next_refresh && ((scroll == 0 && selected < 0) || (view == "hidden" && vault_unlocked)) { if selected < 0 && view != "people" { offset = ifx date_jumped then feed_base else 0 }; Request() }
 }
@@ -678,7 +696,15 @@ PlaybackState :: () -> s32 { return Playback.State() }
 PlaybackPosition :: () -> s64 { return Playback.Position() }
 PlaybackDuration :: () -> s64 { return Playback.Duration() }
 Secret :: () -> bool { return StartsWithFoldASCII(editor, "vault_") }
-CancelEditor :: () { TextDetection.Clear(); QRDetection.Clear(); editor = ""; focused = false; Wipe(edit_value[:]); Wipe(vault_first[:]) }
+CancelEditor :: () { TextDetection.Clear(); QRDetection.Clear(); Collage.Clear(); editor = ""; focused = false; Wipe(edit_value[:]); Wipe(vault_first[:]) }
+RevokeCollage :: () { CancelEditor(); ClearSelection(); VecClear(photos); count = 0; matches = 0; selected = -1; Request() }
+CollageReady :: () -> bool {
+    if loading || picked_count < 2 || picked_count > 6 { return false }
+    for i: 0..count-1 { if IsPicked(TextUntilNul(photos[i].id[:])) && (photos[i].hidden || photos[i].trashed || TextUntilNul(photos[i].kind[:]) != "photo") { return false } }
+    return true
+}
+BeginCollage :: () { if !CollageReady() { return }; Collage.Clear(); editor = "collage"; focused = false; search_focused = false; Request("collage_begin") }
+CollageRequest :: (action: string) { if !Collage.active || (loading && !(collage_request && collage_checking && action == "collage_save")) { return }; value := Collage.Spec(); Request(action,"",value); Release(value) }
 BeginQR :: () {
     if loading || selected < 0 || selected >= count || photos[selected].trashed || TextUntilNul(photos[selected].kind[:]) != "photo" { return }
     StopPlayback(); TextDetection.Clear(); QRDetection.Clear(); editor = "qr"; focused = false; search_focused = false

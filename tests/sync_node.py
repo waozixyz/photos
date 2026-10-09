@@ -272,6 +272,14 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         assert first.query(search='person:"Manually tagged person"')['count']==0
         assert people.export_index(first,photo_id)['tags']==[]
         assert not first.db.execute('SELECT 1 FROM face_scans WHERE photo_id=?',(photo_id,)).fetchone()
+        from photos import collage
+        collage_spec = dict(layout=3,shape=1,items=[dict(id=i,cx=5000,cy=5000,zoom=125) for i in batch_ids[:3]])
+        collage_id = collage.save(first,collage_spec,dict(root=str(first.root)))
+        while client.sync(): pass
+        assert peer.sync()==0
+        assert json.loads(second.photo(collage_id)['metadata'])['photosCollage']==collage_spec
+        assert Path(peer.materialize(collage_id)).read_bytes()==first.original(first.photo(collage_id)).read_bytes()
+        assert second.query(album='Collages')['photos'][0]['id']==collage_id
         print('Isolated Daochi v6: signed sync, byte-limited face-rich and compact semantic index batches, originals, editing, places, codecs, Live Photo privacy and separation round trip passed')
     finally:
         process.terminate()

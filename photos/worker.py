@@ -71,6 +71,21 @@ def ui_query(library, request):
 
 def library_request(library, request, config):
     action = request.get('action', 'query')
+    if action in {'collage_begin', 'collage_check', 'collage_save'}:
+        from . import collage
+        if action == 'collage_begin':
+            return dict(collage_photos=collage.prepare(library, request.get('ids'), config),
+                        status='Choose layout, swap photos or drag to frame; Save copy retains originals')
+        if action == 'collage_check':
+            return collage.check(library, request.get('value'))
+        copy_id = collage.save(library, request.get('value'), config)
+        memberships = json.loads(library.photo(copy_id)['albums'])
+        album = next((name for name in memberships if library.db.execute(
+            'SELECT 1 FROM albums WHERE name=? AND deleted=0', (name,)).fetchone()), '')
+        result = ui_query(library, {**request, 'view': 'photos', 'album': album, 'search': '', 'offset': 0})
+        result.update(saved_copy=copy_id, view='photos', album=album, search='',
+                      status='Collage copy retained; originals unchanged')
+        return result
     if action in {'person_tag','person_untag'}:
         from . import people
         ids=request.get('ids')

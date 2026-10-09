@@ -224,6 +224,26 @@ both records agree. Embedded Android motion-photo extraction and native phone
 Live Photo capture remain unfinished.
 
 This version is a local photo library with sync, not complete Ente feature parity.
+
+Create collage combines two through six visible photos or Live Photo stills.
+Select them in a gallery, then choose Create collage. Switch between balanced
+grid, rows, columns or a leading-photo layout and square, landscape or portrait
+shapes. Swap photos lets you tap two tiles to exchange them; tap the first again
+to cancel that swap. Drag a tile to frame its image, and use the wheel or Zoom
+buttons to magnify it up to four times. Previous photo, Next photo and Reset
+frame provide keyboard-independent framing controls. Save copy adds a separate
+PNG to Collages, at 2048 pixels on its longest side, with white borders and
+transparency composited on white. If that name belongs to a smart or deleted
+album, a numbered Collages album preserves the earlier definition. The copy
+enters normal encrypted backup and exports.
+Preview and saved pixels share the same Ziran layout and framing calculations.
+Original files, their metadata and albums stay unchanged; repeating the same
+collage keeps the earlier copy's later edits. Hidden, Trash, videos and animated
+images are excluded, and access is checked again before saving. Previews clear
+when privacy changes or the local service stops responding. Phone pinch gestures,
+long-press swapping, device-gallery saving and system sharing remain unfinished.
+The selection and arrangement behavior follows Ente's
+[collage guide](https://ente.com/help/photos/features/utilities/collage).
 Detect QR opens an on-demand local scanner for photos, screenshots and Live Photo
 stills outside Trash. Click a detected box or use Previous code and Next code,
 then Copy contents to copy that code's complete text, including Unicode and

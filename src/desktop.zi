@@ -5,6 +5,7 @@ Viewer :: #import "viewer";
 Map :: #import "map";
 TextDetection :: #import "text_detection";
 QRDetection :: #import "qr_detection";
+Collage :: #import "collage";
 #import "std/text"
 #import "std/byte_text_linux"
 SDL :: #system_library "SDL2";
@@ -37,6 +38,7 @@ Publish :: () {
     out: Vec(u8); BuilderPrint(*out,"{\"interface\":\"harmony.app-state.v1\",\"app\":\"photos\",\"loading\":%",Model.loading)
     Model.Property(*out,"view",Model.view); Model.Property(*out,"status",TextFromCString(*Model.message[0]))
     Model.Property(*out,"editor",Model.editor)
+    BuilderPrint(*out,",\"collage_active\":%,\"collage_count\":%,\"collage_chosen\":%,\"collage_layout\":%,\"collage_shape\":%,\"collage_swapping\":%",Collage.active,Collage.count,Collage.chosen,Collage.layout,Collage.shape,Collage.swapping)
     Model.Property(*out,"sort",Model.sort)
     BuilderPrint(*out,",\"vault_unlocked\":%",Model.vault_unlocked)
     BuilderPrint(*out,",\"detected_words\":%",TextDetection.count)
