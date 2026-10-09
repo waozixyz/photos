@@ -27,6 +27,21 @@ static int executable_base(struct dl_phdr_info *info, size_t size, void *context
     return 0;
 }
 
+static int record_image(struct dl_phdr_info *info, size_t size, void *context) {
+    (void)size;
+    FILE *images = context;
+    for (unsigned i = 0; i < info->dlpi_phnum; i++) {
+        const ElfW(Phdr) *part = &info->dlpi_phdr[i];
+        if (part->p_type != PT_LOAD || !(part->p_flags & PF_X)) continue;
+        fprintf(images, "%llx %llx %llx %s\n",
+                (unsigned long long)(info->dlpi_addr + part->p_vaddr - image_base),
+                (unsigned long long)(info->dlpi_addr + part->p_vaddr + part->p_memsz - image_base),
+                (unsigned long long)(info->dlpi_addr - image_base),
+                info->dlpi_name && *info->dlpi_name ? info->dlpi_name : "executable");
+    }
+    return 0;
+}
+
 static void sample_cpu(int signal, siginfo_t *info, void *context) {
     (void)signal;
     (void)info;
@@ -48,6 +63,15 @@ __attribute__((constructor)) static void start_cpu_samples(void) {
     samples = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (samples < 0) return;
     dl_iterate_phdr(executable_base, NULL);
+    char images_path[4096];
+    int length = snprintf(images_path, sizeof(images_path), "%s.images", path);
+    if (length > 0 && length < (int)sizeof(images_path)) {
+        FILE *images = fopen(images_path, "w");
+        if (images) {
+            dl_iterate_phdr(record_image, images);
+            fclose(images);
+        }
+    }
     struct sigaction action = {0};
     action.sa_sigaction = sample_cpu;
     action.sa_flags = SA_SIGINFO | SA_RESTART;

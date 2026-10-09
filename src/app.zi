@@ -171,13 +171,14 @@ Field :: (session: Session, bounds: Rectangle, is_search: bool, key: s32, modifi
     editing := !is_search && Model.editor != ""
     props.label = ifx is_search then "Search" else (ifx editing then Model.editor_title else "Import folder")
     props.placeholder = ifx is_search then "Search photos or combine type:, album:, tag:, year: filters" else (ifx editing then Model.editor_hint else "Path to a local folder")
-    value: [8193]u8
-    Model.Set(value[:], ifx is_search then TextUntilNul(Model.search[:]) else (ifx editing then TextUntilNul(Model.edit_value[:]) else TextUntilNul(Model.input[:])))
-    props.value = TextUntilNul(value[:])
+    text: Vec(u8)
+    BuilderPrint(*text, "%", ifx is_search then TextUntilNul(Model.search[:]) else (ifx editing then TextUntilNul(Model.edit_value[:]) else TextUntilNul(Model.input[:])))
+    field_value := BuilderFinish(text); defer { Model.Release(field_value) }
+    props.value = field_value
     mask: [1025]u8
     if editing && Model.Secret() {
         props.secure = true; chars: s32
-        for i: 0..cast(s32)props.value.count - 1 { if (value[i] & 192) != 128 { mask[chars] = 42; chars += 1 } }
+        for i: 0..cast(s32)props.value.count - 1 { if (props.value[i] & 192) != 128 { mask[chars] = 42; chars += 1 } }
         props.display_value = TextUntilNul(mask[:])
     }
     props.cursor = ifx is_search then Model.search_cursor else Model.cursor; props.anchor = ifx is_search then Model.search_anchor else Model.anchor

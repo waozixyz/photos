@@ -40,6 +40,15 @@ def clean_environment():
     return result
 
 
+def process_usage(pid):
+    fields = (Path("/proc") / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()
+    cpu_seconds = (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+    status = (Path("/proc") / str(pid) / "status").read_text().splitlines()
+    memory = {line.split(":", 1)[0]: int(line.split()[1])
+              for line in status if line.startswith(("VmRSS:", "VmHWM:"))}
+    return cpu_seconds, memory
+
+
 def measure(name, command, env, output, probe, calls, cpu=False):
     trace = output / (name + ".frames")
     child = None
@@ -81,10 +90,12 @@ def measure(name, command, env, output, probe, calls, cpu=False):
             else:
                 raise RuntimeError(name + " did not render its first synthetic thumbnail")
             subprocess.run(["xdotool", "mousemove", "--window", window, "600", "600"], env=env, check=True)
+            cpu_before, _ = process_usage(child.pid)
             start = time.monotonic()
             subprocess.run(["xdotool", "click", "--repeat", "110", "--delay", "35", "5"],
                            env=env, check=True)
             finish = time.monotonic()
+            cpu_after, memory = process_usage(child.pid)
             time.sleep(.5)
             state_text = subprocess.check_output(["xprop", "-id", window, "_HARMONY_APP_STATE"],
                                                  env=env, text=True)
@@ -106,6 +117,10 @@ def measure(name, command, env, output, probe, calls, cpu=False):
                         p95_ms=sorted(durations)[int(len(durations)*.95)], max_ms=max(durations),
                         scroll=state.get("scroll"), nodes=state.get("nodes"), paged=paged,
                         rendered_gallery_changed=changed, deployment=False,
+                        cpu_seconds=cpu_after-cpu_before,
+                        cpu_percent=100*(cpu_after-cpu_before)/(finish-start),
+                        rss_kib=memory.get("VmRSS"), peak_rss_kib=memory.get("VmHWM"),
+                        cpu_sampled=cpu,
                         source_sha256={str(Path(path)): hashlib.sha256(Path(path).read_bytes()).hexdigest()
                                        for path in command})
         finally:
@@ -115,14 +130,16 @@ def measure(name, command, env, output, probe, calls, cpu=False):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--baseline-bundle", type=Path)
-    parser.add_argument("--mode", choices=("standalone-native", "portable-prior-ui", "portable-current-ui"))
+    parser.add_argument("--baseline-native", type=Path)
+    parser.add_argument("--player", type=Path)
+    parser.add_argument("--mode", choices=("native-prior-ui", "standalone-native", "portable-prior-ui", "portable-current-ui"))
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
     env = clean_environment()
     flags = [] if (ROOT / "ziran.local.toml").is_file() else ["--locked"]
     kryon = Path(subprocess.check_output(["ziran", "pkg", "path", "kryon", *flags],
                                        env=env, cwd=ROOT, text=True).strip())
-    player = kryon / "build/bin/zib"
+    player = args.player.resolve() if args.player else kryon / "build/bin/zib"
     work = ROOT / "build/scroll-performance"
     work.mkdir(parents=True, exist_ok=True)
     output = ROOT / "backup/scroll-performance/current"
@@ -166,7 +183,10 @@ def main():
                 env["PHOTOS_CONFIG"] = str(config)
                 with Server(dict(root=str(folder / "library")), folder / "kryon/services/photos.sock") as server:
                     threading.Thread(target=server.serve_forever, daemon=True).start()
-                    cases = [("standalone-native", [str(ROOT / "build/photos-desktop")])]
+                    cases = []
+                    if args.baseline_native:
+                        cases.append(("native-prior-ui", [str(args.baseline_native.resolve())]))
+                    cases.append(("standalone-native", [str(ROOT / "build/photos-desktop")]))
                     if args.baseline_bundle:
                         cases.append(("portable-prior-ui", [str(player), str(args.baseline_bundle.resolve())]))
                     cases.append(("portable-current-ui", [str(player), str(ROOT / "build/photos-portable.zib")]))
