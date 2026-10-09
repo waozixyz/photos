@@ -429,28 +429,9 @@ class Library:
 
     def edit_many(self, photo_ids, action, value=None, authorize=None):
         from . import native_edit
-        if action in native_edit.ACTIONS:
-            return native_edit.change(self, photo_ids, action, value, authorize)
-        if not isinstance(photo_ids, list) or not 0 < len(photo_ids) <= 1000 or any(not isinstance(i, str) for i in photo_ids):
-            raise LibraryError('Select between 1 and 1000 photos')
-        # Acquire the writer before reading, and roll back the whole selection
-        # if one item or value is invalid. Sync must see one complete edit.
-        with self.db:
-            self.db.execute('BEGIN IMMEDIATE')
-            from . import live
-            expanded = {}
-            for photo_id in dict.fromkeys(photo_ids):
-                for component in live.components(self, self.photo(photo_id)):
-                    expanded[component['id']] = component
-            for photo_id, photo in expanded.items():
-                if authorize is not None and not authorize(photo):
-                    raise LibraryError('Hidden is locked; authenticate before changing hidden photos')
-                component_value = value
-                if action == 'rename' and photo['kind'] == 'video' and json.loads(photo['metadata']).get('photosLive'):
-                    if not isinstance(value, str) or any(c in value for c in '/\\'):
-                        raise LibraryError('Enter a file name without a folder path')
-                    component_value = Path(value).stem + photo['extension']
-                self._edit(photo_id, action, component_value)
+        if action not in native_edit.ACTIONS:
+            raise LibraryError('Unknown photo action')
+        return native_edit.change(self, photo_ids, action, value, authorize)
 
     @staticmethod
     def album_name(value):
@@ -458,90 +439,28 @@ class Library:
             raise LibraryError('Enter an album name of at most 512 bytes')
         return value.strip()
 
-    def _edit(self, photo_id, action, value=None):
-        photo = self.photo(photo_id)
-        edits = json.loads(photo['edits'])
-        if action in {'album_add', 'album_remove'}:
-            albums = set(json.loads(photo['albums']))
-            name = self.album_name(value)
-            definition = self.db.execute('SELECT filter FROM albums WHERE name=? AND deleted=0', (name,)).fetchone()
-            if definition and definition['filter']:
-                raise LibraryError('Smart album membership follows its search; edit the search or photo properties instead')
-            if action == 'album_add':
-                self._ensure_album(name)
-            albums.add(name) if action == 'album_add' else albums.discard(name)
-            removed = set(edits.get('removed_albums', []))
-            removed.discard(name) if action == 'album_add' else removed.add(name)
-            # Deliberate addition takes ownership of an automatic membership.
-            definition = self.db.execute('SELECT id FROM albums WHERE name=?',(name,)).fetchone()
-            if definition:
-                edits.get('auto_albums',{}).pop(definition['id'],None)
-            edits['removed_albums'] = sorted(removed)
-            self.db.execute('UPDATE photos SET albums=?,edits=?,updated=?,dirty=1 WHERE id=?',
-                            (packed(sorted(albums)), packed(edits), time.time(), photo_id))
-        elif action == 'taken':
-            try:
-                date = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
-                timestamp = (date if date.tzinfo else date.replace(tzinfo=timezone.utc)).timestamp()
-                if not 0 < timestamp < 32503680000:
-                    raise ValueError()
-            except (ValueError, OverflowError):
-                raise LibraryError('Enter a valid date and time, for example 2024-06-15 14:30:00+00:00') from None
-            edits['taken'] = True
-            self.db.execute('UPDATE photos SET taken=?,edits=?,updated=?,dirty=1 WHERE id=?',
-                            (timestamp, packed(edits), time.time(), photo_id))
-        elif action == 'location':
-            if not isinstance(value, str):
-                raise LibraryError('Enter latitude, longitude, or leave empty to remove location')
-            geo = None
-            if value.strip():
-                try:
-                    parts = value.split(',')
-                    if len(parts) != 2:
-                        raise ValueError()
-                    latitude, longitude = (float(part.strip()) for part in parts)
-                    if not math.isfinite(latitude) or not math.isfinite(longitude) or not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
-                        raise ValueError()
-                    geo = dict(latitude=latitude, longitude=longitude)
-                except ValueError:
-                    raise LibraryError('Enter valid coordinates: latitude -90 to 90, longitude -180 to 180') from None
-            metadata = json.loads(photo['metadata'])
-            metadata.pop('geoData', None)
-            metadata.pop('geoDataExif', None)
-            if geo is not None:
-                metadata['geoData'] = geo
-            edits['location'] = geo
-            self.db.execute('UPDATE photos SET metadata=?,edits=?,updated=?,dirty=1 WHERE id=?',
-                            (packed(metadata), packed(edits), time.time(), photo_id))
-        elif action == 'rename':
-            if not isinstance(value, str) or not value.strip() or value.strip() in {'.', '..'} or any(c in value for c in '/\\') or any(ord(c) < 32 for c in value) or len(value.encode()) > 512:
-                raise LibraryError('Enter a file name without a folder path')
-            self.db.execute('UPDATE photos SET name=?,updated=?,dirty=1 WHERE id=?',
-                            (value.strip(), time.time(), photo_id))
-        else:
-            raise LibraryError('Unknown photo action')
-
     def rename_album(self, old, new):
+        from . import native_edit
         old, new = self.album_name(old), self.album_name(new)
-        if old == new:
-            return
-        with self.db:
-            self.db.execute('BEGIN IMMEDIATE')
-            current = self.album_details(old)
-            if self.db.execute('SELECT 1 FROM albums WHERE name=? AND deleted=0', (new,)).fetchone():
-                raise LibraryError('An album with that name already exists')
-            ids = [r[0] for r in self.db.execute('SELECT id FROM photos WHERE EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=?)', (old,))]
-            if self.db.execute('SELECT 1 FROM albums WHERE name=? AND deleted=1', (new,)).fetchone():
-                raise LibraryError('That album name is retained for synchronization; choose another name')
-            self.db.execute('UPDATE albums SET name=?,updated=?,dirty=1 WHERE id=?', (new, time.time(), current['id']))
-            for photo_id in ids:
-                provenance = json.loads(self.photo(photo_id)['edits']).get('auto_albums',{}).get(current['id'])
-                self._edit(photo_id, 'album_remove', old)
-                self._edit(photo_id, 'album_add', new)
-                if provenance is not None:
-                    edits = json.loads(self.photo(photo_id)['edits'])
-                    edits.setdefault('auto_albums',{})[current['id']]=provenance
-                    self.db.execute('UPDATE photos SET edits=? WHERE id=?',(packed(edits),photo_id))
+        if old != new:
+            native_edit.album_change(self, old, 'rename', new)
+
+    def _edit(self, photo_id, action, value):
+        # Automatic people-rule cleanup still shares its caller's transaction.
+        # Ordinary user edits and album renames use the native writer above.
+        if action != 'album_remove' or not self.db.in_transaction:
+            raise LibraryError('Unknown internal album operation')
+        photo = self.photo(photo_id)
+        name = self.album_name(value)
+        albums = set(json.loads(photo['albums'])); albums.discard(name)
+        edits = json.loads(photo['edits'])
+        removed = set(edits.get('removed_albums', [])); removed.add(name)
+        definition = self.db.execute('SELECT id FROM albums WHERE name=?', (name,)).fetchone()
+        if definition:
+            edits.get('auto_albums', {}).pop(definition['id'], None)
+        edits['removed_albums'] = sorted(removed)
+        self.db.execute('UPDATE photos SET albums=?,edits=?,updated=max(updated+0.000001,?),dirty=1 WHERE id=?',
+                        (packed(sorted(albums)), packed(edits), time.time(), photo_id))
 
     def _ensure_album(self, name, dirty=1):
         name = self.album_name(name)
@@ -566,53 +485,8 @@ class Library:
         return dict(row)
 
     def edit_album(self, name, action, value=None, search='', source=''):
-        if action in {'smart_create', 'filter'}:
-            from .query import validate
-            search = validate(self, search if action == 'smart_create' else value)
-        with self.db:
-            self.db.execute('BEGIN IMMEDIATE')
-            if source:
-                photo = self.photo(source)
-                if photo['hidden'] or photo['trashed']:
-                    raise LibraryError('Choose a visible photo outside Trash to name its place')
-            if action in {'create', 'smart_create'}:
-                name = self.album_name(value)
-                if self.db.execute('SELECT 1 FROM albums WHERE name=?', (name,)).fetchone():
-                    raise LibraryError('An album with that name already exists or is retained for synchronization')
-                self._ensure_album(name)
-                if action == 'smart_create':
-                    self.db.execute('UPDATE albums SET filter=? WHERE name=?', (search, name))
-                return name
-            album = self.album_details(name)
-            if action == 'description':
-                if not isinstance(value, str) or len(value.encode()) > 8192:
-                    raise LibraryError('Enter at most 8192 bytes of text')
-                self.db.execute('UPDATE albums SET description=?,updated=?,dirty=1 WHERE id=?', (value, time.time(), album['id']))
-            elif action == 'cover':
-                if album['filter']:
-                    raise LibraryError('Smart albums use the newest matching photo as their cover')
-                if value:
-                    photo = self.photo(value)
-                    if name not in json.loads(photo['albums']) or photo['hidden'] or photo['trashed']:
-                        raise LibraryError('Choose a visible photo in this album for its cover')
-                self.db.execute('UPDATE albums SET cover=?,updated=?,dirty=1 WHERE id=?', (value or '', time.time(), album['id']))
-            elif action in {'pinned', 'archived'}:
-                if action == 'archived' and album['filter']:
-                    raise LibraryError('Archive individual photos or regular albums; smart albums are saved searches')
-                self.db.execute(f'UPDATE albums SET {action}=?,updated=?,dirty=1 WHERE id=?',
-                                (int(not album[action]), time.time(), album['id']))
-            elif action == 'delete_empty':
-                # Hidden and trashed members count as members too. Never detach originals here.
-                if not album['filter'] and self.db.execute('SELECT 1 FROM photos,json_each(photos.albums) WHERE value=? LIMIT 1', (name,)).fetchone():
-                    raise LibraryError('Only an album with no photos can be deleted')
-                self.db.execute('UPDATE albums SET deleted=1,updated=?,dirty=1 WHERE id=?', (time.time(), album['id']))
-            elif action == 'filter':
-                if not album['filter']:
-                    raise LibraryError('Create a smart album to save a search')
-                self.db.execute('UPDATE albums SET filter=?,updated=?,dirty=1 WHERE id=?', (search, time.time(), album['id']))
-            else:
-                raise LibraryError('Unknown album action')
-        return name
+        from . import native_edit
+        return native_edit.album_change(self, name, action, value, search, source)
 
     def album_list(self, mode='active', sort='name', search=''):
         if mode not in {'active', 'archived', 'empty', 'all', 'places'} or sort not in {'name', 'newest', 'oldest'}:

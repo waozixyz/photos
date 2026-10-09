@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := build
 .PHONY: library-editor
 library-editor:
-	LDLIBS='-l:libsqlite3.so.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry library_edit:main --exe -o build/library-editor src/library_edit.zi
+	LDLIBS='-l:libsqlite3.so.0 -lglib-2.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry library_edit:main --exe -o build/library-editor src/library_edit.zi
 .PHONY: motion-engine
 motion-engine:
 	LDLIBS='-lxml2 -l:libheif.so.1 -lglib-2.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry motion_photo:main --exe -o build/motion-photo src/motion_photo.zi

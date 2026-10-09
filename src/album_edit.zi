@@ -1,0 +1,84 @@
+// Album membership and manual-removal provenance inside the writer's transaction.
+using SQLite :: #import "sqlite/SQLite";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+glib :: #system_library "glib-2.0";
+Checksum :: (kind: s32, data: *u8, count: usize) -> *u8 #foreign glib "g_compute_checksum_for_data";
+Free :: (data: *void) #foreign glib "g_free";
+Prepared :: struct { statement: *void; error: string }
+NameValid :: (name: string) -> bool {
+    if name.count == 0 || name.count > 512 { return false }
+    for byte: name { if byte < 32 { return false } }
+    return true
+}
+Digest :: (text: string, output: []u8) -> bool {
+    bytes: [1024]u8
+    if text.count > 1024 || output.count < 65 { return false }
+    for i: 0..text.count-1 { bytes[i] = text[i] }
+    hash := Checksum(2,*bytes[0],cast(usize)text.count)
+    if hash == null { return false }; defer { Free(cast(*void)hash) }
+    for i: 0..63 { output[i] = hash[i] }; output[64] = 0; return true
+}
+Exists :: (database: *void, id: string) -> s32 {
+    statement: *void
+    if SqlitePrepareText(database,"SELECT 1 FROM albums WHERE id=?",-1,*statement,null) != SQLITE_OK { return -1 }
+    defer { unused SqliteFinalize(statement) }
+    if SqliteBindTextString(statement,1,id,64) != SQLITE_OK { return -1 }
+    status := SqliteStep(statement); if status == SQLITE_ROW { return 1 }; if status == SQLITE_DONE { return 0 }; return -1
+}
+Prepare :: (database: *void, action: string, name: string, now: float64) -> Prepared {
+    result: Prepared; result.error = "Cannot edit album membership"
+    if !NameValid(name) { result.error = "Enter an album name of at most 512 bytes"; return result }
+    statement: *void; id: [65]u8
+    if SqlitePrepareText(database,"SELECT id,filter,deleted FROM albums WHERE name=?",-1,*statement,null) != SQLITE_OK { return result }
+    if SqliteBindTextString(statement,1,name,cast(s32)name.count) != SQLITE_OK { unused SqliteFinalize(statement); return result }
+    status := SqliteStep(statement); existing := status == SQLITE_ROW
+    if existing {
+        identity := TextFromCString(SqliteColumnText(statement,0))
+        if identity.count != 64 { unused SqliteFinalize(statement); return result }
+        for i: 0..63 {
+            byte := identity[i]
+            if !((byte >= 48 && byte <= 57) || (byte >= 97 && byte <= 102)) { unused SqliteFinalize(statement); return result }
+            id[i] = byte
+        }
+        if SqliteColumnInt(statement,2) == 0 && TextFromCString(SqliteColumnText(statement,1)).count > 0 {
+            unused SqliteFinalize(statement); result.error = "Smart album membership follows its search; edit the search or photo properties instead"; return result
+        }
+    } else if status != SQLITE_DONE { unused SqliteFinalize(statement); return result }
+    unused SqliteFinalize(statement); statement = null
+    if !existing && action == "album_add" {
+        key: Vec(u8); BuilderPrint(*key,"photos.album.v1:%",name)
+        if !Digest(BuilderFinish(key),id[:]) { return result }
+        attempts: s32
+        while true {
+            exists := Exists(database,TextFromCString(*id[0]))
+            if exists < 0 { return result }; if exists == 0 { break }
+            attempts += 1; if attempts > 4096 { return result }
+            next: Vec(u8); BuilderPrint(*next,"%:next",TextFromCString(*id[0]))
+            if !Digest(BuilderFinish(next),id[:]) { return result }
+        }
+        if SqlitePrepareText(database,"INSERT INTO albums(id,name,created,updated,dirty) VALUES(?,?,?,?,1)",-1,*statement,null) != SQLITE_OK { return result }
+        if SqliteBindTextString(statement,1,TextFromCString(*id[0]),64) != SQLITE_OK ||
+            SqliteBindTextString(statement,2,name,cast(s32)name.count) != SQLITE_OK ||
+            SqliteBindDouble(statement,3,now) != SQLITE_OK || SqliteBindDouble(statement,4,now) != SQLITE_OK || SqliteStep(statement) != SQLITE_DONE {
+            unused SqliteFinalize(statement); return result
+        }
+        unused SqliteFinalize(statement); statement = null
+    }
+    sql: Vec(u8)
+    BuilderPrint(*sql,"UPDATE photos SET albums=(SELECT json_group_array(value) FROM (SELECT value FROM json_each(photos.albums)")
+    if action == "album_add" { BuilderPrint(*sql," UNION SELECT ?1 ORDER BY value)),") }
+    else { BuilderPrint(*sql," WHERE value<>?1 ORDER BY value)),") }
+    BuilderPrint(*sql,"edits=json_set(CASE WHEN ?2='' THEN edits ELSE json_remove(edits,?2) END,'$.removed_albums',json((SELECT json_group_array(value) FROM (SELECT value FROM json_each(edits,'$.removed_albums')")
+    if action == "album_add" { BuilderPrint(*sql," WHERE value<>?1 ORDER BY value))))") }
+    else { BuilderPrint(*sql," UNION SELECT ?1 ORDER BY value))))") }
+    BuilderPrint(*sql,",updated=max(updated+0.000001,?3),dirty=1 WHERE id=?4")
+    if SqlitePrepareText(database,BuilderFinish(sql),-1,*statement,null) != SQLITE_OK { return result }
+    path: Vec(u8); if id[0] != 0 { BuilderPrint(*path,"$.auto_albums.%",TextFromCString(*id[0])) }
+    pathText := BuilderFinish(path)
+    if SqliteBindTextString(statement,1,name,cast(s32)name.count) != SQLITE_OK ||
+        SqliteBindTextString(statement,2,pathText,cast(s32)pathText.count) != SQLITE_OK {
+        unused SqliteFinalize(statement); return result
+    }
+    result.statement = statement; result.error = ""; return result
+}

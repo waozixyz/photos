@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.28
+
+- Keep album membership, corrected dates, locations and file names atomic across selections and paired Live Photos, preserving originals during invalid edits or expired Hidden access.
+- Rename albums in one operation while retaining private members, automatic people rules and later source-rescan corrections.
+- Preserve complete album descriptions, saved searches and queued backup changes when album edits fail or are interrupted.
+
 ## 0.1.27
 
 - Keep photo-property edits atomic across selections and paired Live Photos, and roll back the whole edit if Hidden access expires before saving.

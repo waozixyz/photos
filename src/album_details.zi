@@ -1,0 +1,117 @@
+// Album definitions and membership migration share the library writer snapshot.
+using SQLite :: #import "sqlite/SQLite";
+Membership :: #import "album_edit";
+Search :: #import "search";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+
+Create :: (database: *void, name: string, now: float64) -> string {
+    id: [65]u8; key: Vec(u8); BuilderPrint(*key,"photos.album.v1:%",name)
+    if !Membership.Digest(BuilderFinish(key),id[:]) { return "Cannot create the album" }
+    attempts: s32
+    while true {
+        exists := Membership.Exists(database,TextFromCString(*id[0]))
+        if exists < 0 { return "Cannot create the album" }; if exists == 0 { break }
+        attempts += 1; if attempts > 4096 { return "Cannot create the album" }
+        next: Vec(u8); BuilderPrint(*next,"%:next",TextFromCString(*id[0]))
+        if !Membership.Digest(BuilderFinish(next),id[:]) { return "Cannot create the album" }
+    }
+    statement: *void
+    if SqlitePrepareText(database,"INSERT INTO albums(id,name,created,updated,dirty) VALUES(?,?,?,?,1)",-1,*statement,null) != SQLITE_OK { return "Cannot create the album" }
+    defer { unused SqliteFinalize(statement) }
+    if SqliteBindTextString(statement,1,TextFromCString(*id[0]),64) != SQLITE_OK || SqliteBindTextString(statement,2,name,cast(s32)name.count) != SQLITE_OK ||
+        SqliteBindDouble(statement,3,now) != SQLITE_OK || SqliteBindDouble(statement,4,now) != SQLITE_OK || SqliteStep(statement) != SQLITE_DONE { return "Cannot create the album" }
+    return ""
+}
+
+Mutate :: (database: *void, action: string, name: string, value: string, search: string, source: string, now: float64) -> string {
+    creating := action == "create" || action == "smart_create"
+    if !Membership.NameValid(ifx creating then value else name) { return "Enter an album name of at most 512 bytes" }
+    rules := ifx action == "smart_create" then search else value
+    if action == "smart_create" || action == "filter" {
+        if rules.count == 0 || rules.count > 512 { return "Choose a nonempty search of at most 512 bytes" }
+        for byte: rules { if byte == 0 { return "Choose a nonempty search of at most 512 bytes" } }
+        predicate: Search.Predicate; Search.Parse(*predicate,rules)
+        if predicate.error != "" { return predicate.error }
+    }
+    statement: *void
+    if source != "" {
+        if SqlitePrepareText(database,"SELECT 1 FROM photos WHERE id=? AND hidden=0 AND trashed=0",-1,*statement,null) != SQLITE_OK { return "Cannot check the place source" }
+        valid := SqliteBindTextString(statement,1,source,cast(s32)source.count) == SQLITE_OK && SqliteStep(statement) == SQLITE_ROW
+        unused SqliteFinalize(statement); statement = null
+        if !valid { return "Choose a visible photo outside Trash to name its place" }
+    }
+    if creating {
+        if SqlitePrepareText(database,"SELECT 1 FROM albums WHERE name=?",-1,*statement,null) != SQLITE_OK { return "Cannot create the album" }
+        bound := SqliteBindTextString(statement,1,value,cast(s32)value.count)
+        status := ifx bound == SQLITE_OK then SqliteStep(statement) else -1
+        unused SqliteFinalize(statement); statement = null
+        if status == SQLITE_ROW { return "An album with that name already exists or is retained for synchronization" }
+        if status != SQLITE_DONE { return "Cannot create the album" }
+        error := Create(database,value,now); if error != "" { return error }
+        if action == "create" { return "" }
+    }
+    selected := ifx creating then value else name
+    id: [65]u8; smart: bool
+    if SqlitePrepareText(database,"SELECT id,filter FROM albums WHERE name=? AND deleted=0",-1,*statement,null) != SQLITE_OK { return "Cannot read the album" }
+    if SqliteBindTextString(statement,1,selected,cast(s32)selected.count) != SQLITE_OK || SqliteStep(statement) != SQLITE_ROW { unused SqliteFinalize(statement); return "Album not found" }
+    identity := TextFromCString(SqliteColumnText(statement,0))
+    if identity.count != 64 { unused SqliteFinalize(statement); return "Cannot read the album" }
+    for i: 0..63 { id[i] = identity[i] }
+    smart = TextFromCString(SqliteColumnText(statement,1)).count > 0
+    unused SqliteFinalize(statement); statement = null
+    sql: string; bindValue := false; replacement := value
+    if action == "description" {
+        if value.count > 8192 { return "Enter at most 8192 bytes of text" }
+        sql = "UPDATE albums SET description=?1,updated=max(updated+0.000001,?2),dirty=1 WHERE id=?3"; bindValue = true
+    } else if action == "cover" {
+        if smart { return "Smart albums use the newest matching photo as their cover" }
+        if value != "" {
+            if SqlitePrepareText(database,"SELECT 1 FROM photos WHERE id=?1 AND hidden=0 AND trashed=0 AND EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=?2)",-1,*statement,null) != SQLITE_OK { return "Cannot check the album cover" }
+            valid := SqliteBindTextString(statement,1,value,cast(s32)value.count) == SQLITE_OK && SqliteBindTextString(statement,2,name,cast(s32)name.count) == SQLITE_OK && SqliteStep(statement) == SQLITE_ROW
+            unused SqliteFinalize(statement); statement = null
+            if !valid { return "Choose a visible photo in this album for its cover" }
+        }
+        sql = "UPDATE albums SET cover=?1,updated=max(updated+0.000001,?2),dirty=1 WHERE id=?3"; bindValue = true
+    } else if action == "pinned" || action == "archived" {
+        if action == "archived" && smart { return "Archive individual photos or regular albums; smart albums are saved searches" }
+        sql = ifx action == "pinned" then "UPDATE albums SET pinned=1-pinned,updated=max(updated+0.000001,?2),dirty=1 WHERE id=?3" else "UPDATE albums SET archived=1-archived,updated=max(updated+0.000001,?2),dirty=1 WHERE id=?3"
+    } else if action == "delete_empty" {
+        if !smart {
+            if SqlitePrepareText(database,"SELECT 1 FROM photos,json_each(photos.albums) WHERE value=? LIMIT 1",-1,*statement,null) != SQLITE_OK { return "Cannot check album members" }
+            bound := SqliteBindTextString(statement,1,name,cast(s32)name.count)
+            found := ifx bound == SQLITE_OK then SqliteStep(statement) else -1
+            unused SqliteFinalize(statement); statement = null
+            if found == SQLITE_ROW { return "Only an album with no photos can be deleted" }
+            if found != SQLITE_DONE { return "Cannot check album members" }
+        }
+        sql = "UPDATE albums SET deleted=1,updated=max(updated+0.000001,?2),dirty=1 WHERE id=?3"
+    } else if action == "filter" || action == "smart_create" {
+        if action == "filter" && !smart { return "Create a smart album to save a search" }
+        replacement = rules; bindValue = true
+        sql = "UPDATE albums SET filter=?1,updated=max(updated+0.000001,?2),dirty=1 WHERE id=?3"
+    } else if action == "rename" {
+        if !Membership.NameValid(value) { return "Enter an album name of at most 512 bytes" }
+        if name == value { return "" }
+        if SqlitePrepareText(database,"SELECT deleted FROM albums WHERE name=?",-1,*statement,null) != SQLITE_OK { return "Cannot rename the album" }
+        bound := SqliteBindTextString(statement,1,value,cast(s32)value.count)
+        status := ifx bound == SQLITE_OK then SqliteStep(statement) else -1
+        deleted := status == SQLITE_ROW && SqliteColumnInt(statement,0) != 0
+        unused SqliteFinalize(statement); statement = null
+        if deleted { return "That album name is retained for synchronization; choose another name" }
+        if status == SQLITE_ROW { return "An album with that name already exists" }
+        if status != SQLITE_DONE { return "Cannot rename the album" }
+        sql = "UPDATE albums SET name=?1,updated=max(updated+0.000001,?2),dirty=1 WHERE id=?3"; bindValue = true
+    } else { return "Unknown album action" }
+    if SqlitePrepareText(database,sql,-1,*statement,null) != SQLITE_OK { return "Cannot prepare the album edit" }
+    valid := (!bindValue || SqliteBindTextString(statement,1,replacement,cast(s32)replacement.count) == SQLITE_OK) && SqliteBindDouble(statement,2,now) == SQLITE_OK &&
+        SqliteBindTextString(statement,3,TextFromCString(*id[0]),64) == SQLITE_OK && SqliteStep(statement) == SQLITE_DONE && SqliteChanges(database) == 1
+    unused SqliteFinalize(statement); statement = null
+    if !valid { return "Cannot save the album edit" }
+    if action != "rename" { return "" }
+    sql = "UPDATE photos SET albums=(SELECT json_group_array(value) FROM (SELECT value FROM json_each(photos.albums) WHERE value<>?1 UNION SELECT ?2 ORDER BY value)),edits=json_set(edits,'$.removed_albums',json((SELECT json_group_array(value) FROM (SELECT value FROM json_each(edits,'$.removed_albums') WHERE value<>?2 UNION SELECT ?1 ORDER BY value)))),updated=max(updated+0.000001,?3),dirty=1 WHERE EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=?1)"
+    if SqlitePrepareText(database,sql,-1,*statement,null) != SQLITE_OK { return "Cannot migrate album members" }
+    defer { unused SqliteFinalize(statement) }
+    if SqliteBindTextString(statement,1,name,cast(s32)name.count) != SQLITE_OK || SqliteBindTextString(statement,2,value,cast(s32)value.count) != SQLITE_OK || SqliteBindDouble(statement,3,now) != SQLITE_OK || SqliteStep(statement) != SQLITE_DONE { return "Cannot migrate album members" }
+    return ""
+}

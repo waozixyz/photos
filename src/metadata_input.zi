@@ -1,0 +1,62 @@
+// Parse native editor values without changing process locale or time zone.
+#import "std/byte_text_linux"
+#import "std/date_parse"
+glib :: #system_library "glib-2.0";
+NewUTC :: () -> *void #foreign glib "g_time_zone_new_utc";
+FreeZone :: (zone: *void) #foreign glib "g_time_zone_unref";
+NewDate :: (text: *u8, zone: *void) -> *void #foreign glib "g_date_time_new_from_iso8601";
+FreeDate :: (date: *void) #foreign glib "g_date_time_unref";
+UnixDate :: (date: *void) -> s64 #foreign glib "g_date_time_to_unix";
+Microseconds :: (date: *void) -> s32 #foreign glib "g_date_time_get_microsecond";
+Decimal :: (text: *u8, end: **u8) -> float64 #foreign glib "g_ascii_strtod";
+FormatDecimal :: (output: *u8, length: s32, value: float64) -> *u8 #foreign glib "g_ascii_dtostr";
+Format :: (value: float64, bytes: []u8) -> bool {
+    if bytes.count < 64 || FormatDecimal(*bytes[0],cast(s32)bytes.count,value) == null { return false }
+    text := TextFromCString(*bytes[0]); fractional: bool
+    for byte: text { if byte == 46 || byte == 101 || byte == 69 { fractional = true } }
+    if !fractional { bytes[text.count] = 46; bytes[text.count+1] = 48; bytes[text.count+2] = 0 }
+    return true
+}
+
+Date :: (text: string) -> float64 {
+    if text.count < 10 || text.count > 128 || text[4] != 45 || text[7] != 45 { return -1.0 }
+    for byte: text { if byte < 32 { return -1.0 } }
+    if DateNumber(text,0,4) < 1 || DateNumber(text,5,2) < 1 || DateNumber(text,8,2) < 1 { return -1.0 }
+    bytes: [160]u8; at: s32
+    for byte: text { bytes[at] = byte; at += 1 }
+    if text.count == 10 {
+        for byte: "T00:00:00Z" { bytes[at] = byte; at += 1 }
+    } else {
+        if text.count < 16 || (text[10] != 84 && text[10] != 32) || text[13] != 58 { return -1.0 }
+        if text.count == 16 || text[16] == 43 || text[16] == 45 || text[16] == 90 {
+            at = 16; for byte: ":00" { bytes[at] = byte; at += 1 }
+            for i: 16..cast(s32)text.count-1 { bytes[at] = text[i]; at += 1 }
+        } else if text.count < 19 || text[16] != 58 || DateNumber(text,17,2) > 59 { return -1.0 }
+    }
+    bytes[at] = 0
+    zone := NewUTC(); if zone == null { return -1.0 }; defer { FreeZone(zone) }
+    date := NewDate(*bytes[0],zone); if date == null { return -1.0 }; defer { FreeDate(date) }
+    result := cast(float64)UnixDate(date)+cast(float64)Microseconds(date)/1000000.0
+    return ifx result > 0.0 && result < 32503680000.0 then result else -1.0
+}
+
+Location :: struct { latitude: float64; longitude: float64; clear: bool; valid: bool }
+Coordinates :: (text: string) -> Location {
+    result: Location; bytes: [8193]u8
+    if text.count > 8192 { return result }
+    for i: 0..cast(s32)text.count-1 { if text[i] == 0 { return result }; bytes[i] = text[i] }
+    start: s32; finish := cast(s32)text.count
+    while start < finish && bytes[start] <= 32 { start += 1 }
+    while finish > start && bytes[finish-1] <= 32 { finish -= 1 }
+    bytes[finish] = 0
+    if start == finish { result.clear = true; result.valid = true; return result }
+    end: *u8; first := *bytes[start]; latitude := Decimal(first,*end)
+    if end == first || latitude != latitude || latitude < -90.0 || latitude > 90.0 { return result }
+    while end.* == 32 || end.* == 9 || end.* == 10 || end.* == 13 { end = *end[1] }
+    if end.* != 44 { return result }; end = *end[1]; first = end
+    longitude := Decimal(first,*end)
+    if end == first || longitude != longitude || longitude < -180.0 || longitude > 180.0 { return result }
+    while end.* == 32 || end.* == 9 || end.* == 10 || end.* == 13 { end = *end[1] }
+    if end.* != 0 { return result }
+    result.latitude = latitude; result.longitude = longitude; result.valid = true; return result
+}

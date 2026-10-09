@@ -148,8 +148,13 @@ selects the photos already loaded into the feed, including those outside the
 visible rows; scrolling loads more. Apply favorites, hiding, Trash, restore, album
 membership, corrected dates or export to the selection. Bulk property changes
 set the chosen state consistently, including selections with mixed states.
-Favorites, Hidden, Archive, Trash, restore, captions and tags are written by the
-native Ziran SQLite editor in one transaction. Live Photo components are checked
+Favorites, Hidden, Archive, Trash, restore, captions, tags, album memberships,
+capture dates, locations and file names are written by the native Ziran SQLite
+editor in one transaction. Date and coordinate parsing runs there too. Album
+creation, renaming, descriptions, covers, pinning, archiving, deletion of empty
+albums and saved-search edits use the same native writer. Renaming an album
+retains its identity and automatic people provenance, including Hidden and Trash
+members, and rolls back if migrating any member fails. Live Photo components are checked
 together, and expired Hidden access or an interrupted pre-save operation rolls
 back the selection. The local authorization adapter retains unlock tokens in
 the existing service process and grants a short access lease through a private pipe.
