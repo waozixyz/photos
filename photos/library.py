@@ -555,7 +555,7 @@ class Library:
             if any(bool(p['trashed']) != bool(photo['trashed']) for p in parts):
                 continue
             photo['thumbnail'] = str(self.thumbnail(photo['id'])) if self.thumbnail(photo['id']).exists() else ''
-            photo['date'] = datetime.fromtimestamp(photo['taken'], timezone.utc).strftime('%Y-%m-%d')
+            photo['date'] = datetime.fromtimestamp(photo['taken'], timezone.utc).date().isoformat()
             photo['original'] = str(self.original(photo)) if self.original(photo).exists() else ''
             from . import decoding
             asset = decoding.display_path(self, photo) if decoding.supported(photo['extension']) else self.original(photo)
@@ -621,7 +621,7 @@ class Library:
         with source.open('rb') as incoming, destination.open('xb') as output:
             shutil.copyfileobj(incoming, output, 4 * 1024 * 1024)
         metadata = json.loads(photo['metadata'])
-        metadata.update(description=photo['caption'], photoTakenTime={'timestamp': str(int(photo['taken']))}, albums=json.loads(photo['albums']))
+        metadata.update(description=photo['caption'], photoTakenTime={'timestamp': str(photo['taken'])}, albums=json.loads(photo['albums']))
         metadata.update(tags=photo['tags'], favorite=bool(photo['favorite']), archived=bool(photo['archived']))
         from .people import export_index
         index = export_index(self,photo_id)

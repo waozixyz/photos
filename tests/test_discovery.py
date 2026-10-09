@@ -42,6 +42,20 @@ class DiscoveryTest(unittest.TestCase):
         empty=self.library.query('lane',person=self.person,hidden_access=True)
         self.assertFalse(empty['photos']);self.assertFalse(empty['lane_years']);self.assertEqual(empty['person_detail']['name'],'')
 
+    def test_historic_jumps_and_memories_preserve_filters_and_order(self):
+        for i,photo_id in enumerate(self.ids):
+            self.library.edit(photo_id,'taken',f'{1958+i//6}-07-{1+i%6:02d}T12:00:00Z')
+        for sort in ['oldest','newest']:
+            result=self.library.query(album='Family',search='year:1959',sort=sort,jump_day='1959-07-03',limit=2)
+            expected=self.ids[8:10] if sort=='oldest' else [self.ids[8],self.ids[7]]
+            self.assertEqual([p['id'] for p in result['photos']],expected)
+        memories=self.library.query('memories',memory_date='1960-07-03',sort='oldest')
+        self.assertEqual([p['id'] for p in memories['photos']],[self.ids[2],self.ids[8]])
+        self.library.edit(self.ids[2],'hidden_set','1')
+        self.assertEqual([p['id'] for p in self.library.query('memories',memory_date='1960-07-03',hidden_access=True)['photos']],[self.ids[8]])
+        for day in ['1900-02-29','0000-01-01','10000-01-01']:
+            with self.assertRaises(LibraryError): self.library.query(jump_day=day)
+
     def test_birthday_cutoff_ignored_disabled_and_archived_lane_are_private(self):
         people.edit(self.library,'person_birth',self.person,'2018-06-01')
         self.assertEqual(self.library.query('lane',person=self.person)['lane_years'],[2021,2022])

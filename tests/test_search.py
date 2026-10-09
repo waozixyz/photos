@@ -64,11 +64,58 @@ class SearchTest(unittest.TestCase):
         self.assertEqual(before, [dict(r) for r in self.library.db.execute('SELECT * FROM photos ORDER BY id')])
 
     def test_invalid_filters_and_dates_fail_without_mutating_library(self):
-        for query in ['type:book', 'favorite:maybe', 'on:2024-02-30', 'year:0000', 'from:3000-01-01',
+        for query in ['type:book', 'favorite:maybe', 'on:2024-02-30', 'year:0000', 'from:10000-01-01',
                       'album:"Unclosed', 'has:faces', 'tag:', 'x' * 513]:
             with self.subTest(query=query):
                 with self.assertRaises(LibraryError): self.library.query(search=query)
         self.assertEqual(self.library.query()['total'], 5)
+
+    def test_historic_dates_epoch_edges_leap_days_and_calendar_bounds(self):
+        originals = {photo_id: self.library.original(self.library.photo(photo_id)).read_bytes() for photo_id in self.ids}
+        dates = ['1900-02-28T12:00:00Z','1969-12-31T23:59:58.999Z','1970-01-01T00:00:00Z']
+        for photo_id, date in zip(self.ids,dates): self.library.edit(photo_id,'taken',date)
+        self.assertEqual(self.results('year:1900'),self.ids[:1])
+        self.assertEqual(self.results('from:1900-02-28 to:1969-12-31'),self.ids[1::-1])
+        self.assertEqual(self.results('on:1969-12-31'),self.ids[1:2])
+        self.assertEqual(self.results('before:1970-01-01'),self.ids[1::-1])
+        self.assertEqual(self.results('after:1969-12-31'),self.ids[2:3])
+        self.assertEqual(self.results('on:1970-01-01'),self.ids[2:3])
+        self.assertEqual(self.results('-year:1969'),[self.ids[2],self.ids[0]])
+        for invalid in ['on:1900-02-29','on:0000-01-01','on:9999-02-29','year:10000','on:1969-13-01']:
+            with self.assertRaises(LibraryError): self.results(invalid)
+        self.library.edit(self.ids[0],'taken','0001-01-01T00:00:00Z')
+        self.library.edit(self.ids[2],'taken','9999-12-31T23:59:59Z')
+        self.assertEqual(self.results('year:0001'),self.ids[:1])
+        self.assertEqual(self.results('year:9999'),self.ids[2:3])
+        self.assertEqual(self.results('on:9999-12-31'),self.ids[2:3])
+        self.assertEqual(self.results('to:0001-01-01'),self.ids[:1])
+        self.assertEqual(self.library.query(search='year:0001')['photos'][0]['date'],'0001-01-01')
+        self.library.edit(self.ids[1],'taken','1969-12-31T23:59:59Z')
+        self.assertEqual(self.library.photo(self.ids[1])['taken'],-1)
+        self.library.edit(self.ids[1],'taken','1970-01-01T00:00:00Z')
+        self.assertEqual(self.library.photo(self.ids[1])['taken'],0)
+        self.library.edit(self.ids[1],'taken','1969-12-31T23:59:59Z')
+        for photo_id, data in originals.items(): self.assertEqual(self.library.original(self.library.photo(photo_id)).read_bytes(),data)
+
+    def test_corrected_historic_date_survives_rescan_export_and_encrypted_restore(self):
+        self.library.edit(self.ids[0],'taken','1900-02-28T23:30:00.125-02:00')
+        taken=self.library.photo(self.ids[0])['taken']
+        self.assertEqual(self.library.details(self.ids[0])['taken'],'1900-03-01T01:30:00.125000+00:00')
+        self.library.import_folders([self.root/'source'])
+        self.assertEqual(self.library.photo(self.ids[0])['taken'],taken)
+        client=Client(self.library,dict(node='http://127.0.0.1:18080',node_id='a'*64))
+        peer=Library(self.root/'peer');self.addCleanup(peer.db.close)
+        receiver=Client(peer,dict(node='http://127.0.0.1:18080',node_id='a'*64),client.identity_path)
+        receiver.accept(client.record(self.library.photo(self.ids[0]),manifest={}))
+        peer.db.commit()
+        self.assertEqual(peer.photo(self.ids[0])['taken'],taken)
+        self.assertEqual(peer.query(search='on:1900-03-01')['photos'][0]['id'],self.ids[0])
+        target=self.root/'export'
+        with Export(self.library,str(target)) as exporter: exporter.run()
+        restored=Library(self.root/'restored');self.addCleanup(restored.db.close)
+        restored.import_folders([target])
+        self.assertEqual(restored.photo(self.ids[0])['taken'],taken)
+        self.assertEqual(restored.query(search='year:1900')['photos'][0]['id'],self.ids[0])
 
     def test_smart_album_updates_excludes_hidden_and_trash_and_retains_originals(self):
         request = dict(action='album_smart_create', value='Family favorites', search='is:favorite tag:family')

@@ -130,8 +130,9 @@ main :: (argc: s32, argv: **u8) -> s32 {
     dateValue: float64
     if date {
         if valueLength < 0 { return Failure("Enter a valid date and time, for example 2024-06-15 14:30:00+00:00") }
-        dateValue = Metadata.Date(TextFromBytes(valueBytes[:valueLength]))
-        if dateValue < 0.0 { return Failure("Enter a valid date and time, for example 2024-06-15 14:30:00+00:00") }
+        capture := Metadata.Date(TextFromBytes(valueBytes[:valueLength]))
+        if !capture.valid { return Failure("Enter a valid date and time, for example 2024-06-15 14:30:00+00:00") }
+        dateValue = capture.seconds
     }
     geo: Vec(u8); clearLocation: bool
     if location {

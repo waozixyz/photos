@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.41
+
+- Search and jump to historic capture dates, including photos taken before 1970 and calendar years 0001 through 9999.
+- Correct older photo dates with explicit time zones and fractional seconds, preserving them through source rescans, export and encrypted restore.
+- Browse memories from earlier calendar years, with privacy exclusions and original files preserved.
+
 ## 0.1.40
 
 - Lock Photos automatically after leaving it, immediately or after 5 seconds, 15 seconds, 1 minute, 5 minutes or 30 minutes.

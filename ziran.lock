@@ -49,7 +49,7 @@
     "name": "photos"
   },
   "toolchain": {
-    "commit": "a59884b1cd628ec3625c24229e8185cfd27a931c",
+    "commit": "307ffcb676a6fe3e7b278a3964845fc10ec790a1",
     "ref": "master",
     "url": "https://github.com/ziranlang/ziran.git"
   }

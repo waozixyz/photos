@@ -94,8 +94,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
         Search.AddSQL(*query," AND (SELECT ignored FROM people WHERE id=?)=0"); Search.Bind(*query,TextUntilNul(person[:]))
         if birth[0] != 0 {
             value := TextUntilNul(birth[:]); year := DateNumber(value,0,4); month := DateNumber(value,5,2); day := DateNumber(value,8,2)
-            // Birth dates can predate the Unix epoch. Compare calendar dates
-            // without the standard feed parser's 1970 lower bound.
+            // Compare birthday cutoffs as calendar dates, including older years.
             cutoff: Vec(u8); BuilderPrint(*cutoff,"%-%-",year+3,value[5:7])
             BuilderPrint(*cutoff,"%",ifx month == 2 && day == 29 then "28" else value[8:10])
             Search.AddSQL(*query," AND strftime('%Y-%m-%d',taken,'unixepoch')>=?"); Search.Bind(*query,BuilderFinish(cutoff))
@@ -104,7 +103,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if name == "memories" {
         if memory[0] == 0 { unused WriteIsoDay(Clock.UnixNow(),memory[:]) }
         day := Search.Date(TextUntilNul(memory[:]))
-        if day < 0 { return Failure("Choose a valid memories day in YYYY-MM-DD format") }
+        if !day.valid { return Failure("Choose a valid memories day in YYYY-MM-DD format") }
         Search.AddSQL(*query," AND strftime('%m-%d',taken,'unixepoch')=? AND taken<?")
         Search.Bind(*query,TextUntilNul(memory[5:11])); Search.BindNumber(*query,UtcSeconds(DateNumber(TextUntilNul(memory[:]),0,4),1,1,0,0,0))
     }
@@ -170,9 +169,9 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if slideshow { page = ifx matches > 0 then cast(s32)(cast(s64)page % matches) else 0; limit = 1 }
     if !guest.active && jump[0] != 0 {
         day := Search.Date(TextUntilNul(jump[:]))
-        if day < 0 || name == "semantic" || name == "map" || name == "lane" { return Failure("Choose a gallery date in YYYY-MM-DD format") }
+        if !day.valid || name == "semantic" || name == "map" || name == "lane" { return Failure("Choose a gallery date in YYYY-MM-DD format") }
         jump_sql: Vec(u8); BuilderPrint(*jump_sql,"SELECT count(*) FROM photos WHERE % AND taken%?",where,ifx order == "newest" then ">=" else "<")
-        Search.BindNumber(*query,day + (ifx order == "newest" then 86400 else 0))
+        Search.BindNumber(*query,day.seconds + (ifx order == "newest" then 86400 else 0))
         if !Prepare(database,BuilderFinish(jump_sql),*query,*statement) { return Failure("Cannot jump to the gallery date") }
         if SqliteStep(statement) != SQLITE_ROW { unused SqliteFinalize(statement); return Failure("Cannot locate the gallery date") }
         target := SqliteColumnInt64(statement,0); unused SqliteFinalize(statement); statement = null; query.count -= 1

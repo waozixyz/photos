@@ -71,8 +71,9 @@ Combine filters such as `type:photo album:"Summer trip" year:2024 -tag:work`.
 `is:favorite`, `is:archived`, `has:location`, `has:caption` and `has:tags` filter
 properties. `from:2024-06-01 to:2024-06-30` includes both capture days in UTC;
 `on:2024-06-15` selects one day. Search tips explains phrases, exclusions and
-the available filters. Structured capture-date filters currently accept years
-1970 through 2999; older originals remain browsable and searchable by their date text.
+the available filters. Capture-date filters accept years 0001 through 9999, including dates before
+1970. Date corrections, timeline jumps and memories also accept historic dates;
+calendar leap days are checked and date filters use UTC capture days.
 Search values are bound SQLite parameters and literal
 percent/underscore characters are preserved. The gallery and search engine is Ziran.
 Open a photo to view its

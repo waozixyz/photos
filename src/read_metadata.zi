@@ -96,6 +96,17 @@ Minified :: (text: string) -> string {
     return BuilderFinish(out)
 }
 Capture :: struct { mode: s32; value: float64 }
+ExactNumber :: (json: string, key: string, output: *float64) -> bool {
+    at := FieldAt(json,0,key); number := ReadNumber(json,at)
+    if !number.valid { return false }
+    end := ValueEnd(json,at,0)
+    if at < 0 || end <= at || end-at > 64 { return false }
+    bytes: [65]u8
+    for i: at..end-1 { bytes[i-at] = json[i] }
+    last: *u8; value := Decimal(*bytes[0],*last)
+    if cast(usize)last-cast(usize)*bytes[0] != cast(usize)(end-at) || value != value { return false }
+    <<output = value; return true
+}
 CaptureTime :: (database: *void, text: string) -> Capture {
     result: Capture; statement: *void
     // JSON objects can repeat a key. Match the import adapter's last-key
@@ -109,7 +120,7 @@ CaptureTime :: (database: *void, text: string) -> Capture {
     result.mode = 2
     if type != "object" { return result }
     value: float64
-    if timestamp == "integer" || timestamp == "real" || timestamp == "true" || timestamp == "false" { value = SqliteColumnDouble(statement,2) }
+    if timestamp == "integer" || timestamp == "real" { value = SqliteColumnDouble(statement,2) }
     else if timestamp == "text" {
         bytes := SqliteColumnText(statement,2); length := SqliteColumnBytes(statement,2); end: *u8
         value = Decimal(bytes,*end)
@@ -117,7 +128,7 @@ CaptureTime :: (database: *void, text: string) -> Capture {
         if used == 0 || used > cast(usize)length { return result }
         for i: cast(s32)used..length-1 { if bytes[i] != 32 && bytes[i] != 9 && bytes[i] != 10 && bytes[i] != 13 && bytes[i] != 11 && bytes[i] != 12 { return result } }
     } else { return result }
-    if value != value || value <= 0.0 || value >= 32503680000.0 { return result }
+    if value != value || value < -62135596800.0 || value >= 253402300800.0 { return result }
     result.mode = 1; result.value = value; return result
 }
 Documents :: (database: *void, candidates: []string, limit: u64) -> bool {
@@ -213,16 +224,17 @@ main :: () -> s32 {
             candidates: [1]string = .{name}; if !Documents(database,candidates[:],16384) { return 1 }
         }
         else if operation == "camera" {
-            number := ReadNumber(request,FieldAt(request,0,"fallback"))
-            if !number.valid { if !Failure("Choose a valid capture-time fallback") { return 1 }; continue }
+            fallback: float64
+            if !ExactNumber(request,"fallback",*fallback) { if !Failure("Choose a valid capture-time fallback") { return 1 }; continue }
             mode := ReadNumber(request,FieldAt(request,0,"capture_mode")); value := ReadNumber(request,FieldAt(request,0,"capture_value")); capture: Capture
             if mode.valid {
-                if (mode.value != 0.0 && mode.value != 1.0 && mode.value != 2.0) || mode.value == 1.0 && (!value.valid || value.value <= 0.0 || value.value >= 32503680000.0) {
+                exact: float64
+                if (mode.value != 0.0 && mode.value != 1.0 && mode.value != 2.0) || mode.value == 1.0 && (!value.valid || !ExactNumber(request,"capture_value",*exact) || exact < -62135596800.0 || exact >= 253402300800.0) {
                     if !Failure("Choose valid capture metadata") { return 1 }; continue
                 }
-                capture.mode = cast(s32)mode.value; capture.value = value.value
+                capture.mode = cast(s32)mode.value; capture.value = exact
             }
-            if !CameraFields(name,number.value,capture) { return 1 }
+            if !CameraFields(name,fallback,capture) { return 1 }
         } else if !Failure("Unknown metadata operation") { return 1 }
     }
 }

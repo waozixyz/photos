@@ -161,7 +161,7 @@ class Export:
             memberships = [folders[name] for name in json.loads(photo['albums']) if name in folders] or ['Uncategorized']
             name = component(Path(photo['name']).stem) + '--' + photo['id'][:12] + photo['extension']
             metadata = json.loads(photo['metadata'])
-            metadata.update(description=photo['caption'], photoTakenTime={'timestamp': str(int(photo['taken']))},
+            metadata.update(description=photo['caption'], photoTakenTime={'timestamp': str(photo['taken'])},
                             albums=json.loads(photo['albums']), tags=photo['tags'], favorite=bool(photo['favorite']),
                             archived=bool(photo['archived']))
             from .people import export_index

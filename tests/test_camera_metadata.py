@@ -106,7 +106,12 @@ class CameraMetadataTest(unittest.TestCase):
         values = [({}, 1718454600), ({'photoTakenTime': {}}, 1718454600),
                   ({'photoTakenTime': None}, 1700000000),
                   ({'photoTakenTime': {'timestamp': 'bad'}}, 1700000000),
-                  ({'photoTakenTime': {'timestamp': 0}}, 1700000000),
+                  ({'photoTakenTime': {'timestamp': 0}}, 0),
+                  ({'photoTakenTime': {'timestamp': '-1.25'}}, -1.25),
+                  ({'photoTakenTime': {'timestamp': -62135596800}}, -62135596800),
+                  ({'photoTakenTime': {'timestamp': 253402300799}}, 253402300799),
+                  ({'photoTakenTime': {'timestamp': -62135596801}}, 1700000000),
+                  ({'photoTakenTime': {'timestamp': 253402300800}}, 1700000000),
                   ({'photoTakenTime': {'timestamp': False}}, 1700000000),
                   ({'photoTakenTime': {'timestamp': 10**400}}, 1700000000),
                   ({'photoTakenTime': {'timestamp': '1600000000.25\t'}}, 1600000000.25)]
