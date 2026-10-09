@@ -1,0 +1,71 @@
+// Stream a deterministic source walk. Never open media or follow folder links.
+using Files :: #import "std/file_linux";
+#import "std/sort"
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+c :: #system_library "c";
+Output :: (fd: s32, data: *u8, count: usize) -> s64 #foreign c "write";
+Quoted :: (out: *Vec(u8), value: string) {
+    BuilderPrint(out,"\"")
+    for i: 0..value.count-1 {
+        byte := value[i]
+        if byte == 34 { BuilderPrint(out,"\\\"") }
+        else if byte == 92 { BuilderPrint(out,"\\\\") }
+        else if byte < 32 {
+            hex := "0123456789abcdef"; high := cast(s32)byte/16; low := cast(s32)byte%16
+            BuilderPrint(out,"\\u00"); BuilderPrint(out,"%",hex[high:high+1]); BuilderPrint(out,"%",hex[low:low+1])
+        } else { BuilderPrint(out,"%",value[i:i+1]) }
+    }
+    BuilderPrint(out,"\"")
+}
+Send :: (kind: string, path: string) -> bool {
+    out: Vec(u8); BuilderPrint(*out,"{\"kind\":\"%\",\"path\":",kind); Quoted(*out,path); BuilderPrint(*out,"}\n")
+    text := BuilderFinish(out); at: s32; bytes: [4096]u8
+    while at < cast(s32)text.count {
+        count := cast(s32)text.count-at; if count > 4096 { count = 4096 }
+        for i: 0..count-1 { bytes[i] = text[at+i] }
+        written: s32
+        while written < count {
+            amount := Output(1,*bytes[written],cast(usize)(count-written))
+            if amount <= 0 { return false }; written += cast(s32)amount
+        }
+        at += count
+    }
+    return true
+}
+Join :: (base: string, name: string) -> string {
+    out: Vec(u8); BuilderPrint(*out,"%/%",base,name); return BuilderFinish(out)
+}
+Walk :: (path: string, depth: s32) -> bool {
+    if depth > 512 || path.count >= 4096 || Files.PathIsLink(path) { return Send("error",path) }
+    cursor := Files.OpenDirectory(path)
+    if !cursor.valid { return Send("error",path) }
+    directories: Vec(string); files: Vec(string)
+    while true {
+        entry := Files.NextDirectoryEntry(*cursor); if !entry.valid { break }
+        name := TextFromBytes(entry.name[:entry.name_count])
+        if name == "." || name == ".." { continue }
+        child := Join(path,name)
+        directory := entry.kind == .Directory || (entry.kind == .Unknown || entry.kind == .Link) && Files.DirectoryExists(child)
+        if directory {
+            if name == "metadata" || name == ".meta" || name == ".git" || Files.PathIsLink(child) { continue }
+            if !VecPush(directories,child) { unused Files.CloseDirectory(*cursor); return false }
+        } else {
+            // File links remain in the walk so the importer can count them as
+            // skipped. Their contents are never read by folder discovery.
+            if !VecPush(files,child) { unused Files.CloseDirectory(*cursor); return false }
+        }
+    }
+    failed := cursor.failed; closed := Files.CloseDirectory(*cursor)
+    if failed || !closed { return Send("error",path) }
+    if !Send("directory",path) { return false }
+    SortText(VecSlice(files,0,files.count)); SortText(VecSlice(directories,0,directories.count))
+    for i: 0..files.count-1 { if !Send("file",files[i]) { return false } }
+    for i: 0..directories.count-1 { if !Walk(directories[i],depth+1) { return false } }
+    return true
+}
+main :: (argc: s32, argv: **u8) -> s32 {
+    if argc != 2 { unused Send("error",""); return 1 }
+    if !Walk(TextFromCString(argv[1]),0) { return 1 }
+    if !Send("complete","") { return 1 }; return 0
+}

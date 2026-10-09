@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.31
+
+- Discover source photos in a predictable order while excluding provider metadata folders and linked folders.
+- Report unreadable source folders so incomplete imports are visible, and skip media-named pipes without waiting for their contents.
+- Preserve source files and previously imported photos if folder discovery is interrupted.
+
 ## 0.1.30
 
 - Preserve unknown import metadata, explicit empty values, large numbers and complete captions while keeping later date, location and album corrections.

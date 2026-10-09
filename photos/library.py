@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import stat as file_stat
 import subprocess
 import tempfile
 import time
@@ -243,6 +244,8 @@ class Library:
         if path.is_symlink() or path.suffix.lower() not in IMAGES | VIDEOS:
             return 'skipped'
         stat = path.stat()
+        if not file_stat.S_ISREG(stat.st_mode):
+            return 'skipped'
         warning = False
         try:
             metadata, stamp = self.sidecar(path)
@@ -390,10 +393,14 @@ class Library:
             root = Path(folder).expanduser().resolve()
             if not root.is_dir() or root == self.root or self.root.is_relative_to(root) or root.is_relative_to(self.root):
                 raise ValueError('Choose an existing source folder outside the Photos library')
-            for base, directories, filenames in os.walk(root, followlinks=False):
-                directories[:] = sorted(d for d in directories if d not in {'metadata', '.meta', '.git'} and not (Path(base) / d).is_symlink())
-                album_sidecar = Path(base) / '.photos-album.json'
-                if album_sidecar.is_file() and not album_sidecar.is_symlink():
+            from . import importing
+            for kind, path in importing.walk(root):
+                if kind == 'error':
+                    result['errors'] += 1
+                    failures.append(dict(path=str(path), error='FolderDiscoveryError'))
+                    continue
+                album_sidecar = path / '.photos-album.json'
+                if kind == 'directory' and album_sidecar.is_file() and not album_sidecar.is_symlink():
                     try:
                         if album_sidecar.stat().st_size > 16384:
                             raise LibraryError('Album metadata is too large')
@@ -415,7 +422,7 @@ class Library:
                             raise LibraryError('Invalid album metadata')
                         if any(type(info.get(k, 0)) not in {int, bool} or info.get(k, 0) not in (0, 1) for k in ['pinned', 'archived']):
                             raise LibraryError('Invalid album state')
-                        self.import_album_names[str(Path(base))] = name
+                        self.import_album_names[str(path)] = name
                         with self.db:
                             self.db.execute('BEGIN IMMEDIATE')
                             existed = self.db.execute('SELECT 1 FROM albums WHERE name=?', (name,)).fetchone()
@@ -425,15 +432,16 @@ class Library:
                                                 (description, cover, int(info.get('pinned', 0)), int(info.get('archived', 0)), smart_filter, packed(auto_people), album['id']))
                     except (ValueError, OSError, AttributeError):
                         result['warning'] += 1
-                for name in sorted(filenames):
-                    try:
-                        result[self.import_file(Path(base) / name, root)] += 1
-                    except (OSError, ValueError, sqlite3.Error) as error:
-                        self.db.rollback()
-                        result['errors'] += 1
-                        failures.append(dict(path=str(Path(base) / name), error=type(error).__name__))
-                    if sum(result.values()) % 100 == 0:
-                        self.set_setting('import', result)
+                if kind == 'directory':
+                    continue
+                try:
+                    result[self.import_file(path, root)] += 1
+                except (OSError, ValueError, sqlite3.Error) as error:
+                    self.db.rollback()
+                    result['errors'] += 1
+                    failures.append(dict(path=str(path), error=type(error).__name__))
+                if sum(result.values()) % 100 == 0:
+                    self.set_setting('import', result)
         self.set_setting('import', result)
         self.set_setting('import_failures', failures)
         from . import live

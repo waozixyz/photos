@@ -15,8 +15,11 @@ merge metadata, album definitions and the exact source-cache stamp in one native
 Ziran transaction, taking a fresh snapshot after copying. Unknown sidecar values,
 explicit nulls, large integers and long captions survive unchanged. Failed or
 interrupted writes roll back the photo, albums and source-cache record together;
-metadata updates retain a newer backup stamp. Folder traversal, EXIF/sidecar
-extraction and imports carrying private face or automatic-album indexes still
+metadata updates retain a newer backup stamp. Folder discovery also runs in a
+headless Ziran helper, streaming sorted entries without following folder links.
+It excludes provider metadata and Git folders, reports unreadable folders and
+stops its own walker if the import consumer closes. Nonregular media files such
+as named pipes are skipped. EXIF/sidecar extraction and imports carrying private face or automatic-album indexes still
 use the compatibility service; the complete importer port remains in progress.
 
 The owner's merged desktop library is `/mnt/storage/Photos`, imported from
@@ -417,8 +420,8 @@ The remaining replacement work includes:
 - System authentication, Hidden password recovery and a deliberate deletion/retention policy.
 - A complete Ziran library/sync service. The native UI, portable app, gallery/search
   engine, image processor, password verifier, photo/album-property writers,
-  original copying and ordinary import metadata/source-cache writes are Ziran/Kryon.
-  Folder traversal, EXIF/sidecar extraction, private derived-index import writes,
+  original copying, folder discovery and ordinary import metadata/source-cache writes are Ziran/Kryon.
+  EXIF/sidecar extraction, private derived-index import writes,
   authorization adapter and encrypted sync worker remain Python.
 
 Choose Play video to watch a video in the Photos window. Pause/resume, Replay,

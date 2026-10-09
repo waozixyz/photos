@@ -27,6 +27,64 @@ def metadata_program():
     return helper
 
 
+def folder_program():
+    root = Path(__file__).resolve().parents[1]
+    paths = [root/'import_folders', root/'build/import-folders/import_folders']
+    helper = next((path for path in paths if path.is_file()), None)
+    if helper is None:
+        raise LibraryError('Build or install Photos folder discovery before importing photos')
+    return helper
+
+
+def walk(root):
+    """Bounded streamed entries; closing the consumer stops its own helper."""
+    root = Path(root)
+    environment = {key: value for key, value in os.environ.items() if key not in {
+        'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS', 'SESSION_MANAGER'}}
+    child = None
+    try:
+        child = subprocess.Popen(['prlimit', '--as=268435456', '--', str(folder_program()), str(root)],
+                                 env=environment, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        complete = False
+        while True:
+            line = child.stdout.readline(65537)
+            if not line:
+                break
+            if len(line) > 65536 or not line.endswith(b'\n'):
+                raise LibraryError('Folder discovery returned an oversized entry')
+            entry = json.loads(line)
+            if not isinstance(entry, dict) or set(entry) != {'kind', 'path'}:
+                raise LibraryError('Folder discovery returned an invalid entry')
+            kind, name = entry['kind'], entry['path']
+            if complete or not isinstance(name, str) or kind not in {'directory', 'file', 'error', 'complete'}:
+                raise LibraryError('Folder discovery returned an invalid entry')
+            if kind == 'complete':
+                if name:
+                    raise LibraryError('Folder discovery returned an invalid completion')
+                complete = True
+                continue
+            path = Path(name)
+            if not path.is_relative_to(root):
+                raise LibraryError('Folder discovery returned a path outside the source')
+            yield kind, path
+        if child.wait(timeout=5) or not complete:
+            raise LibraryError('Folder discovery could not finish; rescan the source')
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        if isinstance(error, LibraryError):
+            raise
+        raise LibraryError('Folder discovery could not finish; rescan the source') from None
+    finally:
+        if child is not None:
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    child.kill(); child.wait(timeout=2)
+            child.stdout.close()
+
+
 def merge(library, request):
     if library.db.in_transaction:
         raise LibraryError('Finish the current library operation before importing metadata')

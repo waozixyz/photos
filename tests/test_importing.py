@@ -72,6 +72,62 @@ class OriginalImportTest(unittest.TestCase):
         self.assertEqual(self.source.read_bytes(),self.data)
 
 
+class FolderImportTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name); self.source = self.root/'Source'; self.source.mkdir()
+
+    def test_sorted_recursive_unicode_paths_exclude_metadata_and_folder_links(self):
+        outside = self.root/'Outside'; outside.mkdir(); (outside/'private.jpg').write_bytes(b'outside')
+        for name in ['z.jpg', 'a"\\\n日本語.jpg', 'unrelated.txt']:
+            (self.source/name).write_bytes(name.encode())
+        for name in ['Z trip', 'A trip', '.git', '.meta', 'metadata']:
+            folder = self.source/name; folder.mkdir(); (folder/'Photo.jpg').write_bytes(b'original')
+        (self.source/'linked-folder').symlink_to(outside, target_is_directory=True)
+        (self.source/'linked-file.jpg').symlink_to(outside/'private.jpg')
+        (self.source/'dangling.jpg').symlink_to(outside/'missing.jpg')
+        entries = list(importing.walk(self.source))
+        names = sorted(['z.jpg', 'a"\\\n日本語.jpg', 'unrelated.txt', 'linked-file.jpg', 'dangling.jpg'])
+        expected = [('directory', self.source)]+[('file', self.source/name) for name in names]
+        for name in ['A trip', 'Z trip']:
+            expected += [('directory', self.source/name), ('file', self.source/name/'Photo.jpg')]
+        self.assertEqual(entries, expected)
+        self.assertEqual((outside/'private.jpg').read_bytes(), b'outside')
+        self.assertEqual(list(importing.walk(self.source/'linked-folder')),
+                         [('error', self.source/'linked-folder')])
+
+    def test_streamed_large_folder_and_cancel_stop_only_the_owned_helper(self):
+        for i in range(2500): (self.source/f'Photo {i:04d}.jpg').write_bytes(b'original')
+        actual = subprocess.Popen; processes = []
+        def started(*args, **kwargs):
+            child = actual(*args, **kwargs); processes.append(child); return child
+        with patch('photos.importing.subprocess.Popen', side_effect=started):
+            walking = importing.walk(self.source)
+            self.assertEqual(next(walking), ('directory', self.source))
+            self.assertEqual(next(walking), ('file', self.source/'Photo 0000.jpg'))
+            walking.close()
+        self.assertEqual(len(processes), 1)
+        self.assertIsNotNone(processes[0].poll()); self.assertTrue(processes[0].stdout.closed)
+        entries = list(importing.walk(self.source))
+        self.assertEqual(len(entries), 2501)
+        self.assertEqual(entries[-1], ('file', self.source/'Photo 2499.jpg'))
+        self.assertEqual((self.source/'Photo 0000.jpg').read_bytes(), b'original')
+
+    def test_unreadable_folder_is_reported_and_media_named_pipes_are_skipped(self):
+        library = Library(self.root/'library'); self.addCleanup(library.db.close)
+        os.mkfifo(self.source/'pipe.jpg')
+        (self.source/'dangling.jpg').symlink_to(self.root/'missing')
+        locked = self.source/'Locked'; locked.mkdir(); locked.chmod(0)
+        self.addCleanup(lambda: locked.chmod(0o700))
+        result = library.import_folders([self.source])
+        self.assertEqual(result['skipped'], 2)
+        self.assertEqual(result['errors'], 1)
+        self.assertEqual(library.setting('import_failures'),
+                         [dict(path=str(locked), error='FolderDiscoveryError')])
+        self.assertEqual(library.query()['total'], 0)
+        self.assertTrue((self.source/'pipe.jpg').exists())
+
+
 class MetadataImportTest(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
