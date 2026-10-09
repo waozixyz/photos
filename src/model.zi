@@ -135,6 +135,13 @@ guest_active: bool;
 guest_configured: bool;
 guest_poll: s64;
 guest_valid_until: s64;
+app_lock_enabled: bool;
+app_locked: bool;
+app_lock_token: [65]u8;
+app_lock_poll: s64;
+app_lock_valid_until: s64;
+app_lock_auth_pending: bool;
+app_lock_check_pending: bool;
 edit_value: [8193]u8;
 detail_id: [65]u8;
 detail_caption: [8193]u8;
@@ -245,6 +252,7 @@ SendRequest :: (action: string, id: string, value: string) {
     Property(*out, "memory_date", TextUntilNul(memory_date[:]))
     Property(*out, "edit_session", TextUntilNul(edit_session[:]))
     Property(*out, "vault_token", TextUntilNul(vault_token[:]))
+    Property(*out,"app_lock_token",TextUntilNul(app_lock_token[:]))
     Property(*out, "video_job", TextUntilNul(video_job[:]))
     BuilderPrint(*out,",\"lane_year\":%",lane_year)
     if slide_request {
@@ -266,9 +274,11 @@ SendRequest :: (action: string, id: string, value: string) {
     BuilderPrint(*out, ",\"offset\":%}", offset)
     request := BuilderFinish(out)
     loading = Transport.Start(request)
+    app_lock_auth_pending = loading && (action == "app_lock_unlock" || action == "app_lock_enable" || action == "app_lock_disable")
+    app_lock_check_pending = loading && action == "app_lock_check"
     Release(request)
     if !loading { Set(message[:], Transport.error); if appending { more_due = ticks + 300; appending = false } }
-    busy = loading && action != "query" && action != "playback_check" && action != "text_check" && !slide_request && !qr_request && !collage_request; next_refresh = ticks + 300
+    busy = loading && action != "query" && action != "playback_check" && action != "text_check" && !app_lock_check_pending && !slide_request && !qr_request && !collage_request; next_refresh = ticks + 300
 }
 HeaderField :: struct { key: [65]u8; at: s32 }
 header_fields: [64]HeaderField;
@@ -351,7 +361,9 @@ Tick :: () {
     if !initialized { initialized = true; Request() }
     if Transport.Poll() {
         loading = false; busy = false
-        if Transport.error != "" { if guest_active { ClearGuestDisplay() }; Set(message[:], Transport.error); if slide_active { StopSlides() }; if editor == "collage" { RevokeCollage() }; if editor == "text" || editor == "qr" { CancelEditor() }; if playback_id[0] != 0 { StopPlayback() }; if appending { more_due = ticks + 300; appending = false }; return }
+        app_lock_check_pending = false
+        app_auth_response := app_lock_auth_pending; app_lock_auth_pending = false
+        if Transport.error != "" { if guest_active { ClearGuestDisplay() } else if app_lock_enabled { EnterAppLock() }; Set(message[:], Transport.error); if slide_active { StopSlides() }; if editor == "collage" { RevokeCollage() }; if editor == "text" || editor == "qr" { CancelEditor() }; if playback_id[0] != 0 { StopPlayback() }; if appending { more_due = ticks + 300; appending = false }; return }
         json := Transport.Value()
         ReadHeader(json)
         if Lookup(json,0,"guest_configured") >= 0 { guest_configured = Number(json,0,"guest_configured") > 0 }
@@ -364,6 +376,20 @@ Tick :: () {
             if guest_active { now = Clock.Milliseconds(); guest_poll = now+500; guest_valid_until = now+2500 }
         }
         if guest_active && Lookup(json,0,"error") >= 0 { ClearGuestDisplay() }
+        if !guest_active {
+            // A query or heartbeat submitted before the access lease expired
+            // cannot bring the private gallery back. Only a new auth response
+            // or authenticated Guest exit may reopen it.
+            if app_locked && !app_auth_response && Number(json,0,"guest_exit_authorized") != 1 && Number(json,0,"app_locked") == 0 { return }
+            if app_lock_enabled && Lookup(json,0,"app_locked") < 0 { EnterAppLock(); Set(message[:],"App authentication is unavailable; unlock to retry"); return }
+            if Lookup(json,0,"app_lock_enabled") >= 0 { app_lock_enabled = Number(json,0,"app_lock_enabled") > 0 }
+            if Lookup(json,0,"app_locked") >= 0 && Number(json,0,"app_locked") > 0 {
+                EnterAppLock(); Decode(json,0,"status",message[:]); if Lookup(json,0,"error") >= 0 { Decode(json,0,"error",message[:]) }; return
+            }
+            if Lookup(json,0,"app_locked") >= 0 { app_locked = false; app_lock_valid_until = Clock.Milliseconds()+2500; app_lock_poll = Clock.Milliseconds()+500 }
+            if Lookup(json,0,"app_lock_token") >= 0 { Decode(json,0,"app_lock_token",app_lock_token[:]) }
+            if Number(json,0,"app_lock_checked") == 1 { return }
+        }
         if collage_request {
             collage_request = false
             Decode(json,0,"error",message[:]); if editor != "collage" { return }
@@ -437,7 +463,7 @@ Tick :: () {
             if saved[0] != 0 && (editor == "video" || editor == "video_trim") { editor = ""; edit_preview[0] = 0; edit_session[0] = 0 }
             if saved[0] != 0 && editor == "collage" { Collage.Clear(); editor = "" }
         }
-        Decode(json, 0, "error", message[:]); if message[0] != 0 { if appending { more_due = ticks + 300; appending = false }; return }
+        Decode(json, 0, "error", message[:]); if message[0] != 0 { if !app_lock_enabled && StartsWithFoldASCII(editor,"app_lock_") { CancelEditor() }; if appending { more_due = ticks + 300; appending = false }; return }
         if view == "map" { Map.Load(json) }
         total = Number(json, 0, "total"); matches = Number(json, 0, "count"); pending = Number(json, 0, "pending")
         Decode(json, 0, "status", message[:])
@@ -545,6 +571,12 @@ Tick :: () {
         if !loading && playback_id[0] != 0 && ticks >= playback_poll { playback_poll = ticks+30; Request("playback_check",TextUntilNul(playback_id[:])); return }
         if !loading && now >= guest_poll { guest_poll = now+500; Request(); return }
         return
+    }
+    if app_locked { return }
+    if app_lock_enabled {
+        now = Clock.Milliseconds()
+        if app_lock_valid_until > 0 && now >= app_lock_valid_until { EnterAppLock(); Set(message[:],"App authentication is unavailable; unlock to retry"); return }
+        if !loading && now >= app_lock_poll { app_lock_poll = now+500; Request("app_lock_check"); return }
     }
     if slide_active {
         if !loading && !slide_paused && slide_id[0] != 0 && now >= slide_due { MoveSlide(1); return }
@@ -679,8 +711,14 @@ Apply :: (action: string, value: string = "") {
     Request(action, id, value)
 }
 SaveEditor :: () {
-    if loading { return }
+    if loading && !app_lock_check_pending { return }
     if editor == "guest_exit" { Request("guest_exit","",TextUntilNul(edit_value[:])); Wipe(edit_value[:]); cursor = 0; anchor = 0; return }
+    if StartsWithFoldASCII(editor,"app_lock_") {
+        enabling := editor == "app_lock_enable"
+        Request(editor,"",TextUntilNul(edit_value[:])); Wipe(edit_value[:]); cursor = 0; anchor = 0
+        if enabling { app_lock_enabled = true; EnterAppLock() }
+        return
+    }
     if editor == "place_name" {
         if edit_value[0] == 0 || TextUntilNul(edit_value[:]).count > 512 { Set(message[:], "Choose a place name of at most 512 bytes"); return }
         Set(place_name[:], TextUntilNul(edit_value[:]))
@@ -718,7 +756,7 @@ Wipe :: (bytes: []u8) { for i: 0..cast(s32)bytes.count - 1 { bytes[i] = 0 } }
 PlaybackState :: () -> s32 { return Playback.State() }
 PlaybackPosition :: () -> s64 { return Playback.Position() }
 PlaybackDuration :: () -> s64 { return Playback.Duration() }
-Secret :: () -> bool { return StartsWithFoldASCII(editor, "vault_") || editor == "guest_exit" }
+Secret :: () -> bool { return StartsWithFoldASCII(editor, "vault_") || StartsWithFoldASCII(editor,"app_lock_") || editor == "guest_exit" }
 CancelEditor :: () { TextDetection.Clear(); QRDetection.Clear(); Collage.Clear(); editor = ""; focused = false; Wipe(edit_value[:]); Wipe(vault_first[:]) }
 ClearGuestDisplay :: () {
     StopPlayback(); StopSlides(); Viewer.Reset(); TextDetection.Clear(); QRDetection.Clear(); Collage.Clear()
@@ -733,7 +771,15 @@ ResetGuest :: () {
     queued_request = false; queued_view = -1; queued_action[0] = 0; queued_id[0] = 0; Wipe(queued_value[:]); appending = false
     collage_request = false; slide_request = false; text_request = false; qr_request = false; playback_request = false
     offset = 0; feed_base = 0; scroll = 0; view = "photos"; search_focused = false
+    Wipe(app_lock_token[:])
 }
+EnterAppLock :: () {
+    if !app_locked { ResetGuest(); BeginEdit("app_lock_unlock","Unlock Photos","","Your local Hidden password") }
+    else { ClearGuestDisplay() }
+    app_locked = true; app_lock_valid_until = 0; Wipe(app_lock_token[:])
+}
+AppLockReady :: () -> bool { return !loading || app_lock_check_pending }
+LockApp :: () { if !AppLockReady() || !app_lock_enabled { return }; EnterAppLock(); Request("app_lock_lock") }
 BeginGuest :: () {
     if loading || view == "hidden" || view == "trash" { return }
     id := ifx selected >= 0 && selected < count then TextUntilNul(photos[selected].id[:]) else ""

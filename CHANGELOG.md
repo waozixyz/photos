@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.38
+
+- Protect opening Photos with your local Hidden password, using a separate app session that leaves Hidden locked.
+- Lock the app manually and require authentication after restarting, changing the local password or losing the library service.
+- Clear photos, playback and derived previews when app access ends, and keep delayed permission responses from reopening the library.
+- Preserve originals, account keys and backup settings when enabling or disabling app lock; background lock timers and separate PIN options remain unfinished.
+
 ## 0.1.37
 
 - Keep large Guest view selections in their chosen order across pages, including selections of 1000 photos and videos.

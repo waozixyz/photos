@@ -11,6 +11,7 @@ from .library import Library, LibraryError, atomic, packed
 from .sync import Client
 from . import vault
 from . import guest
+from . import app_lock
 
 
 def configuration():
@@ -24,7 +25,32 @@ def process(request, config):
     library = Library(config['root'])
     try:
         with guest.guard:
-            return library_request(library, request, config)
+            if guest.scope(library) is not None:
+                result = library_request(library, request, config)
+                if result.get('guest_exit_authorized') == 1 and app_lock.enabled(library):
+                    # Guest exit has already authenticated the same local
+                    # password. Return a fresh, separate app session only.
+                    token = app_lock.grant(library)
+                    result.update(app_lock.state(library, token), app_lock_token=token)
+                return result
+            result = app_lock.route(library, request)
+            if result is not None:
+                if result.get('app_lock_authorized') == 1 or (result.get('app_lock_changed') == 1 and not result['app_locked']):
+                    gallery = ui_query(library, dict(view='photos', gallery_format=request.get('gallery_format')))
+                    gallery.update({key: value for key, value in result.items()
+                                    if key not in {'photos', 'albums', 'count', 'total', 'pending'}})
+                    if app_lock.state(library, result.get('app_lock_token', ''))['app_locked']:
+                        return app_lock.empty(library)
+                    return gallery
+                return result
+            result = library_request(library, request, config)
+            if result.get('guest_active') == 1:
+                app_lock.revoke(library)
+                return result
+            state = app_lock.state(library, request.get('app_lock_token', ''))
+            # A decode, export or native query may outlast the session. Do not
+            # return gallery, original or derived paths after access expires.
+            return app_lock.empty(library) if state['app_locked'] else {**result, **state}
     finally:
         library.db.close()
 

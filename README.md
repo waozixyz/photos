@@ -317,6 +317,24 @@ uses device authentication; system authentication and phone gestures remain
 unfinished here. Guest view is an app access restriction; local originals retain
 their existing storage format.
 
+App lock adds opening protection to the standalone app and Harmony's Photos
+view. Open App lock in the sidebar, create your local Hidden password first if
+needed, then enter that password to enable the lock. Unlock Photos uses a separate
+local app session and leaves Hidden locked. Lock now closes viewing and editing
+and revokes local app sessions. Turn off app lock also requires your password.
+The enabled setting survives restart and stays local to this device. A service
+restart, changed password or expired session requires authentication again.
+Permission checks continue while viewing; an unavailable service clears photos,
+playback, extracted text and other previews within a short access lease. A stale
+query or permission response cannot reopen the library after it locks.
+Originals, account keys and encrypted ThinkPad backup remain unchanged.
+This currently provides opening and manual locking with the shared Hidden
+password. Separate app PIN/password options, background auto-lock timers,
+system authentication and phone app-switcher hiding remain unfinished compared
+with [Ente app lock](https://ente.com/help/photos/features/account/app-lock).
+The screen and its access-expiry decisions are Ziran/Kryon; the local session
+adapter still uses Python and the existing native Argon2id verifier.
+
 This version is a local photo library with sync, not complete Ente feature parity.
 
 Create collage combines two through six visible photos or Live Photo stills.
