@@ -148,6 +148,11 @@ selects the photos already loaded into the feed, including those outside the
 visible rows; scrolling loads more. Apply favorites, hiding, Trash, restore, album
 membership, corrected dates or export to the selection. Bulk property changes
 set the chosen state consistently, including selections with mixed states.
+Favorites, Hidden, Archive, Trash, restore, captions and tags are written by the
+native Ziran SQLite editor in one transaction. Live Photo components are checked
+together, and expired Hidden access or an interrupted pre-save operation rolls
+back the selection. The local authorization adapter retains unlock tokens in
+the existing service process and grants a short access lease through a private pipe.
 Album removal keeps the photo in the library; an album can be renamed without
 changing its originals or other album memberships. Create an empty album from
 Albums, and edit its description, pin it or archive it from the album view.
@@ -395,8 +400,9 @@ The remaining replacement work includes:
   Any sharing design needs to honor the owner's ThinkPad-only sync restriction.
 - System authentication, Hidden password recovery and a deliberate deletion/retention policy.
 - A complete Ziran library/sync service. The native UI, portable app, gallery/search
-  engine, image processor and password verifier are Ziran/Kryon; the SQLite importer,
-  metadata mutation service and encrypted sync worker remain Python.
+  engine, image processor, password verifier and photo-property writer are Ziran/Kryon.
+  Album/date/location/name mutations, the importer, authorization adapter and encrypted
+  sync worker remain Python.
 
 Choose Play video to watch a video in the Photos window. Pause/resume, Replay,
 the position slider, five-second seek buttons, volume and Mute work offline.

@@ -11,7 +11,7 @@ import time
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, os.environ.get('PHOTOS_SERVICE_PACKAGE', str(ROOT)))
 from photos.library import Library
 from photos.service import Server
 import photos.service as service_module
@@ -39,7 +39,7 @@ with tempfile.TemporaryDirectory() as folder:
         locked = [] if (ROOT / 'ziran.local.toml').exists() else ['--locked']
         kryon = Path(subprocess.check_output(['ziran', 'pkg', 'path', 'kryon', *locked], cwd=ROOT, text=True).strip())
         player = Path(os.environ.get('PHOTOS_PLAYER', kryon / 'build/bin/zib'))
-        process = subprocess.Popen([str(player), str(ROOT / 'build/photos-portable.zib')], env=env)
+        process = subprocess.Popen([str(player), os.environ.get('PHOTOS_BUNDLE',str(ROOT / 'build/photos-portable.zib'))], env=env)
         def xdo(*args):
             if args == ('click', '1'):
                 subprocess.check_call(['xdotool', 'mousedown', '1'])

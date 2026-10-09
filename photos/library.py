@@ -428,6 +428,9 @@ class Library:
         self.edit_many([photo_id], action, value, authorize=authorize)
 
     def edit_many(self, photo_ids, action, value=None, authorize=None):
+        from . import native_edit
+        if action in native_edit.ACTIONS:
+            return native_edit.change(self, photo_ids, action, value, authorize)
         if not isinstance(photo_ids, list) or not 0 < len(photo_ids) <= 1000 or any(not isinstance(i, str) for i in photo_ids):
             raise LibraryError('Select between 1 and 1000 photos')
         # Acquire the writer before reading, and roll back the whole selection
@@ -458,22 +461,7 @@ class Library:
     def _edit(self, photo_id, action, value=None):
         photo = self.photo(photo_id)
         edits = json.loads(photo['edits'])
-        if action in {'favorite', 'hidden', 'archived', 'favorite_set', 'hidden_set', 'archived_set'}:
-            field = action.removesuffix('_set')
-            if action.endswith('_set') and str(value) not in {'0', '1'}:
-                raise LibraryError('Choose whether to enable this property')
-            enabled = int(value) if action.endswith('_set') else int(not photo[field])
-            self.db.execute(f'UPDATE photos SET {field}=?,updated=?,dirty=1 WHERE id=?',
-                            (enabled, time.time(), photo_id))
-        elif action in {'trash', 'restore'}:
-            self.db.execute('UPDATE photos SET trashed=?,updated=?,dirty=1 WHERE id=?',
-                            (int(time.time()) if action == 'trash' else 0, time.time(), photo_id))
-        elif action in {'caption', 'tags'}:
-            if not isinstance(value, str) or len(value.encode()) > 8192:
-                raise LibraryError('Enter at most 8192 bytes of text')
-            self.db.execute(f'UPDATE photos SET {action}=?,updated=?,dirty=1 WHERE id=?',
-                            (value, time.time(), photo_id))
-        elif action in {'album_add', 'album_remove'}:
+        if action in {'album_add', 'album_remove'}:
             albums = set(json.loads(photo['albums']))
             name = self.album_name(value)
             definition = self.db.execute('SELECT filter FROM albums WHERE name=? AND deleted=0', (name,)).fetchone()

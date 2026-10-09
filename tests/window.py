@@ -8,7 +8,7 @@ import tempfile
 import time
 import sys
 import threading
-sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0,os.environ.get('PHOTOS_SERVICE_PACKAGE',str(Path(__file__).resolve().parents[1])))
 from PIL import Image
 from photos.library import Library
 from photos.service import Server
@@ -40,7 +40,7 @@ with tempfile.TemporaryDirectory() as folder:
     service_module.process=record_request
     service=Server(dict(root=str(library.root),sources=[]),folder/'kryon/services/photos.sock')
     threading.Thread(target=service.serve_forever,daemon=True).start()
-    process=subprocess.Popen([str(ROOT/'build/photos-desktop')],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+    process=subprocess.Popen([os.environ.get('PHOTOS_BINARY',str(ROOT/'build/photos-desktop'))],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
     def xdo(*args):
         if args == ('click','1'):
             subprocess.check_call(['xdotool','mousedown','1'])

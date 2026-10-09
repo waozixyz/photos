@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.27
+
+- Keep photo-property edits atomic across selections and paired Live Photos, and roll back the whole edit if Hidden access expires before saving.
+- Retain Unicode captions and tags, source originals and queued backup edits during interruptions or invalid selections.
+
 ## 0.1.26
 
 - Play Samsung HEIC Motion Photos while preserving their camera metadata and complete combined originals.

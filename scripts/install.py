@@ -63,6 +63,12 @@ def main():
     gallery = repo/'build/library-query/library_query'
     if not gallery.is_file():
         parser.error('Build the Photos gallery engine before installing')
+    editor = repo/'build/library-editor/library_edit'
+    if not editor.is_file():
+        parser.error('Build the Photos property editor before installing')
+    shutil.copyfile(editor,installed/'library_edit.next')
+    os.chmod(installed/'library_edit.next',0o755)
+    os.replace(installed/'library_edit.next',installed/'library_edit')
     video = repo/'build/video-editor/video_edit'
     if not video.is_file():
         parser.error('Build the Photos video editor before installing')

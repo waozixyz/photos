@@ -13,7 +13,7 @@ from .library import LibraryError, atomic, packed
 
 sessions = {}
 failures = {}
-guard = threading.Lock()
+guard = threading.RLock()
 SESSION_SECONDS = 600
 
 
@@ -35,6 +35,12 @@ def lock(library, token):
     with guard:
         if isinstance(token, str) and sessions.get(token, ('',))[0] == str(library.root):
             sessions.pop(token, None)
+
+
+def deadline(library, token):
+    with guard:
+        entry = sessions.get(token) if isinstance(token, str) else None
+        return entry[1] if entry and entry[0] == str(library.root) else 0
 
 
 def state(library, token=''):

@@ -1,4 +1,7 @@
 .DEFAULT_GOAL := build
+.PHONY: library-editor
+library-editor:
+	LDLIBS='-l:libsqlite3.so.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry library_edit:main --exe -o build/library-editor src/library_edit.zi
 .PHONY: motion-engine
 motion-engine:
 	LDLIBS='-lxml2 -l:libheif.so.1 -lglib-2.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry motion_photo:main --exe -o build/motion-photo src/motion_photo.zi
@@ -66,13 +69,13 @@ vault-auth:
 	LDLIBS='-l:libsodium.so.23' "$$ziran_source/build/bin/ziran" build --root src --target=c --entry vault_auth:main --exe -o build/vault-auth src/vault_auth.zi
 library-query:
 	LDLIBS='-l:libsqlite3.so.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry library_query:main --exe -o build/library-query src/library_query.zi
-build: image-editor video-editor vault-auth library-query photo-decoder semantic-engine text-engine face-engine qr-engine motion-engine
+build: library-editor image-editor video-editor vault-auth library-query photo-decoder semantic-engine text-engine face-engine qr-engine motion-engine
 	$(ZIRAN) build $(PACKAGE_FLAGS)
 	cp scripts/worker.py build/
 	cp -r photos build/
-bundle: image-editor video-editor vault-auth library-query photo-decoder semantic-engine text-engine face-engine qr-engine motion-engine
+bundle: library-editor image-editor video-editor vault-auth library-query photo-decoder semantic-engine text-engine face-engine qr-engine motion-engine
 	$(ZIRAN) tool kryon build portable $(PACKAGE_FLAGS)
-test: image-editor video-editor vault-auth library-query photo-decoder semantic-engine text-engine face-engine qr-engine motion-engine
+test: library-editor image-editor video-editor vault-auth library-query photo-decoder semantic-engine text-engine face-engine qr-engine motion-engine
 	$(PYTHON) -m unittest discover -s tests -v
 sync-test:
 	$(PYTHON) tests/sync_node.py

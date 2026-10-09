@@ -145,6 +145,7 @@ def library_request(library, request, config):
         return ui_query(library, request)
     def authorize(photo):
         return not photo['hidden'] or vault.unlocked(library, request.get('vault_token', ''))
+    authorize.deadline = lambda: vault.deadline(library, request.get('vault_token', ''))
     def require_access(photo_id):
         if not authorize(library.photo(photo_id)):
             raise LibraryError('Hidden is locked; authenticate before opening or changing hidden photos')
