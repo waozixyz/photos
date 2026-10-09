@@ -60,7 +60,7 @@ LayoutFeed :: (cols: s32, height: float32) -> float32 {
     for i: 0..Model.count - 1 {
         group := i == 0
         if i > 0 { group = TextUntilNul(Model.photos[i].date[:]) != TextUntilNul(Model.photos[i-1].date[:]) }
-        if Model.view == "large" || Model.view == "similar" { group = false }
+        if Model.view == "large" || Model.view == "similar" || Model.view == "similar_groups" { group = false }
         if group { if column > 0 { y += height }; column = 0; y += 42.0 }
         unused VecPush(item_y, y); unused VecPush(item_column, column); unused VecPush(group_start, group)
         column += 1; if column >= cols { column = 0; y += height }
@@ -695,6 +695,14 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
             "place:\"Home\"   ·   near:-25.3,-57.6,2 (radius in km)"}
         for i: 0..8 { Label(session, cast(u64)(711 + i), tips[i], .{x + 12.0, body.y + 68.0 + cast(float32)i * 34.0, width - 24.0, 30.0}, 14) }
         if Action(session, 319, "Back", .{x + 12.0, body.y + 390.0, 94.0, 38.0}) { Model.CancelEditor() }
+    } else if Model.editor == "similar_cleanup" {
+        Label(session,672,"Keep reference and preserve albums",.{x+12.0,body.y+12.0,width-24.0,34.0},22)
+        explanation: Vec(u8); BuilderPrint(*explanation,"Move % selected matches to recoverable Trash?",Model.picked_count)
+        text := BuilderFinish(explanation); Label(session,673,text,.{x+12.0,body.y+64.0,width-24.0,34.0},18); Model.Release(text)
+        Label(session,674,"Their regular albums and covers will use the reference photo.",.{x+12.0,body.y+108.0,width-24.0,30.0},15)
+        Label(session,675,"Unselected matches stay as they are. Original files remain recoverable.",.{x+12.0,body.y+146.0,width-24.0,30.0},15)
+        if Action(session,676,"Keep reference",.{x+12.0,body.y+202.0,168.0,38.0},Model.AppLockReady()) { Model.ConfirmSimilarCleanup() }
+        if Action(session,677,"Cancel",.{x+192.0,body.y+202.0,104.0,38.0},!Model.loading) || key == Input.KeyEscape { Model.CancelEditor() }
     } else if Model.editor != "" {
         Label(session, 91, Model.editor_title, .{x + 12.0, body.y + 12.0, width - 24.0, 34.0}, 22)
         committed := Field(session, .{x + 12.0, body.y + 64.0, width - 24.0, 44.0}, false, key, modifiers, typed)
@@ -735,6 +743,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
             Model.Apply("swipe_selection",ifx Model.swipe_selection_enabled then "off" else "on")
         }
         if Action(session,664,"Large files",.{x+244.0,body.y+520.0,148.0,38.0},!Model.loading) { Model.LargeFiles() }
+        if Action(session,679,"Similar groups",.{x+408.0,body.y+520.0,162.0,38.0},!Model.loading) { Model.SimilarGroups() }
     } else if Model.selected >= 0 && Model.selected < Model.count {
         photo: *Photo = *Model.photos[Model.selected]
         if Action(session, 50, "Back", .{x, body.y, 68.0, 36.0}) { Model.selected = -1; Viewer.Reset(); return 0 }
@@ -843,10 +852,20 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
             body.y += 44.0; body.height -= 44.0
         }
         if !Model.CatalogView() {
+            if Model.view == "similar_groups" {
+                Label(session,680,"Similar groups · across your indexed library",.{x,body.y,width,30.0},20)
+                Label(session,681,"Open a reference to review matches · approximate discovery may miss a set",.{x,body.y+34.0,width,26.0},14)
+                body.y += 70.0; body.height -= 70.0
+            }
             if Model.view == "similar" {
                 Label(session,670,"Similar photos · local ML matches",.{x,body.y,width,30.0},20)
-                Label(session,671,"Review matches individually · existing album and Trash actions are available",.{x,body.y+34.0,width,26.0},14)
+                Label(session,671,"Select unwanted matches, then keep the reference with their albums",.{x,body.y+34.0,width,26.0},14)
                 body.y += 70.0; body.height -= 70.0
+                if Action(session,682,"All similar groups",.{x+width-178.0,body.y-70.0,178.0,36.0},!Model.loading) { Model.SimilarGroups() }
+                if Model.picked_count > 0 {
+                    if Action(session,678,"Keep reference & albums",.{x,body.y,242.0,36.0},!Model.loading && Model.semantic_enabled) { Model.CleanupSimilar() }
+                    body.y += 44.0; body.height -= 44.0
+                }
             }
             if Model.view == "large" {
                 Label(session,665,"Large files · backed-up originals over 10 MiB",.{x,body.y,width,30.0},20)
@@ -1020,6 +1039,12 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                     label: Vec(u8); unit: s64 = 1048576; suffix := "MiB"
                     if photo.storage_size >= 1073741824 { unit = 1073741824; suffix = "GiB" }
                     BuilderPrint(*label,"%.% %",photo.storage_size/unit,(photo.storage_size%unit)*10/unit,suffix)
+                    text := BuilderFinish(label)
+                    badge: BoxProps; badge.key = cast(u64)(2400000+i); badge.bounds = .{bx+6.0,by+cell-32.0,cell-12.0,26.0}; badge.fill = BackgroundColor(); Box(session,badge)
+                    Label(session,cast(u64)(2500000+i),text,.{bx+12.0,by+cell-30.0,cell-24.0,22.0},13); Model.Release(text)
+                }
+                if Model.view == "similar_groups" {
+                    label: Vec(u8); BuilderPrint(*label,"% similar photos · review",photo.group_size)
                     text := BuilderFinish(label)
                     badge: BoxProps; badge.key = cast(u64)(2400000+i); badge.bounds = .{bx+6.0,by+cell-32.0,cell-12.0,26.0}; badge.fill = BackgroundColor(); Box(session,badge)
                     Label(session,cast(u64)(2500000+i),text,.{bx+12.0,by+cell-30.0,cell-24.0,22.0},13); Model.Release(text)

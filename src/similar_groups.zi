@@ -1,0 +1,98 @@
+// Transient, approximate library-wide discovery. Every reported match passes
+// the full native cosine threshold; per-photo review still searches all vectors.
+using SQLite :: #import "sqlite/SQLite";
+LivePhoto :: #import "live_photo";
+Semantic :: #import "semantic";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+c :: #system_library "c";
+Allocate :: (count: usize, size: usize) -> *void #foreign c "calloc";
+Free :: (memory: *void) #foreign c "free";
+Copy :: (out: *void, bytes: *void, count: usize) -> *void #foreign c "memcpy";
+Entry :: struct { id: [65]u8; values: [512]float32; next: [64]s32; signatures: [64]s32; owner: s32; seen: s32; norm: float64 }
+Signature :: (values: []float32, band: s32) -> s32 {
+    key: s32
+    for bit: 0..11 {
+        dimension := (band*7+bit*31)%512
+        key = key*2; if values[dimension] >= 0.0 { key += 1 }
+    }
+    return key
+}
+Matches :: (first: *Entry, second: *Entry) -> bool {
+    distance: float64; score: float64
+    bound := first.norm+second.norm-1.8
+    for dimension: 0..511 {
+        a := cast(float64)first.values[dimension]; b := cast(float64)second.values[dimension]
+        difference := a-b; distance += difference*difference
+        if distance > bound+0.000000001 { return false }
+        score += a*b
+    }
+    return score >= 0.90
+}
+Populate :: (database: *void) -> string {
+    if SqliteExecText(database,"CREATE TEMP TABLE photos_similar_groups(id TEXT PRIMARY KEY,members INTEGER)") != SQLITE_OK { return "Cannot initialize similar-photo discovery" }
+    enabled: *void
+    if SqlitePrepareText(database,"SELECT value FROM settings WHERE key='semantic_enabled'",-1,*enabled,null) != SQLITE_OK { return "Cannot read local ML settings" }
+    active := SqliteStep(enabled) == SQLITE_ROW && TextFromCString(SqliteColumnText(enabled,0)) == "true"
+    unused SqliteFinalize(enabled); if !active { return "" }
+    sql: Vec(u8)
+    BuilderPrint(*sql,"SELECT photos.id,e.embedding FROM photos JOIN semantic_embeddings e ON e.photo_id=photos.id WHERE photos.kind='photo' AND photos.hidden=0 AND photos.trashed=0 AND e.model=? AND e.error='' AND % ORDER BY photos.taken DESC,photos.id",LivePhoto.GallerySQL)
+    rows: *void
+    if SqlitePrepareText(database,BuilderFinish(sql),-1,*rows,null) != SQLITE_OK { return "Cannot read local image indexes" }
+    defer { unused SqliteFinalize(rows) }
+    if SqliteBindTextString(rows,1,Semantic.Model,-1) != SQLITE_OK { return "Cannot read local image indexes" }
+    // Allocate a bounded arena once. A library beyond this bound fails visibly
+    // rather than returning a partial list or exposing an unchecked index.
+    entries := cast(*Entry)Allocate(65536,size_of(Entry))
+    heads := cast(*s32)Allocate(64*4096,size_of(s32))
+    if entries == null || heads == null { Free(cast(*void)entries); Free(cast(*void)heads); return "Not enough memory for similar-photo discovery" }
+    defer { Free(cast(*void)entries); Free(cast(*void)heads) }
+    for i: 0..64*4096-1 { heads[i] = -1 }
+    count: s32
+    while true {
+        status := SqliteStep(rows); if status == SQLITE_DONE { break }
+        if status != SQLITE_ROW { return "Cannot read local image indexes" }
+        if SqliteColumnType(rows,1) != SQLITE_BLOB || SqliteColumnBytes(rows,1) != 2048 { continue }
+        if count >= 65536 { return "Similar-photo discovery supports up to 65536 indexed photos; use Find similar to review a photo" }
+        entry := *entries[count]; entry.norm = 0.0
+        bytes := SqliteColumnBlob(rows,1); if bytes == null { continue }
+        unused Copy(cast(*void)*entry.values[0],cast(*void)bytes,2048)
+        valid: bool = true
+        for dimension: 0..511 {
+            value := cast(float64)entry.values[dimension]
+            if value != value || value < -1.001 || value > 1.001 { valid = false; break }
+            entry.norm += value*value
+        }
+        if !valid || entry.norm < 0.99 || entry.norm > 1.01 { continue }
+        identity := TextFromCString(SqliteColumnText(rows,0)); if identity.count != 64 { continue }
+        for i: 0..63 { entry.id[i] = identity[i] }; entry.id[64] = 0
+        entry.owner = -1; entry.seen = -1
+        for band: 0..63 {
+            key := Signature(entry.values[:],cast(s32)band); entry.signatures[band] = key
+            slot := band*4096+key; entry.next[band] = heads[slot]; heads[slot] = count
+        }
+        count += 1
+    }
+    insert: *void
+    if SqlitePrepareText(database,"INSERT INTO photos_similar_groups VALUES(?,?)",-1,*insert,null) != SQLITE_OK { return "Cannot collect similar-photo groups" }
+    defer { unused SqliteFinalize(insert) }
+    for i: 0..count-1 {
+        reference := *entries[i]; if reference.owner >= 0 { continue }
+        reference.owner = i; members: s32 = 1
+        for band: 0..63 {
+            candidate := heads[band*4096+reference.signatures[band]]
+            while candidate >= 0 {
+                other := *entries[candidate]
+                if other.owner < 0 && other.seen != i {
+                    other.seen = i
+                    if Matches(reference,other) { other.owner = i; members += 1 }
+                }
+                candidate = other.next[band]
+            }
+        }
+        if members < 2 { continue }
+        unused SqliteReset(insert); unused SqliteClearBindings(insert)
+        if SqliteBindTextString(insert,1,TextFromCString(*reference.id[0]),64) != SQLITE_OK || SqliteBindInt(insert,2,members) != SQLITE_OK || SqliteStep(insert) != SQLITE_DONE { return "Cannot collect similar-photo groups" }
+    }
+    return ""
+}

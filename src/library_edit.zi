@@ -4,6 +4,7 @@ using SQLite :: #import "sqlite/SQLite";
 Album :: #import "album_edit";
 AlbumDetails :: #import "album_details";
 Metadata :: #import "metadata_input";
+Cleanup :: #import "similar_cleanup";
 #import "std/byte_text_linux"
 #import "std/json_scan"
 #import "std/text_buffer"
@@ -52,10 +53,10 @@ Copy :: (text: string, bytes: []u8) -> bool {
     if text.count >= bytes.count { return false }
     for i: 0..text.count-1 { bytes[i] = text[i] }; bytes[text.count] = 0; return true
 }
-Photo :: struct { id: [65]u8; kind: [8]u8; hidden: bool; video: [65]u8; still: [65]u8; keys: s32; extension: [20]u8 }
+Photo :: struct { id: [65]u8; kind: [8]u8; hidden: bool; video: [65]u8; still: [65]u8; keys: s32; extension: [20]u8; trashed: bool }
 Load :: (database: *void, id: string, photo: *Photo) -> bool {
     statement: *void
-    sql := "SELECT kind,hidden,json_type(metadata,'$.photosLive'),coalesce(json_extract(metadata,'$.photosLive.video'),''),coalesce(json_extract(metadata,'$.photosLive.photo'),''),(SELECT count(*) FROM json_each(photos.metadata,'$.photosLive')),extension FROM photos WHERE id=?"
+    sql := "SELECT kind,hidden,json_type(metadata,'$.photosLive'),coalesce(json_extract(metadata,'$.photosLive.video'),''),coalesce(json_extract(metadata,'$.photosLive.photo'),''),(SELECT count(*) FROM json_each(photos.metadata,'$.photosLive')),extension,trashed FROM photos WHERE id=?"
     if SqlitePrepareText(database,sql,-1,*statement,null) != SQLITE_OK { return false }
     defer { unused SqliteFinalize(statement) }
     if SqliteBindTextString(statement,1,id,cast(s32)id.count) != SQLITE_OK || SqliteStep(statement) != SQLITE_ROW { return false }
@@ -63,6 +64,7 @@ Load :: (database: *void, id: string, photo: *Photo) -> bool {
         !Copy(TextFromCString(SqliteColumnText(statement,3)),photo.video[:]) || !Copy(TextFromCString(SqliteColumnText(statement,4)),photo.still[:]) ||
         !Copy(TextFromCString(SqliteColumnText(statement,6)),photo.extension[:]) { return false }
     photo.hidden = SqliteColumnInt(statement,1) != 0; photo.keys = SqliteColumnInt(statement,5)
+    photo.trashed = SqliteColumnInt64(statement,7) != 0
     type := TextFromCString(SqliteColumnText(statement,2)); return type == "" || type == "object"
 }
 Add :: (photos: []Photo, count: *s32, photo: Photo) -> bool {
@@ -119,7 +121,8 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if action == "hidden" || action == "hidden_set" { property = "hidden" }
     if action == "archived" || action == "archived_set" { property = "archived" }
     text := action == "caption" || action == "tags"
-    trash := action == "trash" || action == "restore"
+    cleanup := action == "similar_cleanup"
+    trash := action == "trash" || action == "restore" || cleanup
     album := action == "album_add" || action == "album_remove"
     date := action == "taken"; location := action == "location"; rename := action == "rename"
     if property == "" && !text && !trash && !album && !date && !location && !rename { return Failure("Unknown native photo action") }
@@ -162,10 +165,23 @@ main :: (argc: s32, argv: **u8) -> s32 {
     unused SqliteBusyTimeout(database,5000)
     if SqliteExecText(database,"BEGIN IMMEDIATE") != SQLITE_OK { return Failure("The library is busy; try again") }
     defer { unused SqliteExecText(database,"ROLLBACK") }
-    photos: [2000]Photo; count: s32; hidden: bool
+    photos: [2002]Photo; count: s32; hidden: bool
+    reference := TextFromBytes(valueBytes[:ifx valueLength > 0 then valueLength else 0])
+    if cleanup && (!Identity(reference) || !Cleanup.Ready(database,reference) || !Cleanup.Begin(database)) { return Failure("Enable local ML and choose an indexed visible reference photo") }
     for i: 0..requested-1 {
         id: [65]u8
         if ReadStringText(json,offsets[i],id[:]) != 64 || !Expand(database,TextFromCString(*id[0]),photos[:],*count) { return Failure("Photo not found or Live Photo pairing is incomplete") }
+        if cleanup && (TextFromCString(*id[0]) == reference || !Cleanup.Matches(database,TextFromCString(*id[0]))) { return Failure("Refresh similar photos; every selected match must remain visible and indexed") }
+    }
+    discarded := count
+    if cleanup {
+        for i: 0..discarded-1 {
+            if photos[i].hidden || photos[i].trashed || TextFromCString(*photos[i].id[0]) == reference || !Cleanup.Member(database,TextFromCString(*photos[i].id[0]),false) { return Failure("Refresh similar photos; selected items changed") }
+        }
+        if !Expand(database,reference,photos[:],*count) || count == discarded { return Failure("Choose a separate visible reference photo to keep") }
+        for i: discarded..count-1 {
+            if photos[i].hidden || photos[i].trashed || !Cleanup.Member(database,TextFromCString(*photos[i].id[0]),true) { return Failure("Refresh similar photos; the reference became private") }
+        }
     }
     challenge: Vec(u8); BuilderPrint(*challenge,"{\"authorize\":[")
     for i: 0..count-1 {
@@ -201,13 +217,17 @@ main :: (argc: s32, argv: **u8) -> s32 {
     statement: *void
     time: Timespec; if GetTime(0,*time) != 0 { return Failure("Cannot read the edit time") }
     timestamp := cast(float64)time.seconds+cast(float64)time.nanoseconds/1000000000.0
+    if cleanup {
+        error := Cleanup.Transfer(database,reference,timestamp)
+        if error != "" { return Failure(error) }
+    }
     if album {
         prepared := Album.Prepare(database,action,TextFromBytes(valueBytes[:valueLength]),timestamp)
         if prepared.error != "" { return Failure(prepared.error) }; statement = prepared.statement
     } else if SqlitePrepareText(database,BuilderFinish(sql),-1,*statement,null) != SQLITE_OK { return Failure("Cannot prepare the photo edit") }
     defer { unused SqliteFinalize(statement) }
-    for i: 0..count-1 {
-        if hidden && Monotonic() >= until.value { return Failure("Hidden access expired before the edit finished") }
+    for i: 0..(ifx cleanup then discarded else count)-1 {
+        if (hidden || cleanup) && Monotonic() >= until.value { return Failure("Photo edit access expired before the edit finished") }
         unused SqliteReset(statement); if !album { unused SqliteClearBindings(statement) }
         index: s32 = ifx album then 3 else 1
         if explicit { if SqliteBindInt(statement,index,cast(s32)valueBytes[0]-48) != SQLITE_OK { return Failure("Cannot bind the photo edit") }; index += 1 }
@@ -225,11 +245,11 @@ main :: (argc: s32, argv: **u8) -> s32 {
             nameText := BuilderFinish(name)
             if nameText.count > 512 || SqliteBindTextString(statement,index,nameText,cast(s32)nameText.count) != SQLITE_OK { return Failure("Enter a file name without a folder path") }; index += 1
         }
-        else if trash { if SqliteBindInt64(statement,index,ifx action == "trash" then cast(s64)timestamp else 0) != SQLITE_OK { return Failure("Cannot bind the photo edit") }; index += 1 }
+        else if trash { if SqliteBindInt64(statement,index,ifx action == "trash" || cleanup then cast(s64)timestamp else 0) != SQLITE_OK { return Failure("Cannot bind the photo edit") }; index += 1 }
         if SqliteBindDouble(statement,index,timestamp) != SQLITE_OK || SqliteBindTextString(statement,index+1,TextFromCString(*photos[i].id[0]),64) != SQLITE_OK ||
             SqliteStep(statement) != SQLITE_DONE || SqliteChanges(database) != 1 { return Failure("Cannot finish the photo edit") }
     }
-    if hidden && Monotonic() >= until.value { return Failure("Hidden access expired before the edit finished") }
+    if (hidden || cleanup) && Monotonic() >= until.value { return Failure("Photo edit access expired before the edit finished") }
     if SqliteExecText(database,"COMMIT") != SQLITE_OK { return Failure("Cannot save the photo edit") }
     out: Vec(u8); BuilderPrint(*out,"{\"updated\":%}",count); if !Send(BuilderFinish(out)) { return 1 }; return 0
 }

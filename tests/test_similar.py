@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from PIL import Image
-from photos import guest, live, query, semantic, vault
+from photos import guest, live, query, semantic, vault, native_edit
 from photos.library import Library, LibraryError, digest_file
 from photos.worker import process
 
@@ -130,4 +130,147 @@ class SimilarTest(unittest.TestCase):
         self.library.edit(self.ids[0],'hidden_set','1')
         self.assertEqual(self.page()['photos'],[])
         self.assertFalse(self.library.db.in_transaction)
+        self.safe()
+
+    def test_cleanup_preserves_regular_albums_covers_and_manual_provenance(self):
+        import json
+        seed, removed, other = self.ids[:3]
+        self.library.edit(removed,'album_add','Only this scene 日本語')
+        self.library.edit_album('Only this scene 日本語','cover',removed)
+        self.library.edit_album('Only this scene 日本語','archived')
+        self.library.edit(seed,'album_remove','Only this scene 日本語')
+        caption = self.library.photo(seed)['caption']
+        result = process(dict(action='similar_cleanup',value=seed,ids=[removed],
+                              view='similar',similar_id=seed),self.config)
+        self.assertNotIn('error',result)
+        self.assertIn('recoverable Trash',result['status'])
+        self.assertTrue(self.library.photo(removed)['trashed'])
+        self.assertFalse(self.library.photo(seed)['trashed'])
+        self.assertFalse(self.library.photo(other)['trashed'])
+        self.assertIn('Only this scene 日本語',json.loads(self.library.photo(seed)['albums']))
+        self.assertNotIn('Only this scene 日本語',json.loads(self.library.photo(seed)['edits']).get('removed_albums',[]))
+        self.assertEqual(self.library.album_details('Only this scene 日本語')['cover'],seed)
+        self.assertTrue(self.library.album_details('Only this scene 日本語')['archived'])
+        self.assertEqual(self.library.photo(seed)['caption'],caption)
+        self.library.import_folders([self.source.parent])
+        self.assertTrue(self.library.photo(removed)['trashed'])
+        self.assertIn('Only this scene 日本語',json.loads(self.library.photo(seed)['albums']))
+        self.library.edit(removed,'restore')
+        self.assertIn('Only this scene 日本語',json.loads(self.library.photo(removed)['albums']))
+        self.safe()
+
+    def test_cleanup_keeps_both_live_components_and_trashes_both_discarded_components(self):
+        import json
+        movies = []
+        for i, still in enumerate(self.ids[:2]):
+            path = self.source/f'Motion {i}.mp4'; path.write_bytes(b'Synthetic motion '+bytes([i]))
+            self.originals[path] = path.read_bytes()
+            self.library.import_folders([self.source.parent])
+            movie = digest_file(path); movies.append(movie); live.pair(self.library,still,movie)
+        self.library.edit(self.ids[1],'album_add','Retain Live scene')
+        self.library.edit_many([self.ids[1]],'similar_cleanup',self.ids[0])
+        for identity in [self.ids[0],movies[0]]:
+            self.assertFalse(self.library.photo(identity)['trashed'])
+            self.assertIn('Retain Live scene',json.loads(self.library.photo(identity)['albums']))
+        for identity in [self.ids[1],movies[1]]: self.assertTrue(self.library.photo(identity)['trashed'])
+        self.safe()
+
+    def test_cleanup_rejects_private_stale_unindexed_and_unrelated_selection_together(self):
+        from photos.library import packed
+        for ids, seed in [([self.ids[1],self.ids[4]],self.ids[0]),
+                          ([self.ids[1],self.ids[5]],self.ids[0]),
+                          ([self.ids[1],self.ids[6]],self.ids[0]),
+                          ([self.ids[1]],self.ids[5]),
+                          ([self.ids[1],self.ids[1]],self.ids[0]),
+                          ([self.ids[0]],self.ids[0]),([self.ids[1]],'invalid')]:
+            before = [packed(dict(p)) for p in self.library.db.execute('SELECT * FROM photos ORDER BY id')]
+            with self.assertRaises(LibraryError): self.library.edit_many(ids,'similar_cleanup',seed)
+            self.assertEqual(before,[packed(dict(p)) for p in self.library.db.execute('SELECT * FROM photos ORDER BY id')])
+        self.library.set_setting('semantic_enabled',False)
+        with self.assertRaises(LibraryError): self.library.edit_many([self.ids[1]],'similar_cleanup',self.ids[0])
+        self.assertFalse(self.library.photo(self.ids[1])['trashed'])
+        self.safe()
+
+    def test_cleanup_partial_cover_or_trash_failure_rolls_back_every_change(self):
+        import json
+        self.library.edit(self.ids[1],'album_add','Only selected')
+        self.library.edit_album('Only selected','cover',self.ids[1])
+        for table, field in [('albums','cover'),('photos','trashed')]:
+            self.library.db.execute(f"CREATE TRIGGER stop_cleanup BEFORE UPDATE OF {field} ON {table} BEGIN SELECT RAISE(ABORT,'fixture failure'); END")
+            self.library.db.commit()
+            with self.assertRaises(LibraryError): self.library.edit_many([self.ids[1]],'similar_cleanup',self.ids[0])
+            self.assertNotIn('Only selected',json.loads(self.library.photo(self.ids[0])['albums']))
+            self.assertFalse(self.library.photo(self.ids[1])['trashed'])
+            self.assertEqual(self.library.album_details('Only selected')['cover'],self.ids[1])
+            self.library.db.execute('DROP TRIGGER stop_cleanup'); self.library.db.commit()
+        self.safe()
+
+    def test_cleanup_writer_snapshot_authorization_interruption_and_private_pair(self):
+        import json, os, subprocess
+        from photos.library import packed
+        child = subprocess.Popen([str(native_edit.program()),str(self.library.root/'library.sqlite')],
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+            env={k:v for k,v in os.environ.items() if k not in {'DISPLAY','WAYLAND_DISPLAY','XAUTHORITY','DBUS_SESSION_BUS_ADDRESS'}})
+        try:
+            child.stdin.write(packed(dict(action='similar_cleanup',value=self.ids[0],ids=[self.ids[1]])).encode()+b'\n');child.stdin.flush()
+            self.assertEqual(set(json.loads(child.stdout.readline())['authorize']),set(self.ids[:2]))
+            writer = Library(self.library.root)
+            try:
+                writer.db.execute('PRAGMA busy_timeout=0')
+                with self.assertRaisesRegex(Exception,'locked'):writer.db.execute('UPDATE photos SET hidden=1 WHERE id=?',(self.ids[0],))
+            finally: writer.db.close()
+        finally:
+            child.kill();child.wait(timeout=5);child.stdin.close();child.stdout.close();child.stderr.close()
+        self.assertFalse(self.library.photo(self.ids[1])['trashed'])
+        path=self.source/'Private motion.mp4';path.write_bytes(b'Private synthetic motion')
+        self.originals[path]=path.read_bytes();self.library.import_folders([self.source.parent])
+        movie=digest_file(path);live.pair(self.library,self.ids[1],movie)
+        self.library.db.execute('UPDATE photos SET hidden=1 WHERE id=?',(movie,));self.library.db.commit()
+        with self.assertRaises(LibraryError): self.library.edit_many([self.ids[1]],'similar_cleanup',self.ids[0])
+        self.assertFalse(self.library.photo(self.ids[1])['trashed'])
+        self.safe()
+
+    def test_cleanup_is_unavailable_in_guest_view_or_while_app_locked(self):
+        password='synthetic-cleanup-password'
+        token=vault.authenticate(self.library,password,setup=True);self.addCleanup(vault.lock,self.library,token)
+        guest.start(self.library,dict(ids=[self.ids[1]]))
+        request=dict(action='similar_cleanup',value=self.ids[0],ids=[self.ids[1]],view='similar',similar_id=self.ids[0])
+        self.assertIn('error',process(request,self.config))
+        self.assertFalse(self.library.photo(self.ids[1])['trashed'])
+        process(dict(action='guest_exit',value=password),self.config)
+        process(dict(action='app_lock_enable',value=password),self.config)
+        self.assertTrue(process(request,self.config)['app_locked'])
+        self.assertFalse(self.library.photo(self.ids[1])['trashed'])
+        self.safe()
+
+    def test_library_groups_use_visible_valid_indexes_and_page_reference_photos(self):
+        self.library.db.execute('UPDATE photos SET taken=1000')
+        self.library.db.execute('UPDATE photos SET taken=2000 WHERE id=?',(self.ids[0],));self.library.db.commit()
+        result=self.library.query('similar_groups',limit=1)
+        self.assertEqual(result['count'],1)
+        self.assertEqual([(p['id'],p['group_size']) for p in result['photos']],[(self.ids[0],5)])
+        self.assertEqual(self.library.query('similar_groups',offset=1)['photos'],[])
+        self.assertEqual(self.library.query('similar_groups',search='Photo 0')['count'],1)
+        self.assertEqual(self.library.query('similar_groups',search='type:video')['count'],0)
+        with self.assertRaises(LibraryError):self.library.query('similar_groups',jump_day='2024-01-01')
+        self.library.set_setting('semantic_enabled',False)
+        self.assertEqual(self.library.query('similar_groups')['photos'],[])
+        self.assertEqual(query.page(self.library,view='similar_groups',sort='newest')['ids'],[])
+        self.safe()
+
+    def test_library_groups_separate_dissimilar_sets_and_skip_invalid_indexes(self):
+        from photos.library import packed
+        self.library.db.execute('UPDATE photos SET taken=1000')
+        for i, identity in enumerate(self.ids):
+            values=[0.0]*512;values[0 if i<3 else 1]=1.0
+            self.library.db.execute('UPDATE semantic_embeddings SET embedding=? WHERE photo_id=?',(struct.pack('<512f',*values),identity))
+        self.library.db.execute('UPDATE photos SET taken=2000 WHERE id=?',(self.ids[0],))
+        self.library.db.execute('UPDATE photos SET taken=1900 WHERE id=?',(self.ids[3],))
+        self.library.db.execute('UPDATE semantic_embeddings SET embedding=? WHERE photo_id=?',(b'broken',self.ids[7]));self.library.db.commit()
+        result=self.library.query('similar_groups',limit=1)
+        self.assertEqual(result['count'],2)
+        self.assertEqual([(p['id'],p['group_size']) for p in result['photos']],[(self.ids[0],3)])
+        self.assertEqual([(p['id'],p['group_size']) for p in self.library.query('similar_groups',offset=1)['photos']],[(self.ids[3],2)])
+        self.library.edit(self.ids[3],'hidden_set','1')
+        self.assertEqual(self.library.query('similar_groups')['count'],1)
         self.safe()

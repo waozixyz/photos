@@ -5,6 +5,7 @@ Search :: #import "search";
 Locations :: #import "locations";
 Geo :: #import "geo";
 Semantic :: #import "semantic";
+SimilarGroups :: #import "similar_groups";
 LivePhoto :: #import "live_photo";
 Presentation :: #import "presentation";
 Guest :: #import "guest_scope";
@@ -146,6 +147,11 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if !Guest.Populate(*guest,database) { return Failure("Cannot read Guest view selection") }
     if SqliteExecText(database,"BEGIN") != SQLITE_OK { return Failure("Cannot open a gallery snapshot") }
     defer { unused SqliteExecText(database,"ROLLBACK") }
+    if name == "similar_groups" {
+        if jump[0] != 0 { return Failure("Similar groups have their own review order; open the timeline to jump to a date") }
+        error := SimilarGroups.Populate(database); if error != "" { return Failure(error) }
+        Search.AddSQL(*query," AND id IN(SELECT id FROM photos_similar_groups)")
+    }
     similar_ready: bool
     if name == "similar" {
         seed: [65]u8
@@ -201,7 +207,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
         target := SqliteColumnInt64(statement,0); unused SqliteFinalize(statement); statement = null; query.count -= 1
         if matches == 0 { page = 0 } else { page = cast(s32)(ifx target >= matches then matches-1 else target) }
     }
-    rows: Vec(u8); BuilderPrint(*rows,"SELECT id,% FROM photos WHERE %",ifx name == "large" then Storage.LargeBytesSQL else "size",where)
+    rows: Vec(u8); BuilderPrint(*rows,"SELECT id,% FROM photos WHERE %",ifx name == "large" then Storage.LargeBytesSQL else (ifx name == "similar_groups" then "(SELECT members FROM photos_similar_groups g WHERE g.id=photos.id)" else "size"),where)
     check: [65]u8
     if slideshow && !Decode(json,"slide_id",check[:]) { return Failure("Choose a valid slideshow photo") }
     if check[0] != 0 { BuilderPrint(*rows," AND id=?"); Search.Bind(*query,TextUntilNul(check[:])); page = 0 }
@@ -225,9 +231,10 @@ main :: (argc: s32, argv: **u8) -> s32 {
         for byte: id { if !(byte >= 48 && byte <= 57 || byte >= 97 && byte <= 102) { return Failure("Gallery contains an invalid photo identity") } }
         BuilderPrint(*output,"%\"%\"",ifx count == 0 then "" else ",",id); count += 1
         if name == "large" { BuilderPrint(*sizes,"% %",ifx count == 1 then "" else ",",SqliteColumnInt64(statement,1)) }
+        if name == "similar_groups" { BuilderPrint(*sizes,"% %",ifx count == 1 then "" else ",",SqliteColumnInt64(statement,1)) }
     }
     BuilderPrint(*output,"]")
-    if name == "large" { BuilderPrint(*output,",\"storage_sizes\":[%]",BuilderFinish(sizes)) }
+    if name == "large" || name == "similar_groups" { BuilderPrint(*output,",\"%\":[%]",ifx name == "large" then "storage_sizes" else "group_sizes",BuilderFinish(sizes)) }
     if slideshow { BuilderPrint(*output,",\"slide_offset\":%",page) }
     if !guest.active && jump[0] != 0 { BuilderPrint(*output,",\"jump_offset\":%",page) }
     if name == "lane" {

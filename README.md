@@ -659,8 +659,8 @@ selection, album and recoverable Trash actions work here. Trash continues to
 retain originals; this view does not permanently reclaim node storage.
 
 This follows Ente's [large-file review](https://ente.photos/help/photos/features/albums-and-organization/storage-optimization#view-large-files)
-within the ThinkPad-only policy. Mobile space recovery, cache management and
-similar-image review remain unfinished.
+within the ThinkPad-only policy. Mobile space recovery and cache management
+remain unfinished.
 
 Similar photos
 --------------
@@ -677,5 +677,28 @@ both reference and candidates. If the reference becomes private or loses its
 index, refreshing clears the matches. Existing selection, album and recoverable
 Trash actions are available. Machine learning remains opt-in.
 
-This is per-photo similarity review. Whole-library similar-image groups and
-the album-preserving cleanup workflow in Ente remain unfinished.
+Local sync > Similar groups discovers sets across the indexed library, including
+archived photos. Each tile is a reference with the number of shots discovered
+in its set. Open it to review the reference's matches. Machine learning must be
+enabled first; completed local indexes work while processing is paused.
+Discovery uses a transient native sign-bucket index and verifies every candidate
+against the same 0.90 cosine threshold. It is approximate and can miss a set.
+Sets use newest-first references without chaining indirectly similar shots;
+per-photo Find similar still checks every eligible index, so its review can show
+additional matches. Discovery supports at most 65536 valid indexed photos and
+fails visibly beyond that bound. It saves no new index and makes no network call.
+
+Select unwanted matches, then choose Keep reference & albums. Review and confirm
+Keep reference to add their regular album memberships to the reference and use
+it for any affected album covers. Open a match and choose Find similar to make
+that shot the reference before choosing unwanted matches. Other matches remain unchanged. Paired Live
+Photo stills and motion components are kept or trashed together. The native writer
+rechecks indexes, similarity, privacy and pairing in one transaction; a stale
+selection or failed operation leaves the entire scene unchanged. Selected shots
+move to recoverable Trash with their original memberships, metadata and bytes
+intact. Restore brings them back; source rescans do not undo cleanup. New reference
+memberships survive encrypted backup and album export. Smart/place album rules
+remain dynamic. Ordinary Trash remains available without membership transfer.
+This preserves albums during manual review; it does not permanently reclaim
+backup storage. Mobile integration and the deletion/retention policy remain
+unfinished.

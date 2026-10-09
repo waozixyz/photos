@@ -1,0 +1,68 @@
+// Album-preserving cleanup shares the property writer's snapshot and commit.
+using SQLite :: #import "sqlite/SQLite";
+Semantic :: #import "semantic";
+LivePhoto :: #import "live_photo";
+Album :: #import "album_edit";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+Ready :: (database: *void, reference: string) -> bool {
+    statement: *void
+    if SqlitePrepareText(database,"SELECT value FROM settings WHERE key='semantic_enabled'",-1,*statement,null) != SQLITE_OK { return false }
+    enabled := SqliteStep(statement) == SQLITE_ROW && TextFromCString(SqliteColumnText(statement,0)) == "true"
+    unused SqliteFinalize(statement)
+    return enabled && Semantic.RegisterPhoto(database,reference)
+}
+Matches :: (database: *void, identity: string) -> bool {
+    sql: Vec(u8)
+    BuilderPrint(*sql,"SELECT 1 FROM photos WHERE id=? AND kind='photo' AND hidden=0 AND trashed=0 AND % AND %>=0.90",LivePhoto.GallerySQL,Semantic.RankSQL)
+    statement: *void
+    if SqlitePrepareText(database,BuilderFinish(sql),-1,*statement,null) != SQLITE_OK { return false }
+    defer { unused SqliteFinalize(statement) }
+    return SqliteBindTextString(statement,1,identity,64) == SQLITE_OK && SqliteStep(statement) == SQLITE_ROW
+}
+Begin :: (database: *void) -> bool {
+    return SqliteExecText(database,"CREATE TEMP TABLE photos_cleanup_discard(id TEXT PRIMARY KEY)") == SQLITE_OK &&
+        SqliteExecText(database,"CREATE TEMP TABLE photos_cleanup_keep(id TEXT PRIMARY KEY)") == SQLITE_OK
+}
+Member :: (database: *void, identity: string, keep: bool) -> bool {
+    statement: *void
+    sql := ifx keep then "INSERT INTO photos_cleanup_keep VALUES(?)" else "INSERT INTO photos_cleanup_discard VALUES(?)"
+    if SqlitePrepareText(database,sql,-1,*statement,null) != SQLITE_OK { return false }
+    defer { unused SqliteFinalize(statement) }
+    return SqliteBindTextString(statement,1,identity,64) == SQLITE_OK && SqliteStep(statement) == SQLITE_DONE
+}
+Transfer :: (database: *void, reference: string, now: float64) -> string {
+    // Materialize before updates: album names and cover identities cannot drift
+    // while a membership or cover statement is changing the same scene.
+    sql := "CREATE TEMP TABLE photos_cleanup_albums AS SELECT DISTINCT a.name FROM photos p JOIN photos_cleanup_discard d ON d.id=p.id JOIN json_each(p.albums) m JOIN albums a ON a.name=m.value WHERE a.deleted=0 AND a.filter=''"
+    if SqliteExecText(database,sql) != SQLITE_OK { return "Cannot collect the selected photos' albums" }
+    albums: *void
+    if SqlitePrepareText(database,"SELECT name FROM photos_cleanup_albums ORDER BY name",-1,*albums,null) != SQLITE_OK { return "Cannot read the selected photos' albums" }
+    defer { unused SqliteFinalize(albums) }
+    while true {
+        status := SqliteStep(albums); if status == SQLITE_DONE { break }
+        if status != SQLITE_ROW { return "Cannot read the selected photos' albums" }
+        name := TextFromCString(SqliteColumnText(albums,0))
+        prepared := Album.Prepare(database,"album_add",name,now)
+        if prepared.error != "" { return prepared.error }
+        members: *void
+        if SqlitePrepareText(database,"SELECT id FROM photos_cleanup_keep",-1,*members,null) != SQLITE_OK { unused SqliteFinalize(prepared.statement); return "Cannot read the retained photo" }
+        failed: bool
+        while true {
+            member := SqliteStep(members); if member == SQLITE_DONE { break }
+            if member != SQLITE_ROW { failed = true; break }
+            unused SqliteReset(prepared.statement)
+            if SqliteBindDouble(prepared.statement,3,now) != SQLITE_OK ||
+                SqliteBindTextString(prepared.statement,4,TextFromCString(SqliteColumnText(members,0)),64) != SQLITE_OK ||
+                SqliteStep(prepared.statement) != SQLITE_DONE || SqliteChanges(database) != 1 { failed = true; break }
+        }
+        unused SqliteFinalize(members); unused SqliteFinalize(prepared.statement)
+        if failed { return "Cannot retain the selected photos' album memberships" }
+    }
+    cover: *void
+    sql = "UPDATE albums SET cover=?1,updated=max(updated+0.000001,?2),dirty=1 WHERE name IN(SELECT name FROM photos_cleanup_albums) AND cover IN(SELECT id FROM photos_cleanup_discard)"
+    if SqlitePrepareText(database,sql,-1,*cover,null) != SQLITE_OK { return "Cannot retain the selected album covers" }
+    defer { unused SqliteFinalize(cover) }
+    if SqliteBindTextString(cover,1,reference,64) != SQLITE_OK || SqliteBindDouble(cover,2,now) != SQLITE_OK || SqliteStep(cover) != SQLITE_DONE { return "Cannot retain the selected album covers" }
+    return ""
+}

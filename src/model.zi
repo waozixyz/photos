@@ -60,6 +60,7 @@ Photo :: struct {
     width: s32
     height: s32
     storage_size: s64
+    group_size: s32
 }
 SlideAlbum :: struct { name: [513]u8 }
 slide_albums: Vec(SlideAlbum);
@@ -364,6 +365,7 @@ ReadPhoto :: (json: string, start: s32, photo: *Photo) -> s32 {
             else if name == "archived" { photo.archived = number > 0 }
             else if name == "width" { photo.width = number }
             else if name == "height" { photo.height = number }
+            else if name == "group_size" { photo.group_size = number }
         }
         at = Space(json, ValueEnd(json, at, 0)); fields += 1
         if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json, at + 1) }
@@ -583,7 +585,7 @@ Tick :: (window_focused: bool) {
         if Lookup(json, 0, "search") >= 0 { Decode(json, 0, "search", search[:]); search_cursor = 0; search_anchor = 0 }
         if Lookup(json, 0, "view") >= 0 {
             fresh_view: [32]u8; Decode(json, 0, "view", fresh_view[:])
-            for i: 0..cast(s32)17 { if View(i) == TextUntilNul(fresh_view[:]) { view = View(i) } }
+            for i: 0..cast(s32)18 { if View(i) == TextUntilNul(fresh_view[:]) { view = View(i) } }
         }
         album_detail := Lookup(json, 0, "album_detail")
         album_description[0] = 0; album_filter[0] = 0; album_pinned = false; album_archived = false; album_place = false
@@ -672,9 +674,9 @@ Navigate :: (target: string) {
     Viewer.Reset()
     StopPlayback()
     queued_request = false
-    if loading { for i: 0..cast(s32)17 { if View(i) == target { queued_view = i } }; return }
+    if loading { for i: 0..cast(s32)18 { if View(i) == target { queued_view = i } }; return }
     if view == "hidden" && target != "hidden" && vault_token[0] != 0 {
-        for i: 0..cast(s32)17 { if View(i) == target { queued_view = i } }
+        for i: 0..cast(s32)18 { if View(i) == target { queued_view = i } }
         vault_unlocked = false; selected = -1; ClearSelection(); editor = ""; Wipe(edit_value[:]); Wipe(vault_first[:]); Wipe(edit_preview[:])
         Request("vault_lock"); Wipe(vault_token[:]); return
     }
@@ -718,6 +720,9 @@ SlideAlbumToggle :: (name: string) {
 }
 Choose :: (index: s32) {
     if busy || index < 0 || index >= count { return }
+    if view == "similar_groups" {
+        Set(similar_id[:],TextUntilNul(photos[index].id[:])); search[0] = 0; Navigate("similar"); return
+    }
     TextDetection.Clear()
     QRDetection.Clear()
     StopPlayback()
@@ -1126,12 +1131,21 @@ FinishCrop :: (apply: bool) {
 Find :: () { date_jumped = false; if view != "auto_people" { ClearSelection() }; CancelEditor(); offset = 0; scroll = 0; selected = -1; Request() }
 ToggleSort :: () { if loading { return }; sort = ifx sort == "newest" then "oldest" else "newest"; Find() }
 LargeFiles :: () { if loading { return }; search[0] = 0; large_type = 0; Navigate("large") }
+SimilarGroups :: () { if loading { return }; search[0] = 0; Navigate(ifx semantic_enabled then "similar_groups" else "semantic") }
 LargeType :: (kind: s32) { if loading || kind < 0 || kind > 2 { return }; large_type = kind; Find() }
 SimilarPhotos :: () {
     if loading || !semantic_enabled || selected < 0 || selected >= count { return }
     photo := photos[selected]
     if photo.hidden || photo.trashed || TextUntilNul(photo.kind[:]) != "photo" { return }
     Set(similar_id[:],TextUntilNul(photo.id[:])); search[0] = 0; Navigate("similar")
+}
+CleanupSimilar :: () {
+    if loading || view != "similar" || !semantic_enabled || similar_id[0] == 0 || picked_count < 1 { return }
+    CancelEditor(); editor = "similar_cleanup"
+}
+ConfirmSimilarCleanup :: () {
+    if loading || editor != "similar_cleanup" || view != "similar" || picked_count < 1 { return }
+    offset = 0; scroll = 0; Request("similar_cleanup","",TextUntilNul(similar_id[:]))
 }
 AlbumFilter :: () { album_mode = ifx album_mode == "active" then "archived" else (ifx album_mode == "archived" then "empty" else "active"); Find() }
 AlbumSort :: () { album_sort = ifx album_sort == "name" then "newest" else (ifx album_sort == "newest" then "oldest" else "name"); Find() }
@@ -1186,4 +1200,4 @@ BeginPlace :: (from_photo: bool = false) {
     else { Set(place_area[:], "0, 0, 1") }
     BeginEdit("place_name", "Name this place", "", "A name such as Home; photos in its radius match automatically")
 }
-View :: (index: s32) -> string { names: [18]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized", "memories", "map", "places", "semantic", "people", "lane", "auto_people", "large", "similar"}; return names[index] }
+View :: (index: s32) -> string { names: [19]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized", "memories", "map", "places", "semantic", "people", "lane", "auto_people", "large", "similar", "similar_groups"}; return names[index] }

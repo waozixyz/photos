@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.53
+
+- Discover similar sets across your locally indexed photo library and open a reference to review its matches.
+- Keep a chosen reference with the selected matches' regular album memberships and covers while moving unwanted shots to recoverable Trash.
+- Keep paired Live Photo components together, refuse stale or private selections, and preserve every original for restore.
+
 ## 0.1.52
 
 - Find similar photos from the viewer using existing local image indexes, with the closest matches first.

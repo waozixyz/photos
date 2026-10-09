@@ -504,7 +504,7 @@ class Library:
     def query(self, view='photos', search='', album='', offset=0, limit=60, sort='newest', album_mode='active', album_sort='name', memory_date='', hidden_access=True, map_bounds=None, map_gallery=False, person='', people_mode='active', lane_year=0, jump_day='', large_type='all', similar_id=''):
         # Keep derived summaries and large-file byte totals consistent with
         # the rows hydrated below, including paired originals and privacy.
-        locked = view in {'map','people','lane','auto_people','large','similar'} and not self.db.in_transaction
+        locked = view in {'map','people','lane','auto_people','large','similar','similar_groups'} and not self.db.in_transaction
         if locked:
             self.db.execute('BEGIN IMMEDIATE')
         try:
@@ -531,7 +531,7 @@ class Library:
         if view == 'semantic':
             from .semantic import search_page
             response = search_page(self, request, page)
-        elif view == 'similar' and not self.setting('semantic_enabled',False):
+        elif view in {'similar','similar_groups'} and not self.setting('semantic_enabled',False):
             response = dict(count=0,ids=[])
         elif view=='people' and (not person or not self.setting('people_enabled',False)):
             response = dict(count=0,ids=[])
@@ -540,20 +540,22 @@ class Library:
         count = response['count']
         rows = [self.photo(photo_id) for photo_id in response['ids']] if view != 'map' or map_gallery else []
         storage_sizes = dict(zip(response['ids'], response.get('storage_sizes', [])))
+        group_sizes = dict(zip(response['ids'], response.get('group_sizes', [])))
         photos = []
         for row in rows:
             photo = dict(row)
             # Native ID paging and row hydration are separate reads. A photo
             # hidden by another request in between must not expose its paths.
-            if (photo['hidden'] and (not hidden_access or view in {'map', 'semantic','people','lane','large','similar'})) or (view in {'map', 'semantic','people','lane','large','similar'} and photo['trashed']):
+            if (photo['hidden'] and (not hidden_access or view in {'map', 'semantic','people','lane','large','similar','similar_groups'})) or (view in {'map', 'semantic','people','lane','large','similar','similar_groups'} and photo['trashed']):
                 continue
             if view == 'large': photo['storage_size'] = storage_sizes[photo['id']]
+            if view == 'similar_groups': photo['group_size'] = group_sizes[photo['id']]
             from . import live
             try:
                 parts = live.components(self, photo)
             except LibraryError:
                 continue
-            if any(p['hidden'] and (not hidden_access or view in {'map', 'semantic','people','lane','large','similar'}) for p in parts):
+            if any(p['hidden'] and (not hidden_access or view in {'map', 'semantic','people','lane','large','similar','similar_groups'}) for p in parts):
                 continue
             if any(bool(p['trashed']) != bool(photo['trashed']) for p in parts):
                 continue

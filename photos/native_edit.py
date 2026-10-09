@@ -12,7 +12,7 @@ from . import vault
 
 ACTIONS = {'favorite', 'hidden', 'archived', 'favorite_set', 'hidden_set',
            'archived_set', 'trash', 'restore', 'caption', 'tags', 'album_add', 'album_remove',
-           'taken', 'location', 'rename'}
+           'taken', 'location', 'rename', 'similar_cleanup'}
 HASH = re.compile(r'^[0-9a-f]{64}$')
 
 
@@ -75,6 +75,9 @@ def change(library, photo_ids, action, value=None, authorize=None):
         raise LibraryError('Select between 1 and 1000 photos')
     if action.endswith('_set'):
         value = str(value)
+    if action == 'similar_cleanup' and (not isinstance(value, str) or not HASH.fullmatch(value) or
+                                       value in photo_ids or len(set(photo_ids)) != len(photo_ids)):
+        raise LibraryError('Choose a separate reference photo and distinct similar matches')
     if action in {'album_add', 'album_remove'}:
         value = library.album_name(value)
     if action == 'rename':
@@ -117,7 +120,7 @@ def change(library, photo_ids, action, value=None, authorize=None):
             timer.daemon = True; timer.start()
             child.stdin.write(request+b'\n'); child.stdin.flush()
             ids = response().get('authorize')
-            if not isinstance(ids, list) or not 0 < len(ids) <= 2000 or \
+            if not isinstance(ids, list) or not 0 < len(ids) <= (2002 if action == 'similar_cleanup' else 2000) or \
                     any(not isinstance(i, str) or not HASH.fullmatch(i) for i in ids) or len(set(ids)) != len(ids) or not set(photo_ids).issubset(ids):
                 raise LibraryError('Photo edit returned an invalid selection')
             hidden = False

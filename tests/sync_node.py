@@ -134,6 +134,20 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         second.set_setting('semantic_enabled',False)
         original = Path(peer.materialize(photo_id))
         assert original.read_bytes() == (source/'fixture.jpg').read_bytes()
+        # Album-preserving cleanup and covers cross the real signed encrypted
+        # record/album channel, with original bytes retained through restore.
+        second.set_setting('semantic_enabled',True)
+        second.edit(large_id,'album_add','Cleanup scene')
+        second.edit_album('Cleanup scene','cover',large_id)
+        second.edit_many([large_id],'similar_cleanup',photo_id)
+        assert peer.sync()==0 and client.sync()==0
+        assert first.photo(large_id)['trashed'] and not first.photo(photo_id)['trashed']
+        assert 'Cleanup scene' in json.loads(first.photo(photo_id)['albums'])
+        assert first.album_details('Cleanup scene')['cover']==photo_id
+        assert first.original(first.photo(large_id)).read_bytes()==(source/'second.jpg').read_bytes()
+        first.edit(large_id,'restore');assert client.sync()==0 and peer.sync()==0
+        assert not second.photo(large_id)['trashed']
+        second.set_setting('semantic_enabled',False)
         # Recover the original account and content keys from an encrypted
         # offline file, then authenticate and restore using a fresh device.
         from photos import recovery

@@ -89,6 +89,7 @@ def ui_query(library, request):
     fields = ('id', 'name', 'thumbnail', 'display' if modern else 'original', 'date', 'kind', 'favorite',
               'hidden', 'trashed', 'archived', 'width', 'height')
     if request.get('view') == 'large': fields += ('storage_size',)
+    if request.get('view') == 'similar_groups': fields += ('group_size',)
     result['photos'] = [{key: photo[key] for key in fields} for photo in result['photos']]
     fields = ('name', 'count', 'thumbnail', 'pinned', 'archived', 'smart', 'place', 'id', 'ignored')
     result['albums'] = [{key: album[key] for key in fields if key in album} for album in result['albums']]
@@ -214,6 +215,12 @@ def library_request(library, request, config, guest_bypass=False):
     def require_access(photo_id):
         if not authorize(library.photo(photo_id)):
             raise LibraryError('Hidden is locked; authenticate before opening or changing hidden photos')
+    if action == 'similar_cleanup':
+        from . import native_edit
+        native_edit.change(library, request.get('ids'), action, request.get('value'), authorize=authorize)
+        result = ui_query(library, {**request, 'offset': 0})
+        result['status'] = 'Reference kept with album memberships; selected matches moved to recoverable Trash'
+        return result
     if action in {'vault_setup', 'vault_unlock'}:
         token = vault.authenticate(library, request.get('value'), setup=action == 'vault_setup')
         request = {**request, 'vault_token': token, 'view': 'hidden', 'offset': 0}

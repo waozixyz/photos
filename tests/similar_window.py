@@ -59,6 +59,8 @@ with tempfile.TemporaryDirectory() as temporary:
     library.db.commit()
     library.set_setting('semantic_enabled',False)
     library.set_setting('semantic_processing',False)
+    library.edit(ids['Match A.png'],'album_add','Scene only')
+    library.edit_album('Scene only','cover',ids['Match A.png'])
     calls = []
     original_process = service_module.process
 
@@ -149,7 +151,7 @@ with tempfile.TemporaryDirectory() as temporary:
             suffix = 'hosted' if hosted else ('portable' if portable else 'native')
             subprocess.run(['import','-window',window,str(output/('similar-'+suffix+'.png'))],check=True,timeout=5)
             control('Select',230,236); control('Select loaded',343,236)
-            since = len(calls); control('Trash',830,280)
+            since = len(calls); control('Trash',830,324)
             wait(lambda: any(q.get('action')=='trash' and set(q.get('ids',[]))=={ids['Match A.png'],ids['Match B.png']} for q,r in calls[since:]),'Similarity selection did not reach Trash')
             wait(lambda: library.photo(ids['Match A.png'])['trashed'] and library.photo(ids['Match B.png'])['trashed'],'Similar matches were not recoverably trashed')
             assert not library.photo(ids['Reference.png'])['trashed']
@@ -157,6 +159,31 @@ with tempfile.TemporaryDirectory() as temporary:
             control('Photos',65,90); control('Reference.png',300,350)
             since = len(calls); control('Find similar',1090,166)
             wait(lambda: (r:=result(since)) and r['count']==2,'Restored matches did not reappear')
+            control('Select',230,236); control('Select loaded',343,236)
+            control('Keep reference & albums',340,236)
+            subprocess.run(['import','-window',window,str(output/('similar-cleanup-'+suffix+'.png'))],check=True,timeout=5)
+            since=len(calls);control('Cancel',454,368)
+            assert not any(q.get('action')=='similar_cleanup' for q,r in calls[since:])
+            assert not library.photo(ids['Match A.png'])['trashed']
+            control('Keep reference & albums',340,236)
+            since=len(calls);control('Keep reference',304,368)
+            wait(lambda: any(q.get('action')=='similar_cleanup' and q.get('value')==ids['Reference.png'] for q,r in calls[since:]),'Album-preserving cleanup request missing')
+            wait(lambda: library.photo(ids['Match A.png'])['trashed'] and library.photo(ids['Match B.png'])['trashed'],'Cleanup did not trash selected matches')
+            assert 'Scene only' in json.loads(library.photo(ids['Reference.png'])['albums'])
+            assert library.album_details('Scene only')['cover']==ids['Reference.png']
+            assert not library.photo(ids['Reference.png'])['trashed']
+            library.edit_many([ids['Match A.png'],ids['Match B.png']],'restore')
+            control('Photos',65,90); control('Reference.png',300,350)
+            since=len(calls);control('Find similar',1090,166)
+            wait(lambda: (r:=result(since)) and r['count']==2,'Cleaned-up matches did not restore')
+            since=len(calls);control('All similar groups',1068,166)
+            grouped=wait(lambda: next((r for q,r in reversed(calls[since:]) if q.get('view')=='similar_groups'),None),'Library-wide groups missing')
+            assert grouped['count']==1 and grouped['photos'][0]['id']==ids['Reference.png']
+            assert grouped['photos'][0]['group_size']==3
+            time.sleep(.5)
+            subprocess.run(['import','-window',window,str(output/('similar-groups-'+suffix+'.png'))],check=True,timeout=5)
+            since=len(calls);control('Reference.png',300,350)
+            wait(lambda: (r:=result(since)) and r['count']==2,'Group did not open its reference matches')
             since = len(calls); library.edit(ids['Reference.png'],'hidden_set','1')
             wait(lambda: (r:=result(since)) is not None and r['count']==0,'Private reference still returned derived matches')
             if not portable:
@@ -166,7 +193,7 @@ with tempfile.TemporaryDirectory() as temporary:
             for path, data in originals.items():
                 assert path.read_bytes()==data
                 assert library.original(library.photo(digest_file(path))).read_bytes()==data
-            print('Private Xvfb '+suffix+': opt-in settings, viewer similarity entry, ranked private matches, review selection, recoverable Trash, hidden-reference revocation and originals passed')
+            print('Private Xvfb '+suffix+': opt-in settings, ranked matches, selection, confirmed/cancelled album-preserving cleanup, cover retention, restore, privacy revocation and originals passed')
         finally:
             child.terminate()
             try: child.wait(timeout=5)
