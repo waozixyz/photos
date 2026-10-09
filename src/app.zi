@@ -995,7 +995,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         swiping := false
         if !Model.CatalogView() { swiping = SwipeSelection(session,pointer,body,cell); props.scroll_offset = Model.scroll }
         ScrollDevice.BeginScrollFrame(session,.{pointer.x,pointer.y},pointer.pressed && !swiping,pointer.down && !swiping,
-            pointer.released && !swiping,ifx swiping then 0.0 else PointerWheelTake(session,body),cast(float64)Model.ticks/60.0)
+            pointer.released && !swiping,ifx swiping then 0.0 else PointerWheelTake(session,body),cast(float64)Clock.Milliseconds()/1000.0)
         scrolling := Scroll(session, props); Model.scroll = scrolling.scroll_offset
         first: s32
         if !Model.CatalogView() {

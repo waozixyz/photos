@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.56
+
+- Keep gallery scrolling timed to elapsed time, so wheel motion settles promptly when drawing takes longer.
+- Improve scrolling responsiveness when Photos runs inside Harmony.
+
 ## 0.1.55
 
 - Save people names, birthdays, corrections and manual tags together with their automatic album changes, preserving the whole selection if saving fails.

@@ -176,7 +176,7 @@ with tempfile.TemporaryDirectory() as temporary:
             assert not any(q.get('action') == 'open' for q in calls), 'A claimed swipe opened a photo'
             # The switch uses the ordinary protected library route, persists
             # locally and leaves a disabled drag to normal gallery handling.
-            click(65,378); click(300,592)
+            click(65,378); click(300,682)
             wait(lambda: library.setting('swipe_selection_enabled',True) is False,'Swipe preference was not saved')
             reopened = Library(library.root)
             assert reopened.setting('swipe_selection_enabled',True) is False
@@ -184,7 +184,7 @@ with tempfile.TemporaryDirectory() as temporary:
             click(65,90); click(230,166); click(260,410); count(1)
             move(490,410); xdo('mousedown',1); time.sleep(.15); move(740,410)
             xdo('mouseup',1); time.sleep(.3); count(1)
-            click(65,378); click(300,592)
+            click(65,378); click(300,682)
             wait(lambda: library.setting('swipe_selection_enabled',False) is True,'Swipe preference did not re-enable')
             assert all(path.read_bytes() == value for path,value in originals.items())
             print(suffix.capitalize()+' swipe: click selection, reversible add/remove, focus cancellation, edge scrolling across pages, batch identities and original preservation passed')
