@@ -1,0 +1,84 @@
+// On-demand local OCR. The headless helper owns image orientation, sizing and
+// the Tesseract C API lifetime; no display, shell, network or library edits.
+#import "std/byte_text_linux"
+tess :: #system_library "tesseract";
+pixbuf :: #system_library "gdk_pixbuf-2.0";
+object :: #system_library "gobject-2.0";
+Load :: (path: *u8, error: **void) -> *void #foreign pixbuf "gdk_pixbuf_new_from_file";
+Orient :: (image: *void) -> *void #foreign pixbuf "gdk_pixbuf_apply_embedded_orientation";
+Width :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_width";
+Height :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_height";
+Channels :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_n_channels";
+Stride :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_rowstride";
+Pixels :: (image: *void) -> *u8 #foreign pixbuf "gdk_pixbuf_get_pixels";
+Scale :: (image: *void, width: s32, height: s32, interpolation: s32) -> *void #foreign pixbuf "gdk_pixbuf_scale_simple";
+New :: (space: s32, alpha: s32, bits: s32, width: s32, height: s32) -> *void #foreign pixbuf "gdk_pixbuf_new";
+Unref :: (image: *void) #foreign object "g_object_unref";
+Create :: () -> *void #foreign tess "TessBaseAPICreate";
+Delete :: (api: *void) #foreign tess "TessBaseAPIDelete";
+Init :: (api: *void, data: *u8, language: *u8) -> s32 #foreign tess "TessBaseAPIInit3";
+SetImage :: (api: *void, data: *u8, width: s32, height: s32, channels: s32, stride: s32) #foreign tess "TessBaseAPISetImage";
+SetMode :: (api: *void, mode: s32) #foreign tess "TessBaseAPISetPageSegMode";
+Recognize :: (api: *void, monitor: *void) -> s32 #foreign tess "TessBaseAPIRecognize";
+Iterator :: (api: *void) -> *void #foreign tess "TessBaseAPIGetIterator";
+FreeIterator :: (iterator: *void) #foreign tess "TessResultIteratorDelete";
+Page :: (iterator: *void) -> *void #foreign tess "TessResultIteratorGetPageIterator";
+Next :: (iterator: *void, level: s32) -> s32 #foreign tess "TessResultIteratorNext";
+Beginning :: (page: *void, level: s32) -> s32 #foreign tess "TessPageIteratorIsAtBeginningOf";
+Bounds :: (page: *void, level: s32, left: *s32, top: *s32, right: *s32, bottom: *s32) -> s32 #foreign tess "TessPageIteratorBoundingBox";
+Confidence :: (iterator: *void, level: s32) -> float32 #foreign tess "TessResultIteratorConfidence";
+WordText :: (iterator: *void, level: s32) -> *u8 #foreign tess "TessResultIteratorGetUTF8Text";
+FreeText :: (text: *u8) #foreign tess "TessDeleteText";
+main :: (argc: s32, argv: **u8) -> s32 {
+    if argc != 4 { return 2 }
+    language := TextFromCString(argv[3])
+    if language.count == 0 || language.count > 128 { return 2 }
+    for byte: language { if (byte < 97 || byte > 122) && byte != 95 && byte != 43 { return 2 } }
+    image := Load(argv[1], null); if image == null { return 3 }; defer { Unref(image) }
+    oriented := Orient(image); if oriented == null { return 3 }; defer { Unref(oriented) }
+    width := Width(oriented); height := Height(oriented)
+    if width <= 0 || height <= 0 || cast(s64)width * cast(s64)height > 100000000 { return 3 }
+    output := oriented; small: *void; defer { if small != null { Unref(small) } }
+    if width > 4096 || height > 4096 {
+        factor := 4096.0 / cast(float64)(ifx width > height then width else height)
+        width = cast(s32)(cast(float64)width * factor); height = cast(s32)(cast(float64)height * factor)
+        if width < 1 { width = 1 }; if height < 1 { height = 1 }
+        small = Scale(oriented, width, height, 2); if small == null { return 3 }; output = small
+    }
+    rgb: *void; defer { if rgb != null { Unref(rgb) } }
+    if Channels(output) == 4 {
+        rgb = New(0, 0, 8, width, height); if rgb == null { return 3 }
+        source := Pixels(output); target := Pixels(rgb); source_stride := Stride(output); target_stride := Stride(rgb)
+        for y: 0..height - 1 { for x: 0..width - 1 {
+            alpha := cast(s32)source[y * source_stride + x * 4 + 3]
+            for channel: 0..2 { target[y * target_stride + x * 3 + channel] = cast(u8)((cast(s32)source[y * source_stride + x * 4 + channel] * alpha + 255 * (255 - alpha) + 127) / 255) }
+        } }
+        output = rgb
+    }
+    api := Create(); if api == null { return 3 }; defer { Delete(api) }
+    if Init(api, argv[2], argv[3]) != 0 { return 4 }
+    SetImage(api, Pixels(output), width, height, Channels(output), Stride(output))
+    SetMode(api, 11) // Sparse text preserves independent signs/screenshots.
+    if Recognize(api, null) != 0 { return 3 }
+    print("%\t%\n", width, height)
+    iterator := Iterator(api); if iterator == null { return 0 }; defer { FreeIterator(iterator) }
+    page := Page(iterator); if page == null { return 3 }
+    line: s32; index: s32; bytes: s64
+    while true {
+        if Beginning(page, 2) != 0 { line += 1 }
+        confidence := Confidence(iterator, 3); text := WordText(iterator, 3)
+        if text != null {
+            value := TextFromCString(text); valid := value.count > 0 && value.count <= 512 && confidence >= 20.0
+            for byte: value { if byte < 32 || byte == 127 { valid = false } }
+            left: s32; top: s32; right: s32; bottom: s32
+            if valid && Bounds(page, 3, *left, *top, *right, *bottom) != 0 {
+                bytes += value.count + 1; index += 1
+                if index > 1024 || bytes > 32768 { FreeText(text); return 5 }
+                print("5\t1\t0\t0\t%\t%\t%\t%\t%\t%\t%\t%\n", line, index, left, top, right-left, bottom-top, confidence, value)
+            }
+            FreeText(text)
+        }
+        if Next(iterator, 3) == 0 { break }
+    }
+    return 0
+}

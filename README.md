@@ -185,6 +185,26 @@ both records agree. Embedded Android motion-photo extraction and native phone
 Live Photo capture remain unfinished.
 
 This version is a local photo library with sync, not complete Ente feature parity.
+Detect text opens an on-demand local OCR viewer for photos and Live Photo stills
+outside Trash. Click a word, drag across words, double-click a word to select its
+recognized line, or Select all; Copy selection puts the result on the clipboard.
+Escape and Back return to the photo. Switch the recognition language to English,
+Spanish, Portuguese, German, Simplified Chinese or Japanese. Text and selection
+never become a library search index or leave the device through backup. Results
+are cached briefly in bounded local memory; Hidden results are never cached.
+Access is rechecked while the viewer is open and extracted text is cleared when
+a photo is hidden, trashed, locked or the local service becomes unavailable.
+Text already copied deliberately remains on the system clipboard.
+The headless Ziran helper uses Tesseract's local C engine and pinned Apache 2.0
+language data; it needs libtesseract 5 and GdkPixbuf. Run `make text-models` to
+download the verified public models, or copy them with `scripts/text-models.py
+--source DIR`, then install with `scripts/install.py --text-models build/models/ocr`.
+Scanning itself makes no network requests. Recognition is approximate, downscales
+images larger than 4096 pixels on an edge, and rejects results beyond 1024 words
+or 32 KiB of text; crop a copy to recognize a smaller area. Small, rotated or
+handwritten text may be missed. Animated images use their first frame. Native
+phone long-press selection and movable touch selection handles remain unfinished.
+
 Semantic search finds image content from natural language descriptions, with
 closest matches first. Enable it in Semantic search to index local photos in the
 background, see progress, pause/resume processing or retry unavailable originals.

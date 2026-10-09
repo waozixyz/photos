@@ -103,6 +103,33 @@ def library_request(library, request, config):
         result = ui_query(library, {**request, 'vault_token': ''})
         result.update(error='Hidden is locked; authenticate before opening or changing hidden photos', vault_unlocked=0)
         return result
+    if action in {'detect_text', 'text_check'}:
+        from . import live, ocr
+        photo = library.photo(request.get('id'))
+        def available():
+            fresh = library.photo(photo['id'])
+            for part in live.components(library, fresh):
+                require_access(part['id'])
+                if part['trashed']:
+                    raise LibraryError('Restore the photo from Trash before detecting text')
+            if fresh['kind'] != 'photo':
+                raise LibraryError('Choose a photo or Live Photo to detect text')
+            return fresh
+        photo = available()
+        if action == 'text_check':
+            result = vault.state(library, request.get('vault_token', ''))
+            result.update(text_photo=photo['id'], text_checked=1)
+            return result
+        if not library.original(photo).is_file():
+            if not config.get('node'):
+                raise LibraryError('Download the original before detecting text')
+            Client(library, config).materialize(photo['id'])
+        photo = available()
+        text = ocr.scan(library, photo, request.get('value') or 'eng')
+        available()
+        result = vault.state(library, request.get('vault_token', ''))
+        result.update(text, text_photo=photo['id'], text_languages=ocr.languages(), status='Select detected words and Copy selection' if text['text_words'] else 'No readable text found')
+        return result
     if action == 'playback_check':
         photo = library.photo(request.get('id'))
         from . import live

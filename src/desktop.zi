@@ -3,6 +3,7 @@ Desktop :: #import "kryon/Desktop";
 Model :: #import "model";
 Viewer :: #import "viewer";
 Map :: #import "map";
+TextDetection :: #import "text_detection";
 #import "std/text"
 #import "std/byte_text_linux"
 SDL :: #system_library "SDL2";
@@ -37,6 +38,7 @@ Publish :: () {
     Model.Property(*out,"editor",Model.editor)
     Model.Property(*out,"sort",Model.sort)
     BuilderPrint(*out,",\"vault_unlocked\":%",Model.vault_unlocked)
+    BuilderPrint(*out,",\"detected_words\":%",TextDetection.count)
     BuilderPrint(*out,",\"playback_state\":%,\"playback_position\":%,\"playback_duration\":%,\"playback_speed\":%,\"playback_volume\":%",Model.PlaybackState(),Model.PlaybackPosition(),Model.PlaybackDuration(),Model.playback_speed,Model.playback_volume)
     BuilderPrint(*out,",\"crop\":[%,%,%,%]",Model.crop_candidate[0],Model.crop_candidate[1],Model.crop_candidate[2],Model.crop_candidate[3])
     BuilderPrint(*out,",\"photo_zoom\":%,\"photo_center\":[%,%],\"photo_expanded\":%",Viewer.zoom,Viewer.center_x,Viewer.center_y,Viewer.expanded)

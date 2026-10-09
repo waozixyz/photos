@@ -26,6 +26,7 @@ def main():
     parser.add_argument('--no-dependencies', action='store_true')
     parser.add_argument('--no-service', action='store_true')
     parser.add_argument('--semantic-models', type=Path, help='Install verified local semantic models from this directory')
+    parser.add_argument('--text-models', type=Path, help='Install verified offline text recognition languages from this directory')
     parser.add_argument('--harmony', action='store_true', help='Register an already installed signed Photos package in Harmony')
     args = parser.parse_args()
     if args.ssh_host and (not re.fullmatch('[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+', args.ssh_host) or not args.node):
@@ -64,6 +65,12 @@ def main():
     semantic = repo/'build/semantic-infer/semantic_infer'
     if not semantic.is_file():
         parser.error('Build the Photos semantic search engine before installing')
+    text = repo/'build/detect-text/detect_text'
+    if not text.is_file():
+        parser.error('Build the Photos text recognition engine before installing')
+    shutil.copyfile(text,installed/'detect_text.next')
+    os.chmod(installed/'detect_text.next',0o755)
+    os.replace(installed/'detect_text.next',installed/'detect_text')
     shutil.copyfile(binary,installed/'photos-desktop.next')
     os.chmod(installed/'photos-desktop.next',0o755)
     os.replace(installed/'photos-desktop.next',installed/'photos-desktop')
@@ -111,11 +118,14 @@ def main():
     icon.parent.mkdir(parents=True,exist_ok=True)
     shutil.copyfile(repo/'assets/photos.svg',icon)
     (installed/'assets').mkdir(exist_ok=True)
-    for name in ['world.png', 'MAP-LICENSE.txt', 'SEMANTIC-MODELS.json', 'CLIP-LICENSE.txt']:
+    for name in ['world.png', 'MAP-LICENSE.txt', 'SEMANTIC-MODELS.json', 'CLIP-LICENSE.txt', 'TEXT-MODELS.json', 'TESSERACT-LICENSE.txt']:
         shutil.copyfile(repo/'assets'/name, installed/'assets'/name)
     if args.semantic_models:
         subprocess.run(['python3',str(repo/'scripts/semantic-models.py'),'--source',str(args.semantic_models),
                         '--destination',str(installed/'models')],check=True)
+    if args.text_models:
+        subprocess.run(['python3',str(repo/'scripts/text-models.py'),'--source',str(args.text_models),
+                        '--destination',str(installed/'models/ocr')],check=True)
     if args.harmony:
         catalog_path = Path.home()/'.config/harmony/apps.json'
         catalog = json.loads(catalog_path.read_bytes()) if catalog_path.is_file() else {}

@@ -4,6 +4,7 @@ Playback :: #import "playback";
 Crop :: #import "crop";
 Viewer :: #import "viewer";
 Map :: #import "map";
+TextDetection :: #import "text_detection";
 #if #defined(POSIX_THREADS) {
     Window :: #import "desktop";
     HostTheme :: #import "kryon/SystemThemeHostLinux";
@@ -328,6 +329,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if key == Input.KeyRight { Model.PlaybackSeek(Playback.Position() + 5000) }
         if Model.playback_expanded { PlaybackViewer(session, .{viewport.x + 12.0, viewport.y + 12.0, viewport.width - 24.0, viewport.height - 24.0}); return 0 }
     }
+    if Model.editor == "text" && key == Input.KeyEscape { Model.CancelEditor(); key = 0 }
     if (Model.editor == "image_crop" || Model.editor == "video_crop") && key == Input.KeyEscape { Model.FinishCrop(false) }
     if !Model.focused && !Model.search_focused && Model.editor == "" {
         if key == Input.KeyEscape { if Viewer.expanded { Viewer.expanded = false } else if Model.selected >= 0 { Model.selected = -1; Viewer.Reset() } else { Model.ClearSelection() } }
@@ -360,7 +362,32 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, 44, "Sync", .{x + width - 78.0, y, 78.0, 39.0}) { Model.Request("sync") }
     }
     body := Rectangle.{x, y + 52.0, width, viewport.height - 216.0}
-    if Model.editor == "image_crop" || Model.editor == "video_crop" {
+    if Model.editor == "text" {
+        if Model.selected < 0 || Model.selected >= Model.count { Model.CancelEditor(); return 0 }
+        photo := *Model.photos[Model.selected]
+        Label(session, 435, "Detect text", .{x, body.y, width, 32.0}, 24)
+        available := !Model.loading || Model.text_check_pending
+        ready := available && TextDetection.active
+        step := (width - 24.0) / 3.0
+        if Action(session, 437, "Select all", .{x, body.y + 42.0, step, 36.0}, ready && TextDetection.count > 0) { TextDetection.All() }
+        if Action(session, 438, "Copy selection", .{x + step + 12.0, body.y + 42.0, step, 36.0}, ready && TextDetection.selected[0] != 0) {
+            Model.Set(Model.message[:], ifx TextDetection.Copy() then "Selected text copied" else "Clipboard unavailable; try again")
+        }
+        if Action(session, 439, "Back", .{x + 2.0 * (step + 12.0), body.y + 42.0, step, 36.0}, available) { Model.CancelEditor() }
+        language_caption: Vec(u8); BuilderPrint(*language_caption, "Language: %", TextDetection.LanguageName())
+        value := BuilderFinish(language_caption)
+        if Action(session, 440, value, .{x, body.y + 86.0, 190.0, 36.0}, available && TextDetection.language_count > 1) {
+            TextDetection.language_index = (TextDetection.language_index + 1) % TextDetection.language_count
+            TextDetection.Set(TextDetection.language[:], TextUntilNul(TextDetection.languages[TextDetection.language_index][:])); Model.BeginText()
+        }; Model.Release(value)
+        Label(session, 441, "Drag across words to select · recognition stays on this device", .{x, body.y + 130.0, width, 26.0}, 14)
+        image := ifx photo.display[0] != 0 then TextUntilNul(photo.display[:]) else TextUntilNul(photo.thumbnail[:])
+        canvas := Rectangle.{x, body.y + 166.0, width, body.height - 284.0}
+        TextDetection.Draw(session, image, canvas, ready)
+        Record(442, "Detected text area", canvas, ready)
+        preview: TextProps; preview.key = 443; preview.bounds = .{x, body.y + body.height - 110.0, width, 90.0}; preview.font = 15
+        preview.text = TextUntilNul(TextDetection.selected[:]); preview.wrap = TextWrap.TextWrapAuto; Text(session, preview)
+    } else if Model.editor == "image_crop" || Model.editor == "video_crop" {
         CropEditor(session, body)
     } else if Model.editor == "playback" {
         PlaybackViewer(session, body)
@@ -433,7 +460,10 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, 216, "Edit location", .{x + 138.0, body.y + 44.0, 138.0, 36.0}, ready) { Model.BeginEdit("location", "Edit photo location", TextUntilNul(Model.detail_location[:]), "Latitude, longitude; leave empty to remove location") }
         if TextUntilNul(photo.kind[:]) == "photo" { Viewer.Draw(session, 3000, image, TextUntilNul(photo.name[:]), .{x, body.y + 92.0, width, body.height - 364.0}) }
         else { ImageAt(session, 3000, image, TextUntilNul(photo.name[:]), .{x, body.y + 92.0, width, body.height - 364.0}) }
-        Label(session, 75, TextUntilNul(photo.name[:]), .{x, body.y + body.height - 262.0, width, 24.0}, 17)
+        Label(session, 75, TextUntilNul(photo.name[:]), .{x, body.y + body.height - 262.0, width - 138.0, 24.0}, 17)
+        if TextUntilNul(photo.kind[:]) == "photo" {
+            if Action(session, 436, "Detect text", .{x + width - 126.0, body.y + body.height - 270.0, 126.0, 32.0}, ready && !photo.trashed) { Model.BeginText() }
+        }
         details: Vec(u8); BuilderPrint(*details, "% · % x % · % bytes", TextUntilNul(Model.detail_taken[:]), photo.width, photo.height, Model.detail_size)
         text := BuilderFinish(details); Label(session, 76, text, .{x, body.y + body.height - 232.0, width, 22.0}, 13); Model.Release(text)
         Label(session, 77, TextUntilNul(Model.detail_caption[:]), .{x, body.y + body.height - 202.0, width, 22.0}, 14)

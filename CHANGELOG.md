@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.17
+
+- Detect text in photos and Live Photos locally, select words or lines over the image, and copy a selection or all recognized text.
+- Switch between English, Spanish, Portuguese, German, Simplified Chinese and Japanese without sending images or extracted text to a service.
+- Keep recognition out of Trash, honor Hidden locks and revoke extracted text when access ends, while preserving originals and backup keys.
+
 ## 0.1.16
 
 - Describe objects, scenes and colors in Semantic search to find local photos by their image content, ordered by relevance.

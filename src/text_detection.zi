@@ -1,0 +1,122 @@
+// Recognition results and selection remain caller-owned in this viewer only.
+using UI :: #import "kryon/Widgets";
+Input :: #import "kryon/tree_input";
+#import "std/json_scan"
+#import "std/text_buffer"
+#import "std/byte_text_linux"
+Word :: struct { text: [513]u8; line: [65]u8; x: s32; y: s32; width: s32; height: s32; picked: bool }
+words: Vec(Word);
+count: s32;
+width: s32;
+height: s32;
+active: bool;
+dragging: bool;
+anchor_x: float32;
+anchor_y: float32;
+selected: [32769]u8;
+language: [129]u8;
+languages: [16][33]u8;
+language_count: s32;
+language_index: s32;
+frame: s64;
+click_frame: s64;
+click_word: s32 = -1;
+LanguageName :: () -> string {
+    value := TextUntilNul(language[:])
+    if value == "eng" { return "English" }; if value == "deu" { return "German" }
+    if value == "spa" { return "Spanish" }; if value == "por" { return "Portuguese" }
+    if value == "chi_sim" { return "Simplified Chinese" }; if value == "jpn" { return "Japanese" }
+    return value
+}
+Set :: (out: []u8, value: string) {
+    for i: 0..out.count - 1 { out[i] = 0 }
+    if value.count < out.count { for i: 0..value.count - 1 { out[i] = value[i] } }
+}
+Clear :: () {
+    for i: 0..count - 1 { Set(words[i].text[:], ""); Set(words[i].line[:], "") }
+    VecClear(words); count = 0; active = false; dragging = false; click_word = -1; Set(selected[:], "")
+}
+Number :: (json: string, at: s32, key: string) -> s32 {
+    value := ReadNumber(json, FieldAt(json, at, key)); return ifx value.valid then cast(s32)value.value else 0
+}
+Decode :: (json: string, at: s32, key: string, out: []u8) {
+    for i: 0..out.count - 1 { out[i] = 0 }
+    unused ReadStringText(json, FieldAt(json, at, key), out)
+}
+LoadLanguages :: (json: string) {
+    if FieldAt(json, 0, "text_languages") < 0 { return }
+    at := Space(json, FieldAt(json, 0, "text_languages") + 1); language_count = 0
+    while at >= 0 && at < cast(s32)json.count && json[at] != 93 && language_count < 16 {
+        value := ReadString(json, at); if !value.valid { break }
+        Set(languages[language_count][:], json[value.start:value.end]); language_count += 1
+        at = Space(json, value.after); if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json, at + 1) }
+    }
+    if language[0] == 0 { Set(language[:], "eng") }
+    for i: 0..language_count - 1 { if TextUntilNul(languages[i][:]) == TextUntilNul(language[:]) { language_index = i } }
+}
+Load :: (json: string) {
+    Clear(); width = Number(json, 0, "text_width"); height = Number(json, 0, "text_height")
+    at := Space(json, FieldAt(json, 0, "text_words") + 1)
+    while at >= 0 && at < cast(s32)json.count && json[at] != 93 && count < 1024 {
+        word: Word; Decode(json, at, "text", word.text[:]); Decode(json, at, "line", word.line[:])
+        word.x = Number(json, at, "x"); word.y = Number(json, at, "y")
+        word.width = Number(json, at, "width"); word.height = Number(json, at, "height")
+        if !VecPush(words, word) { break }; count += 1
+        at = Space(json, ValueEnd(json, at, 0)); if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json, at + 1) }
+    }
+    active = width > 0 && height > 0
+}
+Selection :: () {
+    // Copy has no allocation/lifetime dependency on a per-frame builder.
+    Set(selected[:], ""); used: s32; previous: [65]u8
+    for i: 0..count - 1 {
+        if !words[i].picked { continue }
+        value := TextUntilNul(words[i].text[:]); line := TextUntilNul(words[i].line[:])
+        if used > 0 { selected[used] = ifx line == TextUntilNul(previous[:]) then 32 else 10; used += 1 }
+        for byte: value { if used >= 32768 { break }; selected[used] = byte; used += 1 }
+        Set(previous[:], line)
+    }
+}
+All :: () { for i: 0..count - 1 { words[i].picked = true }; Selection() }
+Copy :: () -> bool { return selected[0] != 0 && SystemClipboardSet(TextUntilNul(selected[:])) }
+Draw :: (session: Session, image: string, canvas: Rectangle, enabled: bool) {
+    frame += 1
+    if !active || width <= 0 || height <= 0 || canvas.width <= 0.0 || canvas.height <= 0.0 { return }
+    scale := canvas.width / cast(float32)width
+    if canvas.height / cast(float32)height < scale { scale = canvas.height / cast(float32)height }
+    shown := Rectangle.{canvas.x + (canvas.width - cast(float32)width * scale) / 2.0,
+        canvas.y + (canvas.height - cast(float32)height * scale) / 2.0,
+        cast(float32)width * scale, cast(float32)height * scale}
+    props: ImageProps; props.key = 5400000; props.asset_path = image; props.alt_text = "Select detected text in photo"; props.bounds = shown
+    props.fit = ImageFit.ImageFitContain; Image(session, props)
+    pointer := Input.PointerSample(session)
+    if enabled && pointer.pressed && Input.PointInBounds(pointer.x, pointer.y, shown) {
+        dragging = true; anchor_x = pointer.x; anchor_y = pointer.y
+        for i: 0..count - 1 { words[i].picked = false }
+    }
+    changed: bool; clicked: s32 = -1
+    for i: 0..count - 1 {
+        word := *words[i]
+        bounds := Rectangle.{shown.x + shown.width * cast(float32)word.x / 10000.0,
+            shown.y + shown.height * cast(float32)word.y / 10000.0,
+            shown.width * cast(float32)word.width / 10000.0, shown.height * cast(float32)word.height / 10000.0}
+        if enabled && pointer.pressed && Input.PointInBounds(pointer.x, pointer.y, bounds) { clicked = cast(s32)i }
+        if dragging && (pointer.down || pointer.released) {
+            left := ifx pointer.x < anchor_x then pointer.x else anchor_x; top := ifx pointer.y < anchor_y then pointer.y else anchor_y
+            right := ifx pointer.x > anchor_x then pointer.x else anchor_x; bottom := ifx pointer.y > anchor_y then pointer.y else anchor_y
+            word.picked = bounds.x <= right && bounds.x + bounds.width >= left && bounds.y <= bottom && bounds.y + bounds.height >= top
+            changed = true
+        }
+        box: BoxProps; box.key = cast(u64)(5400100 + i); box.bounds = bounds
+        box.border = Color.{70, 150, 240, 220}; box.fill = ifx word.picked then Color.{70, 150, 240, 110} else Color.{0, 0, 0, 0}; Box(session, box)
+    }
+    if enabled && pointer.pressed {
+        if clicked >= 0 && clicked == click_word && frame - click_frame <= 20 {
+            for i: 0..count - 1 { words[i].picked = TextUntilNul(words[i].line[:]) == TextUntilNul(words[clicked].line[:]) }
+            dragging = false; changed = true
+        }
+        click_word = clicked; click_frame = frame
+    }
+    if pointer.released || !pointer.down { dragging = false }
+    if changed { Selection() }
+}
