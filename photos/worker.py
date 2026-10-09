@@ -53,7 +53,7 @@ def ui_query(library, request):
     fields = ('id', 'name', 'thumbnail', 'display' if modern else 'original', 'date', 'kind', 'favorite',
               'hidden', 'trashed', 'archived', 'width', 'height')
     result['photos'] = [{key: photo[key] for key in fields} for photo in result['photos']]
-    fields = ('name', 'count', 'thumbnail', 'pinned', 'archived', 'smart')
+    fields = ('name', 'count', 'thumbnail', 'pinned', 'archived', 'smart', 'place')
     result['albums'] = [{key: album[key] for key in fields} for album in result['albums']]
     export = library.setting('export', {})
     result['export_status'] = export.get('status', 'Choose a separate destination for a folder backup')
@@ -244,6 +244,10 @@ def library_request(library, request, config):
     elif action == 'live_separate':
         from . import live
         live.separate(library, request.get('id'), authorize)
+    elif action in {'place_create', 'place_update'}:
+        from . import places
+        name = places.create(library, request.get('value'), request.get('id', '')) if action == 'place_create' else places.update(library, request.get('album', ''), request.get('value'))
+        request = {**request, 'album': name, 'view': 'photos', 'offset': 0, 'search': '', 'id': ''}
     elif action == 'album_rename':
         library.rename_album(request.get('album'), request.get('value'))
         request = {**request, 'album': request['value'].strip(), 'offset': 0}
@@ -271,12 +275,14 @@ def library_request(library, request, config):
     else:
         library.edit(request['id'], action, request.get('value'), authorize=authorize)
     result = ui_query(library, request)
+    if action in {'place_create', 'place_update'}:
+        result['place_open'] = 1
     if request.get('id') and action != 'export' and (not library.photo(request['id'])['hidden'] or vault.unlocked(library, request.get('vault_token', ''))):
         result['detail'] = library.details(request['id'])
-    if action in {'album_rename', 'album_create', 'album_smart_create', 'album_delete_empty'}:
+    if action in {'album_rename', 'album_create', 'album_smart_create', 'album_delete_empty', 'place_create', 'place_update'}:
         result['album'] = request['album']
         result['view'] = request.get('view', 'photos')
-        if action in {'album_create', 'album_smart_create'}:
+        if action in {'album_create', 'album_smart_create', 'place_create', 'place_update'}:
             result['search'] = ''
     return result
 

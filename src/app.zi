@@ -343,9 +343,9 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
     sidebar: float32 = ifx viewport.width < 800.0 then 126.0 else 166.0
     x := left + sidebar + 14.0; width := viewport.width - sidebar - 38.0
     Label(session, 2, "Photos", .{left, top + 2.0, sidebar, 36.0}, 28)
-    labels: [11]string = .{"Photos", "Albums", "Favorites", "Videos", "Hidden", "Trash", "Local sync", "Archive", "Uncategorized", "Memories", "Map"}
-    views: [11]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized", "memories", "map"}
-    for i: 0..10 {
+    labels: [12]string = .{"Photos", "Albums", "Favorites", "Videos", "Hidden", "Trash", "Local sync", "Archive", "Uncategorized", "Memories", "Map", "Places"}
+    views: [12]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized", "memories", "map", "places"}
+    for i: 0..11 {
         if Action(session, cast(s32)(10 + i), labels[i], .{left, top + 58.0 + cast(float32)i * 47.0, sidebar, 39.0}) { Model.Navigate(views[i]) }
     }
     Label(session, 3, "ThinkPad only", .{left, viewport.y + viewport.height - 76.0, sidebar, 22.0}, 13)
@@ -370,15 +370,16 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         ImageEditor(session, body)
     } else if Model.editor == "search_help" {
         Label(session, 310, "Find photos with filters", .{x + 12.0, body.y + 12.0, width - 24.0, 34.0}, 22)
-        tips: [8]string = .{"Combine filters to narrow your results. Dates use capture time in UTC.",
+        tips: [9]string = .{"Combine filters to narrow your results. Dates use capture time in UTC.",
             "type:photo, type:video or type:live   ·   is:favorite or is:archived",
             "album:\"Summer trip\"   ·   tag:family   ·   name:IMG",
             "caption:\"birthday cake\"   ·   has:location   ·   has:tags",
             "year:2024   ·   on:2024-06-15",
             "from:2024-06-01 to:2024-06-30 includes both days.",
             "-tag:work excludes a match. Quotes keep a phrase together.",
-            "Save search creates a smart album that updates as your photos change."}
-        for i: 0..7 { Label(session, cast(u64)(311 + i), tips[i], .{x + 12.0, body.y + 68.0 + cast(float32)i * 38.0, width - 24.0, 32.0}, 14) }
+            "Save search creates a smart album that updates as your photos change.",
+            "place:\"Home\"   ·   near:-25.3,-57.6,2 (radius in km)"}
+        for i: 0..8 { Label(session, cast(u64)(711 + i), tips[i], .{x + 12.0, body.y + 68.0 + cast(float32)i * 34.0, width - 24.0, 30.0}, 14) }
         if Action(session, 319, "Back", .{x + 12.0, body.y + 390.0, 94.0, 38.0}) { Model.CancelEditor() }
     } else if Model.editor != "" {
         Label(session, 91, Model.editor_title, .{x + 12.0, body.y + 12.0, width - 24.0, 34.0}, 22)
@@ -438,7 +439,8 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         Label(session, 77, TextUntilNul(Model.detail_caption[:]), .{x, body.y + body.height - 202.0, width, 22.0}, 14)
         Label(session, 78, TextUntilNul(Model.detail_albums[:]), .{x, body.y + body.height - 172.0, width, 22.0}, 13)
         Label(session, 79, TextUntilNul(Model.detail_tags[:]), .{x, body.y + body.height - 142.0, width, 22.0}, 13)
-        Label(session, 96, TextUntilNul(Model.detail_location[:]), .{x, body.y + body.height - 114.0, width, 22.0}, 13)
+        Label(session, 96, TextUntilNul(Model.detail_location[:]), .{x, body.y + body.height - 114.0, width - 148.0, 22.0}, 13)
+        if Action(session, 420, "Name place", .{x + width - 138.0, body.y + body.height - 122.0, 138.0, 30.0}, ready && !photo.hidden && !photo.trashed && Model.detail_location[0] != 0) { Model.BeginPlace(true) }
         step := (width - 32.0) / 5.0
         bottom := body.y + body.height - 82.0
         if Action(session, 55, "Add to album", .{x, bottom, step, 36.0}, ready) { Model.BeginEdit("album_add", "Add photo to album", "", "Enter an album name") }
@@ -457,15 +459,20 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
     } else if Model.view == "map" && !Map.gallery {
         OfflineMap(session, body)
     } else {
-        if Model.view == "albums" {
+        if Model.CatalogView() {
+            if Model.view == "places" {
+                if Action(session, 421, "New place", .{x, body.y, 112.0, 36.0}, !Model.loading) { Model.BeginPlace() }
+                Label(session, 422, "Named areas · matches update automatically", .{x + 122.0, body.y + 6.0, width - 288.0, 26.0}, 14)
+            } else {
             if Action(session, 200, "New album", .{x, body.y, 112.0, 36.0}, !Model.loading) { Model.BeginEdit("album_create", "Create album", "", "An empty album stays in your library until you add photos") }
             filter := ifx Model.album_mode == "active" then "Active albums" else (ifx Model.album_mode == "archived" then "Archived albums" else "Empty albums")
             if Action(session, 201, filter, .{x + 122.0, body.y, 156.0, 36.0}, !Model.loading) { Model.AlbumFilter() }
             ordering := ifx Model.album_sort == "name" then "Album name" else (ifx Model.album_sort == "newest" then "Newest albums" else "Oldest albums")
             if Action(session, 202, ordering, .{x + 288.0, body.y, 156.0, 36.0}, !Model.loading) { Model.AlbumSort() }
+            }
             body.y += 44.0; body.height -= 44.0
         }
-        if Model.view != "albums" {
+        if !Model.CatalogView() {
             if Model.view == "map" {
                 if Action(session, 416, "Back to map", .{x, body.y, 138.0, 36.0}, !Model.loading) { Model.MapBack() }
                 Label(session, 417, "Photos in the selected location", .{x + 148.0, body.y + 7.0, width - 148.0, 26.0}, 14)
@@ -479,7 +486,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                 Label(session, 48, value, .{x + 304.0, body.y + 7.0, width - 304.0, 26.0}); Model.Release(value)
             } else if Model.album[0] != 0 {
                 Label(session, 48, TextUntilNul(Model.album[:]), .{x + 88.0, body.y + 7.0, width - 376.0, 26.0})
-                if Action(session, 49, "Rename album", .{x + width - 278.0, body.y, 138.0, 36.0}, !Model.loading) { Model.BeginEdit("album_rename", "Rename album", TextUntilNul(Model.album[:]), "New album name; originals and other albums stay intact") }
+                if Action(session, 49, ifx Model.AlbumPlace() then "Rename place" else "Rename album", .{x + width - 278.0, body.y, 138.0, 36.0}, !Model.loading) { Model.BeginEdit("album_rename", ifx Model.AlbumPlace() then "Rename place" else "Rename album", TextUntilNul(Model.album[:]), "New name; originals and other albums stay intact") }
             } else {
                 if Action(session, 320, "Save search", .{x + 88.0, body.y, 126.0, 36.0}, !Model.loading && Model.search[0] != 0 && Model.view == "photos") { Model.BeginEdit("album_smart_create", "Name this smart album", "", "Saved search; matching photos update automatically") }
                 if Action(session, 321, "Search tips", .{x + 224.0, body.y, 112.0, 36.0}) { Model.CancelEditor(); Model.editor = "search_help" }
@@ -491,17 +498,28 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
             if Model.album[0] != 0 && !Model.selecting {
                 step := (width - 24.0) / 4.0
                 if Action(session, 203, "Description", .{x, body.y, step, 36.0}, !Model.loading) { Model.BeginEdit("album_description", "Album description", TextUntilNul(Model.album_description[:]), "Describe this album") }
-                if Action(session, 204, ifx Model.album_pinned then "Unpin album" else "Pin album", .{x + step + 8.0, body.y, step, 36.0}, !Model.loading) { Model.Apply("album_pinned") }
+                pin_label := ifx Model.AlbumPlace() then (ifx Model.album_pinned then "Unpin place" else "Pin place") else (ifx Model.album_pinned then "Unpin album" else "Pin album")
+                if Action(session, 204, pin_label, .{x + step + 8.0, body.y, step, 36.0}, !Model.loading) { Model.Apply("album_pinned") }
                 if Model.album_filter[0] != 0 {
+                    if Model.AlbumPlace() {
+                        filter := TextUntilNul(Model.album_filter[:])
+                        if Action(session, 423, "Edit area", .{x + 2.0 * (step + 8.0), body.y, step, 36.0}, !Model.loading) { Model.BeginEdit("place_update", "Edit place area", filter[5:], "Latitude, longitude, radius in kilometres (0.001 to 20040)") }
+                    } else {
                     if Action(session, 322, "Edit search", .{x + 2.0 * (step + 8.0), body.y, step, 36.0}, !Model.loading) { Model.BeginEdit("album_filter", "Edit smart album search", TextUntilNul(Model.album_filter[:]), "Combine filters; Search tips explains their syntax") }
+                    }
                 } else {
                     if Action(session, 206, ifx Model.album_archived then "Unarchive album" else "Archive album", .{x + 2.0 * (step + 8.0), body.y, step, 36.0}, !Model.loading) { Model.Apply("album_archived") }
                 }
-                if Action(session, 207, ifx Model.album_filter[0] != 0 then "Delete smart album" else "Delete empty album", .{x + 3.0 * (step + 8.0), body.y, step, 36.0}, !Model.loading && (Model.matches == 0 || Model.album_filter[0] != 0)) { Model.Apply("album_delete_empty") }
+                if Action(session, 207, ifx Model.AlbumPlace() then "Delete place" else (ifx Model.album_filter[0] != 0 then "Delete smart album" else "Delete empty album"), .{x + 3.0 * (step + 8.0), body.y, step, 36.0}, !Model.loading && (Model.matches == 0 || Model.album_filter[0] != 0)) { Model.Apply("album_delete_empty") }
+                if Model.AlbumPlace() {
+                    area: Vec(u8); BuilderPrint(*area, "Latitude, longitude, radius (km): %", TextUntilNul(Model.album_filter[5:]))
+                    text := BuilderFinish(area); Label(session, 424, text, .{x, body.y + 42.0, width, 26.0}, 14); Model.Release(text)
+                    body.y += 32.0; body.height -= 32.0
+                }
                 body.y += 44.0; body.height -= 44.0
                 if Model.album_description[0] != 0 { Label(session, 208, TextUntilNul(Model.album_description[:]), .{x, body.y, width, 28.0}, 14); body.y += 32.0; body.height -= 32.0 }
                 if Model.view == "photos" {
-                    if Action(session, 418, "Album map", .{x, body.y, 138.0, 36.0}, !Model.loading) { Model.OpenMap() }
+                    if Action(session, 418, ifx Model.AlbumPlace() then "Place map" else "Album map", .{x, body.y, 138.0, 36.0}, !Model.loading) { Model.OpenMap() }
                     body.y += 44.0; body.height -= 44.0
                 }
             }
@@ -517,13 +535,13 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         ScrollDevice.BeginScrollFrame(session, .{pointer.x, pointer.y}, pointer.pressed, pointer.down, pointer.released, PointerWheelTake(session, body), cast(float64)Model.ticks / 60.0)
         cols := cast(s32)(width / 196.0); if cols < 2 { cols = 2 }; if cols > 8 { cols = 8 }
         cell := (width - cast(float32)(cols - 1) * 12.0) / cast(float32)cols
-        item_count := ifx Model.view == "albums" then Model.album_count else Model.count
-        height: float32 = ifx Model.view == "albums" then 68.0 else cell + 12.0
-        rows := ifx Model.view == "albums" then item_count else (item_count + cols - 1) / cols
-        props: ScrollProps; props.key = 80; props.bounds = body; props.content_height = cast(s32)(ifx Model.view == "albums" then cast(float32)rows * height else LayoutFeed(cols,height)); props.scroll_offset = Model.scroll
+        item_count := ifx Model.CatalogView() then Model.album_count else Model.count
+        height: float32 = ifx Model.CatalogView() then 68.0 else cell + 12.0
+        rows := ifx Model.CatalogView() then item_count else (item_count + cols - 1) / cols
+        props: ScrollProps; props.key = 80; props.bounds = body; props.content_height = cast(s32)(ifx Model.CatalogView() then cast(float32)rows * height else LayoutFeed(cols,height)); props.scroll_offset = Model.scroll
         scrolling := Scroll(session, props); Model.scroll = scrolling.scroll_offset
         first: s32
-        if Model.view != "albums" {
+        if !Model.CatalogView() {
             end := item_count
             while first < end {
                 middle := (first + end) / 2
@@ -531,19 +549,19 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
             }
         }
         for i: first..item_count - 1 {
-            bx := x + (ifx Model.view == "albums" then 0.0 else cast(float32)item_column[i] * (cell + 12.0))
-            by := body.y + (ifx Model.view == "albums" then cast(float32)i * height else item_y[i]) - cast(float32)Model.scroll
+            bx := x + (ifx Model.CatalogView() then 0.0 else cast(float32)item_column[i] * (cell + 12.0))
+            by := body.y + (ifx Model.CatalogView() then cast(float32)i * height else item_y[i]) - cast(float32)Model.scroll
             if by - 42.0 > body.y + body.height { break }
-            if Model.view != "albums" && group_start[i] && by - 42.0 < body.y + body.height && by > body.y {
+            if !Model.CatalogView() && group_start[i] && by - 42.0 < body.y + body.height && by > body.y {
                 Record(3000000 + i, TextUntilNul(Model.photos[i].date[:]), .{x + 4.0, by - 34.0, width - 12.0, 28.0}, false)
                 Label(session, cast(u64)(3000000 + i), TextUntilNul(Model.photos[i].date[:]), .{x + 4.0, by - 34.0, width - 12.0, 28.0}, 19)
             }
             if by + height < body.y || by > body.y + body.height { continue }
-            if Model.view == "albums" {
+            if Model.CatalogView() {
                 item := *Model.catalog[i]
                 clicked := Action(session, cast(s32)(1000 + i), TextUntilNul(item.name[:]), .{bx + 68.0, by, width - 190.0, 56.0})
                 ImageAt(session, cast(u64)(4000000 + i), TextUntilNul(item.thumbnail[:]), TextUntilNul(item.name[:]), .{bx, by, 56.0, 56.0}, true)
-                info: Vec(u8); BuilderPrint(*info, "% items", item.count); if item.smart { BuilderPrint(*info, " · Smart") }; if item.pinned { BuilderPrint(*info, " · Pinned") }
+                info: Vec(u8); BuilderPrint(*info, "% items", item.count); if item.place { BuilderPrint(*info, " · Place") } else if item.smart { BuilderPrint(*info, " · Smart") }; if item.pinned { BuilderPrint(*info, " · Pinned") }
                 text := BuilderFinish(info); Label(session, cast(u64)(4100000 + i), text, .{bx + width - 120.0, by + 16.0, 120.0, 24.0}, 13); Model.Release(text)
                 if clicked {
                     Model.ClearSelection(); Model.Set(Model.album[:], TextUntilNul(item.name[:])); Model.view = "photos"; Model.offset = 0; Model.scroll = 0; Model.Request(); break
@@ -565,7 +583,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
             }
         }
         if scrolling.opened { unused End(session) }
-        if Model.view != "albums" && cast(float32)Model.scroll + body.height + height * 2.0 >= feed_height { Model.More() }
+        if !Model.CatalogView() && cast(float32)Model.scroll + body.height + height * 2.0 >= feed_height { Model.More() }
         if item_count == 0 { Label(session, 90, ifx Model.total == 0 then "Import a local folder to begin." else "No items match this view or search.", .{x + 20.0, body.y + 48.0, width - 40.0, 40.0}, 18) }
     }
     footer := viewport.y + viewport.height - 42.0

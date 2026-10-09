@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.15
+
+- Name places from a photo's location or enter an area manually, and browse matching photos as imports and location corrections update the library.
+- Search by place name or combine named places and radius filters with dates, albums and other photo properties, without contacting a geocoding service.
+- Change a place's center and radius, rename, pin or remove it while keeping originals and album memberships; preserve definitions in encrypted backup and library exports.
+
 ## 0.1.14
 
 - View HEIC/HEIF and supported camera RAW photos with oriented thumbnails and full-size viewing, retaining unchanged originals for export and encrypted backup.

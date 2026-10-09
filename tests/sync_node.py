@@ -136,6 +136,18 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         second.edit(photo_id, 'location', ''); peer.sync(); client.sync()
         assert first.details(photo_id)['location'] == ''
         assert first.query('map', album='Renamed fixture')['count'] == 1
+        from photos import places
+        places.create(second, json.dumps(['Asuncion', '-25.3, -57.6, 2']))
+        assert peer.sync() == 0 and client.sync() == 0
+        assert first.album_details('Asuncion')['filter'] == 'near:-25.3,-57.6,2'
+        assert first.query(search='place:Asuncion')['count'] == 1
+        places.update(first, 'Asuncion', '-25.3, -57.6, 3')
+        assert client.sync() == 0 and peer.sync() == 0
+        assert second.album_details('Asuncion')['filter'] == 'near:-25.3,-57.6,3'
+        second.rename_album('Asuncion', 'Our place'); peer.sync(); client.sync()
+        assert first.query(search='place:"Our place"')['count'] == 1
+        first.edit_album('Our place', 'delete_empty'); client.sync(); peer.sync()
+        assert not second.album_list('places')
         first.edit_album('', 'smart_create', 'Dynamic favorites', search='is:favorite year:2024')
         assert client.sync() == 0; assert peer.sync() == 0
         assert second.album_details('Dynamic favorites')['filter']=='is:favorite year:2024'
@@ -185,7 +197,7 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         assert first.photo(motion_id)['hidden']==1 and first.query(search='type:live')['count']==0
         second.edit(still_id,'hidden_set','0');live.separate(second,still_id,lambda p:True);peer.sync();client.sync()
         assert first.query(search='type:live')['count']==0 and len(live.components(first,first.photo(still_id)))==1
-        print('Isolated Daochi v6: signed baseline/editor sync plus HEIC/RAW/full motion originals, pairing, privacy and separation round trip passed')
+        print('Isolated Daochi v6: signed baseline/editor sync, named-place creation/update/rename/deletion, HEIC/RAW/full motion originals, pairing, privacy and separation round trip passed')
     finally:
         process.terminate()
         process.wait(timeout=10)

@@ -101,8 +101,19 @@ gallery page. Hidden and Trash are always excluded, even while Hidden is unlocke
 Zero coordinates and date-line edges are retained. Camera GPS is read on import;
 location corrections and removals remain authoritative during later rescans.
 The map makes no tile or geocoding requests. Its coarse Natural Earth land outlines
-provide orientation; street detail, named radius-based location tags and geographic
-trip curation remain unfinished.
+provide orientation; street detail and geographic trip curation remain unfinished.
+
+Places names an area by its latitude, longitude and radius in kilometres. Choose
+Name place in a visible photo's details to start at that photo's location, or New
+place in Places to enter coordinates. Matching photos update as locations are
+imported or corrected. Search a place name, use `place:"Home"`, or combine
+`near:-25.3,-57.6,2` with other filters. Distance uses a spherical Earth and crosses
+the date line and poles correctly; radii range from one metre to 20040 km. Hidden
+and Trash stay excluded from place galleries and maps. Places appear alongside
+saved albums and share their naming rules; edit an area's center and radius,
+rename, pin or delete it without changing originals or memberships. Definitions
+use the existing encrypted album backup and library-export format. No geocoding
+service receives coordinates or searches.
 
 Use Select, Ctrl-click or Shift-click to select up to 1000 items. Select loaded
 selects the photos already loaded into the feed, including those outside the
@@ -197,7 +208,7 @@ and [export behavior](https://ente.com/help/photos/features/backup-and-sync/expo
 The remaining replacement work includes:
 
 - Mobile clients, permission-aware background camera backup and device space recovery.
-- On-device face grouping, semantic search, detailed maps and radius-based location tags, curated memories and automatically curated trip/people albums.
+- On-device face grouping, semantic search, detailed maps, curated memories and automatically curated trip/people albums.
 - Advanced photo editing, encrypted video streaming, animated editing previews, embedded Android motion photos, HDR display and broader codec/camera coverage.
 - Private sharing, collaboration, public links, comments and account recovery.
   Any sharing design needs to honor the owner's ThinkPad-only sync restriction.
@@ -239,6 +250,7 @@ make video-window-test video-portable-test
 make crop-window-test crop-portable-test
 make viewer-window-test viewer-portable-test
 make map-window-test map-portable-test
+make places-window-test places-portable-test
 make codec-window-test codec-portable-test
 make playback-window-test playback-portable-test
 PHOTOS_DAOCHI=/path/to/daochi make sync-test

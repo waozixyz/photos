@@ -3,6 +3,7 @@
 #import "std/text_buffer"
 #import "std/text"
 #import "std/date_parse"
+Geo :: #import "geo";
 
 Parameter :: struct { bytes: [2049]u8 }
 Predicate :: struct {
@@ -32,7 +33,7 @@ Recognized :: (name: string) -> bool {
     return name == "type" || name == "is" || name == "favorite" || name == "archived" ||
         name == "album" || name == "tag" || name == "name" || name == "caption" ||
         name == "from" || name == "to" || name == "after" || name == "before" ||
-        name == "on" || name == "year" || name == "has"
+        name == "on" || name == "year" || name == "has" || name == "near" || name == "place"
 }
 Date :: (value: string) -> s64 {
     if value.count != 10 || value[4] != 45 || value[7] != 45 { return -1 }
@@ -47,8 +48,14 @@ Boolean :: (value: string) -> s32 {
     return -1
 }
 TextMatch :: (query: *Predicate, value: string) {
-    AddSQL(query, "(name LIKE ? ESCAPE '\\' OR caption LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\' OR albums LIKE ? ESCAPE '\\' OR strftime('%Y-%m-%d',taken,'unixepoch') LIKE ? ESCAPE '\\')")
+    AddSQL(query, "(name LIKE ? ESCAPE '\\' OR caption LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\' OR albums LIKE ? ESCAPE '\\' OR strftime('%Y-%m-%d',taken,'unixepoch') LIKE ? ESCAPE '\\'")
     for i: 0..4 { Bind(query, value, true) }
+    AddSQL(query, " OR EXISTS(SELECT 1 FROM albums places WHERE places.deleted=0 AND places.filter LIKE 'near:%' AND places.name LIKE ? ESCAPE '\\' AND ")
+    Bind(query, value, true); RadiusMatch(query, "substr(places.filter,6)"); AddSQL(query, "))")
+}
+RadiusMatch :: (query: *Predicate, spec: string) {
+    AddSQL(query, Geo.ValidCoordinates); AddSQL(query, " AND photos_near("); AddSQL(query, Geo.Latitude)
+    AddSQL(query, ","); AddSQL(query, Geo.Longitude); AddSQL(query, ","); AddSQL(query, spec); AddSQL(query, ")=1")
 }
 ApplyTerm :: (query: *Predicate, key: string, value: string) {
     if value.count == 0 { query.error = "A search filter needs a value"; return }
@@ -70,6 +77,13 @@ ApplyTerm :: (query: *Predicate, key: string, value: string) {
         else { query.error = "Choose is:favorite, archived, video, photo, uncategorized or untagged" }
     } else if key == "album" {
         AddSQL(query, "EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=? COLLATE NOCASE)"); Bind(query, value)
+    } else if key == "near" {
+        radius: Geo.Radius
+        if !Geo.Parse(value, *radius) { query.error = "Use near:latitude,longitude,radius-km (0.001 to 20040 km)"; return }
+        RadiusMatch(query, "?"); Bind(query, value)
+    } else if key == "place" {
+        AddSQL(query, "EXISTS(SELECT 1 FROM albums places WHERE places.deleted=0 AND places.filter LIKE 'near:%' AND places.name=? COLLATE NOCASE AND ")
+        Bind(query, value); RadiusMatch(query, "substr(places.filter,6)"); AddSQL(query, ")")
     } else if key == "name" || key == "caption" || key == "tag" {
         if key == "name" { AddSQL(query, "name LIKE ? ESCAPE '\\'") }
         else if key == "caption" { AddSQL(query, "caption LIKE ? ESCAPE '\\'") }

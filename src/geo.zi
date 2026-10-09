@@ -1,0 +1,57 @@
+// Spherical radius matching stays local. Named places reuse encrypted saved
+// album records; this module never contacts geocoding or mapping services.
+#import "std/json_scan"
+#import "std/byte_text_linux"
+sqlite :: #system_library "sqlite3";
+math :: #system_library "m";
+Sin :: (value: float64) -> float64 #foreign math "sin";
+Cos :: (value: float64) -> float64 #foreign math "cos";
+Sqrt :: (value: float64) -> float64 #foreign math "sqrt";
+Atan2 :: (y: float64, x: float64) -> float64 #foreign math "atan2";
+Scalar :: #type (context: *void, argc: s32, argv: **void) #c_call;
+Create :: (database: *void, name: *u8, argc: s32, flags: s32, data: *void, callback: Scalar, step: *void, final: *void, destroy: *void) -> s32 #foreign sqlite "sqlite3_create_function_v2";
+ValueType :: (value: *void) -> s32 #foreign sqlite "sqlite3_value_type";
+ValueDouble :: (value: *void) -> float64 #foreign sqlite "sqlite3_value_double";
+ValueText :: (value: *void) -> *u8 #foreign sqlite "sqlite3_value_text";
+ValueBytes :: (value: *void) -> s32 #foreign sqlite "sqlite3_value_bytes";
+ResultInt :: (context: *void, value: s32) #foreign sqlite "sqlite3_result_int";
+
+Latitude :: "coalesce(json_extract(photos.metadata,'$.geoData.latitude'),json_extract(photos.metadata,'$.geoDataExif.latitude'))";
+Longitude :: "coalesce(json_extract(photos.metadata,'$.geoData.longitude'),json_extract(photos.metadata,'$.geoDataExif.longitude'))";
+ValidCoordinates :: "coalesce(nullif(json_type(photos.metadata,'$.geoData.latitude'),'null'),json_type(photos.metadata,'$.geoDataExif.latitude')) IN ('integer','real') AND coalesce(nullif(json_type(photos.metadata,'$.geoData.longitude'),'null'),json_type(photos.metadata,'$.geoDataExif.longitude')) IN ('integer','real')";
+Radius :: struct { latitude: float64; longitude: float64; km: float64 }
+Parse :: (text: string, out: *Radius) -> bool {
+    if text.count == 0 || text.count > 128 { return false }
+    values: [3]float64; at := Space(text, 0)
+    for i: 0..2 {
+        value := ReadNumber(text, at)
+        if !value.valid || value.value != value.value { return false }
+        values[i] = value.value; at = Space(text, ValueEnd(text, at, 0))
+        if i < 2 { if at < 0 || at >= cast(s32)text.count || text[at] != 44 { return false }; at = Space(text, at + 1) }
+    }
+    if at != cast(s32)text.count || values[0] < -90.0 || values[0] > 90.0 || values[1] < -180.0 || values[1] > 180.0 || values[2] < 0.001 || values[2] > 20040.0 { return false }
+    out.* = .{values[0], values[1], values[2]}; return true
+}
+Within :: (latitude: float64, longitude: float64, radius: Radius) -> bool {
+    if latitude != latitude || longitude != longitude || latitude < -90.0 || latitude > 90.0 || longitude < -180.0 || longitude > 180.0 { return false }
+    radians: float64 = 0.017453292519943295
+    a := Sin((latitude - radius.latitude) * radians * 0.5)
+    b := Sin((longitude - radius.longitude) * radians * 0.5)
+    h := a * a + Cos(latitude * radians) * Cos(radius.latitude * radians) * b * b
+    if h < 0.0 { h = 0.0 }; if h > 1.0 { h = 1.0 }
+    return 12742.0176 * Atan2(Sqrt(h), Sqrt(1.0 - h)) <= radius.km + 0.000000001
+}
+Near :: (context: *void, argc: s32, argv: **void) {
+    ResultInt(context, 0)
+    if argc != 3 { return }
+    for i: 0..1 { kind := ValueType(argv[i]); if kind != 1 && kind != 2 { return } }
+    if ValueType(argv[2]) != 3 || ValueBytes(argv[2]) < 1 || ValueBytes(argv[2]) > 128 { return }
+    text := TextFromCString(ValueText(argv[2])); radius: Radius
+    if cast(s32)text.count != ValueBytes(argv[2]) || !Parse(text, *radius) { return }
+    if Within(ValueDouble(argv[0]), ValueDouble(argv[1]), radius) { ResultInt(context, 1) }
+}
+Register :: (database: *void) -> bool {
+    name: [12]u8 = .{112,104,111,116,111,115,95,110,101,97,114,0}
+    callback: Scalar = Near
+    return Create(database, *name[0], 3, 0x200801, null, callback, null, null, null) == 0
+}

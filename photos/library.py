@@ -505,12 +505,16 @@ class Library:
             raise LibraryError('Album not found')
         return dict(row)
 
-    def edit_album(self, name, action, value=None, search=''):
+    def edit_album(self, name, action, value=None, search='', source=''):
         if action in {'smart_create', 'filter'}:
             from .query import validate
             search = validate(self, search if action == 'smart_create' else value)
         with self.db:
             self.db.execute('BEGIN IMMEDIATE')
+            if source:
+                photo = self.photo(source)
+                if photo['hidden'] or photo['trashed']:
+                    raise LibraryError('Choose a visible photo outside Trash to name its place')
             if action in {'create', 'smart_create'}:
                 name = self.album_name(value)
                 if self.db.execute('SELECT 1 FROM albums WHERE name=?', (name,)).fetchone():
@@ -551,7 +555,7 @@ class Library:
         return name
 
     def album_list(self, mode='active', sort='name', search=''):
-        if mode not in {'active', 'archived', 'empty', 'all'} or sort not in {'name', 'newest', 'oldest'}:
+        if mode not in {'active', 'archived', 'empty', 'all', 'places'} or sort not in {'name', 'newest', 'oldest'}:
             raise LibraryError('Choose a valid album filter and ordering')
         members = {}
         for row in self.db.execute('''SELECT p.id,p.taken,j.value FROM photos p,json_each(p.albums) j
@@ -566,6 +570,10 @@ class Library:
         result = []
         for row in self.db.execute('SELECT * FROM albums WHERE deleted=0'):
             album = dict(row)
+            from .places import is_place
+            place = is_place(album['filter'])
+            if mode == 'places' and not place:
+                continue
             ids = members.get(album['name'], [])
             if search and search.casefold() not in album['name'].casefold():
                 continue
@@ -582,7 +590,7 @@ class Library:
                 continue
             cover = album['cover'] if album['cover'] in ids else (ids[0] if ids else '')
             preview = self.thumbnail(cover)
-            album.update(count=count, smart=int(bool(album['filter'])), thumbnail=str(preview) if cover and preview.is_file() else '')
+            album.update(count=count, smart=int(bool(album['filter'])), place=int(place), thumbnail=str(preview) if cover and preview.is_file() else '')
             result.append(album)
         result.sort(key=lambda a: (not a['pinned'], a['name'].casefold(), a['id']) if sort == 'name' else
                     (not a['pinned'], -a['created'] if sort == 'newest' else a['created'], a['id']))
@@ -591,7 +599,8 @@ class Library:
     def details(self, photo_id):
         photo = self.photo(photo_id)
         metadata = json.loads(photo['metadata'])
-        geo = metadata.get('geoData') or metadata.get('geoDataExif') or {}
+        from .places import coordinates
+        geo = coordinates(metadata)
         from . import live
         parts = live.components(self, photo)
         return dict(id=photo_id, name=photo['name'], live=int(len(parts) == 2),
@@ -602,7 +611,7 @@ class Library:
                     albums=' · '.join(json.loads(photo['albums'])), size=sum(p['size'] for p in parts),
                     width=photo['width'], height=photo['height'],
                     taken=datetime.fromtimestamp(photo['taken'], timezone.utc).isoformat(),
-                    location=f"{geo.get('latitude', '')}, {geo.get('longitude', '')}" if isinstance(geo, dict) and 'latitude' in geo else '')
+                    location=f"{geo[0]}, {geo[1]}" if geo else '')
 
     def query(self, view='photos', search='', album='', offset=0, limit=60, sort='newest', album_mode='active', album_sort='name', memory_date='', hidden_access=True, map_bounds=None, map_gallery=False):
         # Map summaries contain coordinates rather than IDs to hydrate. Hold
@@ -653,7 +662,7 @@ class Library:
             photo['live'] = int(bool(json.loads(photo['metadata']).get('photosLive', {}).get('video')))
             photo['albums'] = json.loads(photo['albums'])
             photos.append(photo)
-        albums = self.album_list(album_mode, album_sort, search if view == 'albums' else '')
+        albums = self.album_list('places' if view == 'places' else album_mode, album_sort, search if view in {'albums', 'places'} else '')
         totals = self.db.execute('SELECT COUNT(*),COALESCE(SUM(size),0),SUM(dirty) FROM photos').fetchone()
         album_pending = self.db.execute('SELECT COUNT(*) FROM albums WHERE dirty=1').fetchone()[0]
         result = dict(photos=photos, count=count, albums=albums, total=totals[0], bytes=totals[1], pending=(totals[2] or 0) + album_pending,
@@ -667,6 +676,8 @@ class Library:
             row = self.db.execute('SELECT * FROM albums WHERE name=? AND deleted=0', (album,)).fetchone()
             if row:
                 result['album_detail'] = dict(row)
+                from .places import is_place
+                result['album_detail']['place'] = int(is_place(row['filter']))
         return result
 
     def export(self, photo_id, folder, _component=False):

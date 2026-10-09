@@ -3,6 +3,7 @@
 using SQLite :: #import "sqlite/SQLite";
 Search :: #import "search";
 Locations :: #import "locations";
+Geo :: #import "geo";
 Clock :: #import "std/date_time_linux";
 #import "std/date_parse"
 #import "std/byte_text_linux"
@@ -86,6 +87,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
     database: *void
     if SqliteOpenText(TextFromCString(argv[1]),*database,1) != SQLITE_OK { if database != null { unused SqliteClose(database) }; return Failure("Cannot open the private gallery database") }
     defer { unused SqliteClose(database) }
+    if !Geo.Register(database) { return Failure("Cannot initialize local radius search") }
     unused SqliteBusyTimeout(database,10000)
     if SqliteExecText(database,"BEGIN") != SQLITE_OK { return Failure("Cannot open a gallery snapshot") }
     defer { unused SqliteExecText(database,"ROLLBACK") }

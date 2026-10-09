@@ -91,7 +91,8 @@ with tempfile.TemporaryDirectory() as directory:
                     assert child.poll() is None, log_path.read_text()
                     subprocess.run(['import', '-window', window, str(shot)], check=True, stdout=subprocess.DEVNULL, timeout=5)
                     with Image.open(shot) as image:
-                        return image.width > 20 and image.height > 600 and image.convert('RGB').getpixel((20, 600)) == expected
+                        # The left canvas margin stays clear of sidebar buttons.
+                        return image.width > 20 and image.height > 600 and image.convert('RGB').getpixel((5, 600)) == expected
                 wait(lambda: color((20, 30, 40)), 'Portable Photos did not inherit the dark host theme')
                 wait(lambda: len(calls) >= 1, 'Date feed did not load')
                 assert calls[0]['view'] == 'photos' and calls[0]['offset'] == 0

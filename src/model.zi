@@ -40,7 +40,9 @@ Photo :: struct {
     height: s32
 }
 Selection :: struct { id: [65]u8 }
-Album :: struct { name: [513]u8; thumbnail: [4097]u8; count: s32; pinned: bool; archived: bool; smart: bool }
+Album :: struct { name: [513]u8; thumbnail: [4097]u8; count: s32; pinned: bool; archived: bool; smart: bool; place: bool }
+place_name: [513]u8;
+place_area: [257]u8;
 picked: Vec(Selection);
 picked_count: s32;
 selecting: bool;
@@ -93,6 +95,7 @@ album_description: [8193]u8;
 album_filter: [513]u8;
 album_pinned: bool;
 album_archived: bool;
+album_place: bool;
 export_status: [1025]u8;
 export_continuous: bool;
 view: string = "photos";
@@ -281,19 +284,21 @@ Tick :: () {
         if FieldAt(json, 0, "memory_date") >= 0 { Decode(json, 0, "memory_date", memory_date[:]) }
         Decode(json, 0, "export_status", export_status[:]); export_continuous = Number(json, 0, "export_continuous") > 0
         if mutation { ClearSelection(); editor = "" }
+        if Number(json, 0, "place_open") > 0 { selected = -1; detail_id[0] = 0 }
         if FieldAt(json, 0, "album") >= 0 { Decode(json, 0, "album", album[:]); offset = 0; scroll = 0 }
         if FieldAt(json, 0, "search") >= 0 { Decode(json, 0, "search", search[:]); search_cursor = 0; search_anchor = 0 }
         if FieldAt(json, 0, "view") >= 0 {
             fresh_view: [32]u8; Decode(json, 0, "view", fresh_view[:])
-            for i: 0..cast(s32)10 { if View(i) == TextUntilNul(fresh_view[:]) { view = View(i) } }
+            for i: 0..cast(s32)11 { if View(i) == TextUntilNul(fresh_view[:]) { view = View(i) } }
         }
         album_detail := FieldAt(json, 0, "album_detail")
-        album_description[0] = 0; album_filter[0] = 0; album_pinned = false; album_archived = false
+        album_description[0] = 0; album_filter[0] = 0; album_pinned = false; album_archived = false; album_place = false
         if album_detail >= 0 {
             Decode(json, album_detail, "description", album_description[:])
             Decode(json, album_detail, "filter", album_filter[:])
             album_pinned = Number(json, album_detail, "pinned") > 0
             album_archived = Number(json, album_detail, "archived") > 0
+            album_place = Number(json, album_detail, "place") > 0
         }
         detail := FieldAt(json, 0, "detail")
         if detail >= 0 {
@@ -323,6 +328,7 @@ Tick :: () {
             Decode(json, at, "name", item.name[:]); Decode(json, at, "thumbnail", item.thumbnail[:]); item.count = Number(json, at, "count")
             item.pinned = Number(json, at, "pinned") > 0; item.archived = Number(json, at, "archived") > 0
             item.smart = Number(json, at, "smart") > 0
+            item.place = Number(json, at, "place") > 0
             album_count += 1; at = Space(json, ValueEnd(json, at, 0)); if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json, at + 1) }
         }
         text: Vec(u8); BuilderPrint(*text, "% photos & videos · % albums · % queued", total, album_count, pending)
@@ -340,9 +346,9 @@ Navigate :: (target: string) {
     Viewer.Reset()
     StopPlayback()
     queued_request = false
-    if loading { for i: 0..cast(s32)10 { if View(i) == target { queued_view = i } }; return }
+    if loading { for i: 0..cast(s32)11 { if View(i) == target { queued_view = i } }; return }
     if view == "hidden" && target != "hidden" && vault_token[0] != 0 {
-        for i: 0..cast(s32)10 { if View(i) == target { queued_view = i } }
+        for i: 0..cast(s32)11 { if View(i) == target { queued_view = i } }
         vault_unlocked = false; selected = -1; ClearSelection(); editor = ""; Wipe(edit_value[:]); Wipe(vault_first[:]); Wipe(edit_preview[:])
         Request("vault_lock"); Wipe(vault_token[:]); return
     }
@@ -420,6 +426,16 @@ Apply :: (action: string, value: string = "") {
 }
 SaveEditor :: () {
     if loading { return }
+    if editor == "place_name" {
+        if edit_value[0] == 0 || TextUntilNul(edit_value[:]).count > 512 { Set(message[:], "Choose a place name of at most 512 bytes"); return }
+        Set(place_name[:], TextUntilNul(edit_value[:]))
+        BeginEdit("place_create", "Choose the place area", TextUntilNul(place_area[:]), "Latitude, longitude, radius in kilometres (0.001 to 20040)"); return
+    }
+    if editor == "place_create" {
+        out: Vec(u8); BuilderPrint(*out, "["); Quoted(*out, TextUntilNul(place_name[:]))
+        BuilderPrint(*out, ","); Quoted(*out, TextUntilNul(edit_value[:])); BuilderPrint(*out, "]")
+        value := BuilderFinish(out); Apply("place_create", value); Release(value); return
+    }
     if editor == "video_trim" {
         text := TextUntilNul(edit_value[:]); comma: s32 = -1
         for i: 0..cast(s32)text.count - 1 { if text[i] == 44 { if comma >= 0 { Set(message[:], "Use start, end in seconds"); return }; comma = i } }
@@ -567,7 +583,7 @@ Edit :: (out: []u8, start: s32, end: s32, replacement: string) {
 
 // Append another page near the end of the date feed without changing its scroll.
 More :: () {
-    if loading || ticks < more_due || count + feed_base >= matches || view == "albums" || view == "sync" { return }
+    if loading || ticks < more_due || count + feed_base >= matches || CatalogView() || view == "sync" { return }
     offset = count + feed_base; appending = true; Request()
 }
 
@@ -578,4 +594,12 @@ MapGallery :: (index: s32 = -1) {
     Map.OpenGallery(index); RefreshMap()
 }
 MapBack :: () { if loading { return }; Map.gallery = false; Map.dragged = false; RefreshMap() }
-View :: (index: s32) -> string { names: [11]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized", "memories", "map"}; return names[index] }
+CatalogView :: () -> bool { return view == "albums" || view == "places" }
+AlbumPlace :: () -> bool { return album_place }
+BeginPlace :: (from_photo: bool = false) {
+    place_name[0] = 0
+    if from_photo { out: Vec(u8); BuilderPrint(*out, "%, 1", TextUntilNul(detail_location[:])); value := BuilderFinish(out); Set(place_area[:], value); Release(value) }
+    else { Set(place_area[:], "0, 0, 1") }
+    BeginEdit("place_name", "Name this place", "", "A name such as Home; photos in its radius match automatically")
+}
+View :: (index: s32) -> string { names: [12]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized", "memories", "map", "places"}; return names[index] }
