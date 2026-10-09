@@ -85,8 +85,15 @@ Field :: (session: Session, bounds: Rectangle, is_search: bool, key: s32, modifi
     value: [8193]u8
     Model.Set(value[:], ifx is_search then TextUntilNul(Model.search[:]) else (ifx editing then TextUntilNul(Model.edit_value[:]) else TextUntilNul(Model.input[:])))
     props.value = TextUntilNul(value[:])
+    mask: [1025]u8
+    if editing && Model.Secret() {
+        props.secure = true; chars: s32
+        for i: 0..cast(s32)props.value.count - 1 { if (value[i] & 192) != 128 { mask[chars] = 42; chars += 1 } }
+        props.display_value = TextUntilNul(mask[:])
+    }
     props.cursor = ifx is_search then Model.search_cursor else Model.cursor; props.anchor = ifx is_search then Model.search_anchor else Model.anchor
     props.focused = ifx is_search then Model.search_focused else Model.focused; props.max_bytes = ifx is_search then 512 else (ifx editing then 8192 else 4096)
+    if editing && Model.Secret() { props.max_bytes = 1024 }
     if props.focused { props.input = TextFieldInputFor(key, modifiers, typed) }
     result := TextField(session, props)
     Record(ifx is_search then 40 else 41, props.label, bounds, true)
@@ -191,8 +198,19 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         Label(session, 91, Model.editor_title, .{x + 12.0, body.y + 12.0, width - 24.0, 34.0}, 22)
         committed := Field(session, .{x + 12.0, body.y + 64.0, width - 24.0, 44.0}, false, key, modifiers, typed)
         Label(session, 92, Model.editor_hint, .{x + 12.0, body.y + 124.0, width - 24.0, 26.0}, 13)
-        if Action(session, 93, "Save", .{x + 12.0, body.y + 172.0, 94.0, 38.0}, !Model.loading) || (committed && !Model.loading) { Model.Apply(Model.editor, TextUntilNul(Model.edit_value[:])) }
-        if Action(session, 94, "Cancel", .{x + 118.0, body.y + 172.0, 94.0, 38.0}, !Model.loading) { Model.editor = ""; Model.focused = false }
+        if Action(session, 93, "Save", .{x + 12.0, body.y + 172.0, 94.0, 38.0}, !Model.loading) || (committed && !Model.loading) {
+            Model.SaveEditor()
+        }
+        if Action(session, 94, "Cancel", .{x + 118.0, body.y + 172.0, 94.0, 38.0}, !Model.loading) { Model.CancelEditor() }
+    } else if Model.view == "hidden" && !Model.vault_unlocked {
+        Label(session, 290, "Hidden is locked", .{x + 18.0, body.y + 24.0, width - 36.0, 40.0}, 26)
+        Label(session, 291, "Authenticate to view, export or change hidden photos.", .{x + 18.0, body.y + 88.0, width - 36.0, 30.0}, 15)
+        if Model.vault_configured {
+            if Action(session, 292, "Unlock Hidden", .{x + 18.0, body.y + 144.0, 180.0, 40.0}, !Model.loading) { Model.BeginEdit("vault_unlock", "Unlock Hidden", "", "Your local Hidden password") }
+        } else {
+            Label(session, 293, "Create a password for Hidden on this desktop.", .{x + 18.0, body.y + 128.0, width - 36.0, 30.0}, 15)
+            if Action(session, 294, "Create password", .{x + 18.0, body.y + 184.0, 180.0, 40.0}, !Model.loading) { Model.BeginEdit("vault_setup", "Create Hidden password", "", "Choose at least 8 characters and a password you can remember") }
+        }
     } else if Model.view == "sync" {
         Label(session, 70, "Local by design", .{x + 18.0, body.y + 24.0, width - 36.0, 36.0}, 26)
         Label(session, 71, "Your originals and albums stay on your desktop and ThinkPad.", .{x + 18.0, body.y + 80.0, width - 36.0, 30.0})
@@ -337,5 +355,8 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
     }
     footer := viewport.y + viewport.height - 42.0
     Label(session, 6, TextUntilNul(Model.message[:]), .{x, footer, width - 182.0, 28.0}, 12)
+    if Model.view == "hidden" && Model.vault_unlocked {
+        if Action(session, 295, "Lock Hidden", .{x + width - 142.0, footer - 2.0, 142.0, 34.0}, !Model.loading) { Model.Apply("vault_lock"); Model.vault_unlocked = false; Model.Wipe(Model.vault_token[:]); Model.selected = -1; Model.CancelEditor() }
+    }
     return 0
 }

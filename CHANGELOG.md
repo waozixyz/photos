@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.8
+
+- Protect Hidden with a confirmed local password and masked input, using the same lock in the standalone app and Harmony.
+- Require authentication before viewing, exporting or changing hidden photos, including hidden items in Trash and mixed selections.
+- Relock when leaving Hidden, pressing Lock Hidden, restarting the local service or reaching the ten-minute unlock limit, including while editing a photo.
+
 ## 0.1.7
 
 - Preview photo rotation, horizontal and vertical flips, centered crop presets, brightness, contrast and saturation, then save a separate PNG copy while keeping the original.

@@ -9,6 +9,7 @@ import urllib.error
 
 from .library import Library, LibraryError, atomic, packed
 from .sync import Client
+from . import vault
 
 
 def configuration():
@@ -30,7 +31,8 @@ def ui_query(library, request):
     result = library.query(request.get('view', 'photos'), request.get('search', ''),
                            request.get('album', ''), request.get('offset', 0), sort=request.get('sort', 'newest'),
                            album_mode=request.get('album_mode', 'active'), album_sort=request.get('album_sort', 'name'),
-                           memory_date=request.get('memory_date', ''))
+                           memory_date=request.get('memory_date', ''), hidden_access=vault.unlocked(library, request.get('vault_token', '')))
+    result.update(vault.state(library, request.get('vault_token', '')))
     # The gallery needs only these fields. Full metadata and encrypted sync
     # manifests stay in the store rather than being decoded on every UI poll.
     fields = ('id', 'name', 'thumbnail', 'original', 'date', 'kind', 'favorite',
@@ -46,6 +48,21 @@ def ui_query(library, request):
 
 def library_request(library, request, config):
     action = request.get('action', 'query')
+    if action in {'vault_setup', 'vault_unlock'}:
+        token = vault.authenticate(library, request.get('value'), setup=action == 'vault_setup')
+        request = {**request, 'vault_token': token, 'view': 'hidden', 'offset': 0}
+        result = ui_query(library, request)
+        result.update(vault_token=token, view='hidden', status='Hidden unlocked')
+        return result
+    if action == 'vault_lock':
+        vault.lock(library, request.get('vault_token', ''))
+        from . import editing
+        editing.close(library, request.get('edit_session', ''))
+        return ui_query(library, {**request, 'vault_token': ''})
+    if action not in {'query', 'import', 'sync', 'memory_date', 'image_close'} and vault.protected(library, request):
+        result = ui_query(library, {**request, 'vault_token': ''})
+        result.update(error='Hidden is locked; authenticate before opening or changing hidden photos', vault_unlocked=0)
+        return result
     if action == 'memory_date':
         request = {**request, 'view': 'memories', 'memory_date': request.get('value', ''), 'offset': 0}
         result = ui_query(library, request)
@@ -140,7 +157,7 @@ def library_request(library, request, config):
     else:
         library.edit(request['id'], action, request.get('value'))
     result = ui_query(library, request)
-    if request.get('id') and action != 'export':
+    if request.get('id') and action != 'export' and (not library.photo(request['id'])['hidden'] or vault.unlocked(library, request.get('vault_token', ''))):
         result['detail'] = library.details(request['id'])
     if action in {'album_rename', 'album_create', 'album_delete_empty'}:
         result['album'] = request['album']

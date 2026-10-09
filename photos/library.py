@@ -499,14 +499,18 @@ class Library:
                     taken=datetime.fromtimestamp(photo['taken'], timezone.utc).isoformat(),
                     location=f"{geo.get('latitude', '')}, {geo.get('longitude', '')}" if isinstance(geo, dict) and 'latitude' in geo else '')
 
-    def query(self, view='photos', search='', album='', offset=0, limit=60, sort='newest', album_mode='active', album_sort='name', memory_date=''):
+    def query(self, view='photos', search='', album='', offset=0, limit=60, sort='newest', album_mode='active', album_sort='name', memory_date='', hidden_access=True):
         if sort not in {'newest', 'oldest'}:
             raise LibraryError('Choose newest first or oldest first')
         where, args = ['trashed=0', 'hidden=0'], []
         if view == 'trash':
             where = ['trashed>0']
+            if not hidden_access:
+                where.append('hidden=0')
         elif view == 'hidden':
             where = ['trashed=0', 'hidden=1']
+            if not hidden_access:
+                where.append('0')
         elif view == 'favorites':
             where.append('favorite=1')
         elif view == 'videos':

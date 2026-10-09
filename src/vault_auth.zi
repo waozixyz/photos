@@ -1,0 +1,40 @@
+// Passwords arrive only on stdin, never process arguments or diagnostic output.
+// Libsodium supplies Argon2id and its random salts; this tool owns no windows.
+#import "std/byte_text_linux"
+libc :: #system_library "libc";
+sodium :: #system_library "sodium";
+Read :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign libc "read";
+Init :: () -> s32 #foreign sodium "sodium_init";
+Wipe :: (bytes: *u8, count: usize) #foreign sodium "sodium_memzero";
+HashBytes :: () -> usize #foreign sodium "crypto_pwhash_strbytes";
+Ops :: () -> u64 #foreign sodium "crypto_pwhash_opslimit_interactive";
+Memory :: () -> usize #foreign sodium "crypto_pwhash_memlimit_interactive";
+Algorithm :: () -> s32 #foreign sodium "crypto_pwhash_alg_argon2id13";
+Hash :: (output: *u8, password: *u8, length: u64, ops: u64, memory: usize, algorithm: s32) -> s32 #foreign sodium "crypto_pwhash_str_alg";
+Verify :: (hash: *u8, password: *u8, length: u64) -> s32 #foreign sodium "crypto_pwhash_str_verify";
+Profile :: (hash: *u8, ops: u64, memory: usize) -> s32 #foreign sodium "crypto_pwhash_str_needs_rehash";
+main :: (argc: s32, argv: **u8) -> s32 {
+    if argc != 2 || Init() < 0 || HashBytes() > 128 { return 2 }
+    action := TextFromCString(argv[1])
+    if action != "hash" && action != "verify" { return 2 }
+    input: [1153]u8; hash: [128]u8; size: s32
+    defer { Wipe(*input[0], 1153); Wipe(*hash[0], 128) }
+    while size < 1153 {
+        read := Read(0, *input[size], cast(usize)(1153 - size))
+        if read < 0 { return 2 }; if read == 0 { break }; size += cast(s32)read
+    }
+    if size < 12 || size >= 1153 { return 2 }
+    length: s64
+    for i: 0..3 { length = length * 256 + cast(s64)input[i] }
+    if length < 8 || length > 1024 || size < 4 + length { return 2 }
+    if action == "hash" {
+        if size != 4 + length || Hash(*hash[0], *input[4], cast(u64)length, Ops(), Memory(), Algorithm()) != 0 { return 2 }
+        print("%\n", TextFromCString(*hash[0])); return 0
+    }
+    extra := cast(s64)size - 4 - length
+    if extra < 1 || extra >= 128 { return 2 }
+    for i: 0..extra - 1 { hash[i] = input[4 + length + i] }
+    if Profile(*hash[0], Ops(), Memory()) != 0 { return 2 }
+    if Verify(*hash[0], *input[4], cast(u64)length) != 0 { return 1 }
+    print("ok\n"); return 0
+}

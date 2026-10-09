@@ -93,7 +93,15 @@ thumbnails need ffmpeg. Videos can be stored, synced, previewed and exported;
 in-app video playback is not implemented. Facial recognition, semantic image
 search, public links and phone camera backup are not implemented.
 This version is a local photo library with sync, not complete Ente feature parity.
-Hidden is currently a gallery filter, without Ente's authenticated lock screen.
+Hidden requires a separate local password, with confirmation when first created.
+The native Ziran helper uses libsodium's Argon2id verifier; passwords never enter
+process arguments or app inspection state. Locked photos cannot be read, exported
+or changed through the local service, including hidden items in Trash and mixed
+selections. Leaving Hidden or using Lock Hidden revokes the unlock; it also expires
+after ten minutes and on service restart. Authentication is local to each device,
+while the Hidden property remains in encrypted sync. This is an application access
+lock; local originals retain their existing storage format. System biometrics,
+password changes and password recovery remain unfinished.
 Trash retains originals indefinitely, without automatic expiry or permanent deletion.
 
 The Ente comparison uses its [feature overview](https://ente.com/features/),
@@ -108,11 +116,12 @@ The remaining replacement work includes:
 - Advanced photo editing, video playback/editing, Live Photo pairing and broader HEIC/RAW previews.
 - Private sharing, collaboration, public links, comments and account recovery.
   Any sharing design needs to honor the owner's ThinkPad-only sync restriction.
-- An authenticated hidden vault and a deliberate deletion/retention policy.
+- System authentication, Hidden password changes/recovery and a deliberate deletion/retention policy.
 - A Ziran library/sync service. The native UI and portable app are Ziran/Kryon;
   the SQLite importer, metadata service and encrypted sync worker remain Python.
 
-The native image processor needs GdkPixbuf and GObject on the Linux desktop host.
+The native image processor needs GdkPixbuf and GObject on the Linux desktop host;
+Hidden authentication also needs libsodium.
 Unit and synthetic round-trip checks validate tested flows; an independent
 cryptographic audit remains outside their scope. Full-original restore verification belongs
 in private receipts, rather than storing library inventories in the repository.

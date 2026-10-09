@@ -39,6 +39,10 @@ image_adjustments: [7]s32 = .{0, 0, 0, 100, 100, 100, 0};
 edit_preview: [4097]u8;
 edit_session: [33]u8;
 memory_date: [11]u8;
+vault_token: [65]u8;
+vault_first: [1025]u8;
+vault_configured: bool;
+vault_unlocked: bool;
 edit_value: [8193]u8;
 detail_id: [65]u8;
 detail_caption: [8193]u8;
@@ -131,6 +135,7 @@ SendRequest :: (action: string, id: string, value: string) {
     Property(*out, "album_mode", album_mode); Property(*out, "album_sort", album_sort)
     Property(*out, "memory_date", TextUntilNul(memory_date[:]))
     Property(*out, "edit_session", TextUntilNul(edit_session[:]))
+    Property(*out, "vault_token", TextUntilNul(vault_token[:]))
     mutation = action != "query" && action != "open" && action != "sync" && action != "import" && action != "image_preview"
     if mutation && picked_count > 0 && (action == "album_add" || action == "album_remove" || !StartsWithFoldASCII(action, "album_")) {
         BuilderPrint(*out, ",\"ids\":[")
@@ -160,6 +165,12 @@ Tick :: () {
         loading = false; busy = false
         if Transport.error != "" { Set(message[:], Transport.error); if appending { more_due = ticks + 300; appending = false }; return }
         json := Transport.Value()
+        if FieldAt(json, 0, "vault_configured") >= 0 { vault_configured = Number(json, 0, "vault_configured") > 0; vault_unlocked = Number(json, 0, "vault_unlocked") > 0 }
+        if FieldAt(json, 0, "vault_token") >= 0 { Decode(json, 0, "vault_token", vault_token[:]) }
+        if view == "hidden" && !vault_unlocked {
+            selected = -1; VecClear(photos); count = 0; ClearSelection(); appending = false; Wipe(edit_preview[:])
+            if !Secret() { CancelEditor() }
+        }
         Decode(json, 0, "error", message[:]); if message[0] != 0 { if appending { more_due = ticks + 300; appending = false }; return }
         total = Number(json, 0, "total"); matches = Number(json, 0, "count"); pending = Number(json, 0, "pending")
         Decode(json, 0, "status", message[:])
@@ -220,11 +231,17 @@ Tick :: () {
     if !loading && queued_request {
         queued_request = false; SendRequest(TextUntilNul(queued_action[:]), TextUntilNul(queued_id[:]), TextUntilNul(queued_value[:])); return
     }
-    if !loading && ticks > next_refresh && scroll == 0 && selected < 0 { offset = 0; Request() }
+    if !loading && ticks > next_refresh && ((scroll == 0 && selected < 0) || (view == "hidden" && vault_unlocked)) { if selected < 0 { offset = 0 }; Request() }
 }
 Navigate :: (target: string) {
     queued_request = false
     if loading { for i: 0..cast(s32)9 { if View(i) == target { queued_view = i } }; return }
+    if view == "hidden" && target != "hidden" && vault_token[0] != 0 {
+        for i: 0..cast(s32)9 { if View(i) == target { queued_view = i } }
+        vault_unlocked = false; selected = -1; ClearSelection(); editor = ""; Wipe(edit_value[:]); Wipe(vault_first[:]); Wipe(edit_preview[:])
+        Request("vault_lock"); Wipe(vault_token[:]); return
+    }
+    Wipe(vault_first[:]); if Secret() { Wipe(edit_value[:]) }
     ClearSelection(); editor = ""; view = target; appending = false; feed_base = 0; album[0] = 0; selected = -1; offset = 0; scroll = 0; Request()
 }
 Choose :: (index: s32) {
@@ -268,6 +285,25 @@ Apply :: (action: string, value: string = "") {
     id := ifx selected >= 0 && selected < count then TextUntilNul(photos[selected].id[:]) else ""
     Request(action, id, value)
 }
+SaveEditor :: () {
+    if loading { return }
+    if editor == "vault_setup" {
+        chars: s32; i: s32
+        while i < 1024 && edit_value[i] != 0 { if (edit_value[i] & 192) != 128 { chars += 1 }; i += 1 }
+        if chars < 8 { Set(message[:], "Use at least 8 characters for your Hidden password"); return }
+        for index: 0..1024 { vault_first[index] = edit_value[index] }
+        Wipe(edit_value[:]); BeginEdit("vault_confirm", "Confirm Hidden password", "", "Type the same password again"); return
+    }
+    if editor == "vault_confirm" || editor == "vault_unlock" {
+        if editor == "vault_confirm" && TextUntilNul(edit_value[:]) != TextUntilNul(vault_first[:]) { Set(message[:], "Passwords do not match"); return }
+        Request(ifx editor == "vault_confirm" then "vault_setup" else "vault_unlock", "", TextUntilNul(edit_value[:]))
+        Wipe(vault_first[:]); Wipe(edit_value[:]); cursor = 0; anchor = 0; return
+    }
+    Apply(editor, TextUntilNul(edit_value[:]))
+}
+Wipe :: (bytes: []u8) { for i: 0..cast(s32)bytes.count - 1 { bytes[i] = 0 } }
+Secret :: () -> bool { return StartsWithFoldASCII(editor, "vault_") }
+CancelEditor :: () { editor = ""; focused = false; Wipe(edit_value[:]); Wipe(vault_first[:]) }
 ImageValue :: () -> string {
     out: Vec(u8); BuilderPrint(*out, "[")
     for i: 0..6 { if i > 0 { BuilderPrint(*out, ",") }; BuilderPrint(*out, "%", image_adjustments[i]) }
@@ -292,7 +328,7 @@ ImageChange :: (index: s32, delta: s32) {
 }
 ImageReset :: () { if loading { return }; image_adjustments = .{0, 0, 0, 100, 100, 100, 0}; ImageRequest() }
 ImageChanged :: () -> bool { return image_adjustments[0] != 0 || image_adjustments[1] != 0 || image_adjustments[2] != 0 || image_adjustments[3] != 100 || image_adjustments[4] != 100 || image_adjustments[5] != 100 || image_adjustments[6] != 0 }
-Find :: () { ClearSelection(); editor = ""; offset = 0; scroll = 0; selected = -1; Request() }
+Find :: () { ClearSelection(); CancelEditor(); offset = 0; scroll = 0; selected = -1; Request() }
 ToggleSort :: () { if loading { return }; sort = ifx sort == "newest" then "oldest" else "newest"; Find() }
 AlbumFilter :: () { album_mode = ifx album_mode == "active" then "archived" else (ifx album_mode == "archived" then "empty" else "active"); Find() }
 AlbumSort :: () { album_sort = ifx album_sort == "name" then "newest" else (ifx album_sort == "newest" then "oldest" else "name"); Find() }

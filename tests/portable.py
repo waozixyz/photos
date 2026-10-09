@@ -153,7 +153,7 @@ with tempfile.TemporaryDirectory() as folder:
                     if check(): return
                     assert process.poll() is None
                     time.sleep(.05)
-                raise AssertionError((reason,calls[-5:]))
+                raise AssertionError((reason,[(r['action'],r.get('view')) for r in calls[-5:]]))
             click(65, 90);click(260, 300)
             parent_id = next(r['id'] for r in reversed(calls) if r['action']=='open')
             original_bytes = library.original(library.photo(parent_id)).read_bytes()
@@ -179,7 +179,22 @@ with tempfile.TemporaryDirectory() as folder:
             time.sleep(.5)
             subprocess.run(['import','-window',window,str(shot.with_name('portable-memories.png'))],check=True)
             assert library.query('memories',memory_date='2026-10-08')['count']==1
-            print('Portable Photos: organization/export baseline plus native image editor/save-copy, coordinates and memories verified')
+            click(260,330)  # Open the memory
+            click(877,748)  # Hide
+            wait_for(lambda: library.photo(parent_id)['hidden'], 'Portable hide was not saved')
+            click(65,277);click(300,352)  # Hidden, Create password
+            click(500,234);xdo('type','--delay',45,'--clearmodifiers','--','Synthetic portable password');time.sleep(.2);click(251,339)
+            click(500,234);xdo('type','--delay',45,'--clearmodifiers','--','Synthetic portable password');time.sleep(.2);click(251,339)
+            wait_for(lambda: (library.root/'private/hidden-password.json').is_file(), 'Portable Hidden password was not created')
+            click(1095,853)  # Lock Hidden
+            wait_for(lambda: any(r['action']=='vault_lock' for r in calls), 'Portable Hidden did not lock')
+            click(300,312)  # Unlock Hidden
+            click(500,234);xdo('type','--delay',45,'--clearmodifiers','--','Synthetic portable password');time.sleep(.2);click(251,339)
+            wait_for(lambda: any(r['action']=='vault_unlock' for r in calls), 'Portable Hidden did not unlock')
+            click(65,90);click(65,277)
+            wait_for(lambda: sum(r['action']=='vault_lock' for r in calls)>=2, 'Portable Hidden did not relock on exit')
+            subprocess.run(['import','-window',window,str(shot.with_name('portable-hidden-locked.png'))],check=True)
+            print('Portable Photos: organization/export/editor/memories baseline plus Hidden password setup, unlock, explicit lock and leave/reenter lock verified')
         finally:
             process.terminate()
             try:

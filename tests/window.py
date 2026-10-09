@@ -72,7 +72,7 @@ with tempfile.TemporaryDirectory() as folder:
         action(control=100);action('Favorite');time.sleep(.5)
         assert library.db.execute('SELECT SUM(favorite) FROM photos').fetchone()[0]==1
         action('Back');action('Select');action(control=100);action(control=101)
-        assert state()['selection_count']==2
+        assert state()['selection_count']==2, state()
         action('Favorite')
         assert library.db.execute('SELECT SUM(favorite) FROM photos').fetchone()[0]==2
         action('Select');action('Select loaded');action('Add to album')
@@ -168,7 +168,29 @@ with tempfile.TemporaryDirectory() as folder:
         for control in state()['controls']:
             assert 0 <= control['x'] and control['x']+control['width']<=720.1, control
         action('Cancel')
-        print('Private Xvfb: organization/export baseline plus photo editor/preview/reset/copy/cancel, single and bulk coordinates, memories and narrow editor verified')
+        xdo('windowsize',window,1180,880)
+        action('Hide');action('Hidden');state('hidden',0)
+        assert not state()['vault_unlocked']
+        subprocess.run(['import','-window',window,str(output/'hidden-locked.png')],check=True)
+        action('Create password');enter('Synthetic window password')
+        subprocess.run(['import','-window',window,str(output/'hidden-password.png')],check=True)
+        action('Save')
+        assert state()['editor']=='vault_confirm'
+        enter('A different confirmation');action('Save')
+        assert 'do not match' in state()['status']
+        enter('Synthetic window password');action('Save');state('hidden',1)
+        assert state()['vault_unlocked']
+        assert 'Synthetic window password' not in json.dumps(state())
+        action(control=100);action('Edit image');action('Lock Hidden');state('hidden',0)
+        assert state()['editor']=='' and not state()['vault_unlocked']
+        action('Unlock Hidden');enter('An incorrect password');action('Save')
+        assert 'Incorrect password' in state()['status']
+        enter('Synthetic window password');action('Save');state('hidden',1)
+        action('Photos');state('photos',4)
+        action('Hidden');state('hidden',0)
+        assert not state()['vault_unlocked']
+        assert library.original(library.photo(parent['id'])).read_bytes()==original_bytes
+        print('Private Xvfb: organization/export/editor/memories baseline plus Hidden password confirmation, masked input, rejected password, editor relock and leave/reenter lock verified')
     finally:
         service.shutdown();service.server_close()
         process.terminate()
