@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.35
+
+- Import private face groups, names, birthdays, corrections and manual people tags together with photos, albums and source records.
+- Keep later person edits and existing scans during source rescans; warn on malformed private indexes while retaining originals.
+- Roll back all imported photo and private index records when a write fails or is interrupted, so retrying can finish the complete import.
+
 ## 0.1.34
 
 - Retain automatic album memberships when importing folder exports without face indexes, including their original people rules.

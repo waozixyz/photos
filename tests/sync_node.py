@@ -278,6 +278,26 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         assert client.sync()==0
         assert first.query(album='Automatic fixture')['count']==1
         assert first.query(album='Automatic fixture')['photos'][0]['id']==batch_ids[0]
+        # Portable face indexes now join native original import publication.
+        # Exercise a real folder export, then signed encrypted sync and restore.
+        face_export = folder/'face-export'
+        first.export(batch_ids[1], face_export)
+        imported_faces = Library(folder/'face-imported')
+        try:
+            imported_faces.import_folders([face_export])
+            assert people.export_index(imported_faces,batch_ids[1])==people.export_index(first,batch_ids[1])
+            assert 'photosPeople' not in json.loads(imported_faces.photo(batch_ids[1])['metadata'])
+            imported_client = Client(imported_faces,config)
+            # This fixture deliberately uses a separate private account.
+            assert imported_client.sync()==0
+            restored_faces = Library(folder/'face-restored')
+            try:
+                restored_client = Client(restored_faces,config,imported_client.identity_path)
+                assert restored_client.sync()==0
+                assert people.export_index(restored_faces,batch_ids[1])==people.export_index(first,batch_ids[1])
+                assert Path(restored_client.materialize(batch_ids[1])).read_bytes()==(batch/'Image 1.png').read_bytes()
+            finally: restored_faces.db.close()
+        finally: imported_faces.db.close()
         # Manual assignments are encrypted separately from detected faces.
         # A tag-only peer must not mark originals scanned, nor erase local faces.
         second.set_setting('people_enabled',True)

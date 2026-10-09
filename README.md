@@ -442,9 +442,9 @@ The remaining replacement work includes:
   engine, image processor, password verifier, photo/album-property writers,
   original copying, folder discovery, camera/provider/album-sidecar reading
   and ordinary import metadata/source-cache writes are Ziran/Kryon.
-  Album-definition import publication and automatic-membership import writes
-  without face indexes are native too. Private face-index import writes,
-  authorization adapter and encrypted sync worker remain Python.
+  Album-definition import publication, automatic-membership import writes and
+  private face-index import writes are native too. The remaining automatic index
+  mutations, authorization adapter and encrypted sync worker use Python.
 
 Choose Play video to watch a video in the Photos window. Pause/resume, Replay,
 the position slider, five-second seek buttons, volume and Mute work offline.

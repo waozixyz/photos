@@ -5,7 +5,7 @@ metadata-reader:
 folder-importer: metadata-reader
 	$(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry import_folders:main --exe -o build/import-folders src/import_folders.zi
 metadata-importer: folder-importer
-	LDLIBS='-l:libsqlite3.so.0 -lglib-2.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry import_metadata:main --exe -o build/import-metadata src/import_metadata.zi
+	LDLIBS='-l:libsqlite3.so.0 -l:libsodium.so.23 -lglib-2.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry import_metadata:main --exe -o build/import-metadata src/import_metadata.zi
 original-importer: metadata-importer
 	LDLIBS='-lglib-2.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry import_original:main --exe -o build/import-original src/import_original.zi
 .PHONY: library-editor

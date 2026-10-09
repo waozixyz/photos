@@ -1,0 +1,73 @@
+// Private imported face indexes join the original's writer transaction.
+// Validate the entire bounded index before changing any private table.
+using SQLite :: #import "sqlite/SQLite";
+#import "std/byte_text_linux"
+sodium :: #system_library "sodium";
+Decode :: (bytes: *u8, capacity: usize, text: *u8, length: usize, ignore: *u8, count: *usize, end: **u8, variant: s32) -> s32 #foreign sodium "sodium_base642bin";
+Execute :: (database: *void, sql: string) -> bool { return SqliteExecText(database,sql) == SQLITE_OK }
+Check :: (database: *void, sql: string) -> bool {
+    statement: *void
+    if SqlitePrepareText(database,sql,-1,*statement,null) != SQLITE_OK { return false }
+    defer { unused SqliteFinalize(statement) }
+    return SqliteStep(statement) == SQLITE_ROW && SqliteColumnInt(statement,0) == 1
+}
+Column :: (statement: *void, index: s32) -> string {
+    return TextFromBytes(BytesFromPointer(SqliteColumnText(statement,index),cast(u64)SqliteColumnBytes(statement,index)))
+}
+Vector :: (text: *u8, length: s32, output: []float32) -> bool {
+    if length != 684 || output.count != 128 { return false }
+    count: usize; end: *u8
+    if Decode(cast(*u8)*output[0],512,text,cast(usize)length,null,*count,*end,1) != 0 || count != 512 ||
+        cast(usize)end-cast(usize)text != cast(usize)length { return false }
+    norm: float64
+    for value: output { if value != value || value < -1.001 || value > 1.001 { return false }; norm += cast(float64)value*cast(float64)value }
+    return norm >= 0.99 && norm <= 1.01
+}
+// 1: accepted/absent, 0: invalid (retain the original and warn), -1: write
+// failure (caller rolls back the whole photo/album/source transaction).
+Import :: (database: *void) -> s32 {
+    if Check(database,"SELECT json_type(data,'$.people_index') IS NULL OR json_type(data,'$.people_index')='null' FROM incoming") { return 1 }
+    if !Check(database,"SELECT json_type(data,'$.people_index')='object' FROM incoming") { return 0 }
+    if !Execute(database,"CREATE TEMP TABLE face_index AS SELECT json_extract(data,'$.people_index') AS data FROM incoming") { return -1 }
+    sql := "SELECT coalesce(json_extract(data,'$.model')='yunet-sface-v1',0) AND json_type(data,'$.faces')='array' AND json_array_length(data,'$.faces')<=32 AND (json_type(data,'$.scanned') IS NULL OR json_type(data,'$.scanned') IN ('true','false')) AND (coalesce(json_extract(data,'$.scanned'),1)=1 OR json_array_length(data,'$.faces')=0) AND (json_type(data,'$.tags') IS NULL OR json_type(data,'$.tags')='null' OR (json_type(data,'$.tags')='array' AND json_array_length(data,'$.tags')<=64)) AND NOT EXISTS(SELECT 1 FROM json_each(data,'$.faces') WHERE type<>'object' OR json_type(value,'$.person')<>'object') AND NOT EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(data,'$.tags')='array' THEN json_extract(data,'$.tags') ELSE '[]' END) WHERE type<>'object') FROM face_index"
+    if !Check(database,sql) { return 0 }
+    if !Execute(database,"CREATE TEMP TABLE face_input AS SELECT f.key AS ordinal,f.value AS data,NULL AS embedding FROM face_index,json_each(face_index.data,'$.faces') f; CREATE TEMP TABLE person_input AS SELECT ordinal,json_extract(data,'$.person') AS data FROM face_input UNION ALL SELECT t.key+32,t.value FROM face_index,json_each(CASE WHEN json_type(face_index.data,'$.tags')='array' THEN json_extract(face_index.data,'$.tags') ELSE '[]' END) t") { return -1 }
+    sql = "SELECT NOT EXISTS(SELECT 1 FROM person_input WHERE NOT coalesce(json_type(data,'$.id')='text' AND length(json_extract(data,'$.id'))=64 AND length(CAST(json_extract(data,'$.id') AS BLOB))=64 AND json_extract(data,'$.id') NOT GLOB '*[^0-9a-f]*' AND json_type(data,'$.name')='text' AND length(CAST(json_extract(data,'$.name') AS BLOB))<=512 AND json_type(data,'$.ignored')='integer' AND json_extract(data,'$.ignored') IN (0,1) AND json_type(data,'$.updated') IN ('integer','real') AND json_extract(data,'$.updated')>=0 AND json_extract(data,'$.updated')<32503680000 AND (json_type(data,'$.birth') IS NULL OR (json_type(data,'$.birth')='text' AND (json_extract(data,'$.birth')='' OR (length(CAST(json_extract(data,'$.birth') AS BLOB))=10 AND json_extract(data,'$.birth') GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND json_extract(data,'$.birth')>='1600-01-01' AND json_extract(data,'$.birth')<=date('now','localtime') AND date(json_extract(data,'$.birth'),'+0 days')=json_extract(data,'$.birth'))))),0))"
+    if !Check(database,sql) { return 0 }
+    sql = "SELECT NOT EXISTS(SELECT 1 FROM face_input WHERE NOT coalesce(json_type(data,'$.id')='text' AND length(json_extract(data,'$.id'))=64 AND length(CAST(json_extract(data,'$.id') AS BLOB))=64 AND json_extract(data,'$.id') NOT GLOB '*[^0-9a-f]*' AND json_type(data,'$.rect')='array' AND json_array_length(data,'$.rect')=4 AND json_type(data,'$.rect[0]')='integer' AND json_type(data,'$.rect[1]')='integer' AND json_type(data,'$.rect[2]')='integer' AND json_type(data,'$.rect[3]')='integer' AND json_extract(data,'$.rect[0]') BETWEEN 0 AND 9999 AND json_extract(data,'$.rect[1]') BETWEEN 0 AND 9999 AND json_extract(data,'$.rect[2]')>0 AND json_extract(data,'$.rect[2]')<=10000-json_extract(data,'$.rect[0]') AND json_extract(data,'$.rect[3]')>0 AND json_extract(data,'$.rect[3]')<=10000-json_extract(data,'$.rect[1]') AND json_type(data,'$.vector')='text' AND json_type(data,'$.excluded')='array' AND json_array_length(data,'$.excluded')<=128 AND NOT EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(data,'$.excluded')='array' THEN json_extract(data,'$.excluded') ELSE '[]' END) WHERE type<>'text' OR length(value)<>64 OR length(CAST(value AS BLOB))<>64 OR value GLOB '*[^0-9a-f]*'),0)) AND (SELECT count(*)=count(DISTINCT json_extract(data,'$.id')) FROM face_input) AND NOT EXISTS(SELECT 1 FROM face_input f JOIN faces ON faces.id=json_extract(f.data,'$.id') WHERE faces.photo_id<>(SELECT json_extract(data,'$.id') FROM incoming)) AND NOT EXISTS(SELECT 1 FROM person_input WHERE ordinal>=32 AND json_extract(data,'$.name')='') AND (SELECT count(*)=count(DISTINCT json_extract(data,'$.id')) FROM person_input WHERE ordinal>=32)"
+    if !Check(database,sql) { return 0 }
+    statement: *void
+    if SqlitePrepareText(database,"SELECT json_extract(data,'$.name') FROM person_input",-1,*statement,null) != SQLITE_OK { return -1 }
+    valid := true
+    while true {
+        status := SqliteStep(statement); if status == SQLITE_DONE { break }; if status != SQLITE_ROW { valid = false; break }
+        for byte: Column(statement,0) { if byte < 32 { valid = false } }; if !valid { break }
+    }
+    unused SqliteFinalize(statement); if !valid { return 0 }
+    if SqlitePrepareText(database,"SELECT ordinal,json_extract(data,'$.vector') FROM face_input ORDER BY ordinal",-1,*statement,null) != SQLITE_OK { return -1 }
+    update: *void
+    if SqlitePrepareText(database,"UPDATE face_input SET embedding=? WHERE ordinal=?",-1,*update,null) != SQLITE_OK { unused SqliteFinalize(statement); return -1 }
+    outcome: s32 = 1
+    while true {
+        status := SqliteStep(statement); if status == SQLITE_DONE { break }; if status != SQLITE_ROW { outcome = -1; break }
+        vector: [128]float32
+        if !Vector(SqliteColumnText(statement,1),SqliteColumnBytes(statement,1),vector[:]) { outcome = 0; break }
+        bytes := BytesFromPointer(cast(*u8)*vector[0],512)
+        if SqliteBindBlob(update,1,bytes) != SQLITE_OK || SqliteBindInt(update,2,SqliteColumnInt(statement,0)) != SQLITE_OK || SqliteStep(update) != SQLITE_DONE { outcome = -1; break }
+        unused SqliteReset(update); unused SqliteClearBindings(update)
+    }
+    unused SqliteFinalize(update); unused SqliteFinalize(statement); if outcome != 1 { return outcome }
+    // Do not overwrite another device's newer person name, ignore state or
+    // birthday. Missing legacy birthdays retain a previously stored value.
+    sql = "INSERT INTO people(id,name,ignored,updated,birth) SELECT json_extract(data,'$.id'),json_extract(data,'$.name'),json_extract(data,'$.ignored'),json_extract(data,'$.updated'),coalesce(json_extract(data,'$.birth'),(SELECT birth FROM people WHERE id=json_extract(person_input.data,'$.id')),'') FROM person_input WHERE ordinal=? ON CONFLICT(id) DO UPDATE SET name=excluded.name,ignored=excluded.ignored,updated=excluded.updated,birth=excluded.birth WHERE people.updated<excluded.updated"
+    if SqlitePrepareText(database,sql,-1,*update,null) != SQLITE_OK { return -1 }
+    if SqlitePrepareText(database,"SELECT ordinal FROM person_input ORDER BY ordinal",-1,*statement,null) != SQLITE_OK { unused SqliteFinalize(update); return -1 }
+    while true {
+        status := SqliteStep(statement); if status == SQLITE_DONE { break }; if status != SQLITE_ROW { outcome = -1; break }
+        if SqliteBindInt(update,1,SqliteColumnInt(statement,0)) != SQLITE_OK || SqliteStep(update) != SQLITE_DONE { outcome = -1; break }
+        unused SqliteReset(update); unused SqliteClearBindings(update)
+    }
+    unused SqliteFinalize(update); unused SqliteFinalize(statement); if outcome != 1 { return outcome }
+    sql = "DELETE FROM faces WHERE photo_id=(SELECT json_extract(data,'$.id') FROM incoming) AND (SELECT coalesce(json_extract(data,'$.scanned'),1) FROM face_index)=1; INSERT INTO faces SELECT json_extract(data,'$.id'),(SELECT json_extract(data,'$.id') FROM incoming),json_extract(data,'$.person.id'),json_extract(data,'$.rect'),embedding,json_extract(data,'$.excluded') FROM face_input; INSERT OR REPLACE INTO face_scans SELECT (SELECT json_extract(data,'$.id') FROM incoming),'yunet-sface-v1','' FROM face_index WHERE coalesce(json_extract(data,'$.scanned'),1)=1; DELETE FROM person_tags WHERE photo_id=(SELECT json_extract(data,'$.id') FROM incoming) AND (SELECT json_type(data,'$.tags') FROM face_index)='array'; INSERT INTO person_tags SELECT (SELECT json_extract(data,'$.id') FROM incoming),json_extract(data,'$.id') FROM person_input WHERE ordinal>=32; INSERT OR IGNORE INTO person_tag_edits SELECT (SELECT json_extract(data,'$.id') FROM incoming) FROM face_index WHERE json_type(data,'$.tags')='array'"
+    return ifx Execute(database,sql) then 1 else -1
+}

@@ -3,6 +3,7 @@
 using SQLite :: #import "sqlite/SQLite";
 Album :: #import "album_edit";
 Search :: #import "search";
+Faces :: #import "face_import";
 #import "std/byte_text_linux"
 #import "std/json_scan"
 #import "std/text_buffer"
@@ -196,6 +197,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
     }
     defer { unused SqliteClose(database) }
     unused SqliteBusyTimeout(database,5000)
+    if !Execute(database,"PRAGMA temp_store=MEMORY") { return Failure("Cannot prepare private import memory") }
     if !Execute(database,"CREATE TEMP TABLE incoming(data TEXT NOT NULL); CREATE TEMP TABLE merged_metadata(key TEXT PRIMARY KEY,quoted TEXT NOT NULL,value TEXT NOT NULL)") { return Failure("Cannot prepare the import") }
     statement: *void
     if SqlitePrepareText(database,"INSERT INTO incoming VALUES(?)",-1,*statement,null) != SQLITE_OK { return Failure("Cannot prepare the import") }
@@ -268,9 +270,14 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if SqlitePrepareText(database,sql,-1,*statement,null) != SQLITE_OK { return Failure("Cannot store imported photo metadata") }
     valid = Bind(statement,1,combined) && SqliteBindDouble(statement,2,now) == SQLITE_OK && SqliteStep(statement) == SQLITE_DONE; unused SqliteFinalize(statement)
     if !valid { return Failure("Cannot store imported photo metadata") }
-    if !existing && !ImportAutoMemberships(database) { return Failure("Cannot store imported automatic album memberships") }
+    indexWarning: bool
+    if !existing {
+        index := Faces.Import(database)
+        if index < 0 { return Failure("Cannot store imported private face indexes") }; indexWarning = index == 0
+        if !ImportAutoMemberships(database) { return Failure("Cannot store imported automatic album memberships") }
+    }
     if !Execute(database,"INSERT OR REPLACE INTO sources SELECT json_extract(data,'$.path'),json_extract(data,'$.size'),json_extract(data,'$.mtime'),json_extract(data,'$.stamp'),json_extract(data,'$.id') FROM incoming") { return Failure("Cannot store the import source") }
     if !Execute(database,"COMMIT") { return Failure("Cannot finish the import") }
-    response := ifx existing then "{\"saved\":1,\"added\":0}\n" else "{\"saved\":1,\"added\":1}\n"
+    response := ifx existing then "{\"saved\":1,\"added\":0,\"warning\":0}\n" else ifx indexWarning then "{\"saved\":1,\"added\":1,\"warning\":1}\n" else "{\"saved\":1,\"added\":1,\"warning\":0}\n"
     unused Send(response); return 0
 }

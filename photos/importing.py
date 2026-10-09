@@ -211,7 +211,7 @@ def walk(root):
             child.stdout.close()
 
 
-def merge(library, request):
+def merge(library, request, report=False):
     if library.db.in_transaction:
         raise LibraryError('Finish the current library operation before importing metadata')
     data = packed(request).encode()
@@ -230,9 +230,9 @@ def merge(library, request):
         raise LibraryError('Import returned an invalid response')
     if response.get('error'):
         raise LibraryError(response['error'])
-    if result.returncode or response.get('saved') != 1 or response.get('added') not in (0, 1):
+    if result.returncode or response.get('saved') != 1 or response.get('added') not in (0, 1) or response.get('warning', 0) not in (0, 1):
         raise LibraryError('Import outcome could not be confirmed; rescan before retrying')
-    return bool(response['added'])
+    return response if report else bool(response['added'])
 
 
 def copy(source, destination, identity, expected_size=None):

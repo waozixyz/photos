@@ -268,104 +268,40 @@ class Library:
             destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             from . import importing
             importing.copy(path, destination, photo_id, stat.st_size)
-        # Private face export imports retain their shared adapter transaction
-        # until those derived tables have a native writer too.
-        derived = 'photosPeople' in metadata
-        if not derived:
-            from . import importing
-            automatic = metadata.pop('photosAutoAlbums', {})
-            try:
-                from .auto_albums import identities
-                if not isinstance(automatic, dict) or len(automatic) > 128:
-                    raise LibraryError('Invalid automatic album memberships')
-                automatic = {self.album_name(name): identities(selected) for name, selected in automatic.items()}
-            except LibraryError:
-                automatic = {}; warning = True
-            exported_albums = metadata.get('albums', [])
-            if not isinstance(exported_albums, list):
-                exported_albums = []
-            albums = sorted({album} | {name for name in exported_albums
-                            if isinstance(name, str) and name.strip() and len(name.encode()) <= 512})
-            added = importing.merge(self, dict(id=photo_id, name=path.name, extension=path.suffix.lower(),
-                kind='video' if path.suffix.lower() in VIDEOS else 'photo', size=stat.st_size, taken=taken,
-                width=width, height=height, metadata=metadata, albums=albums,
-                favorite=album.casefold() in {'favorites', 'favourites'} or metadata.get('favorite') is True,
-                archived=metadata.get('archived') is True, caption=str(metadata.get('description', '')),
-                tags=metadata.get('tags', '') if isinstance(metadata.get('tags', ''), str) else '',
-                correct_date=bool(metadata.get('photoTakenTime')), path=str(path),
-                mtime=stat.st_mtime_ns, stamp=stamp, auto_memberships=automatic))
-            if added:
-                photo = self.photo(photo_id)
-                self.preview(photo, self.original(photo))
-                self.db.commit()
-            from . import motion
-            try:
-                motion.detect(self, photo_id)
-            except LibraryError:
-                warning = True
-            return 'warning' if warning else ('added' if added else 'merged')
-        # Copying keeps the database available. Another import or edit may have
-        # completed during file/sidecar reads: merge from a fresh writer snapshot.
-        self.db.execute('BEGIN IMMEDIATE')
-        existing = self.db.execute('SELECT * FROM photos WHERE id=?', (photo_id,)).fetchone()
-        edits = json.loads(existing['edits']) if existing else {}
+        from . import importing
+        face_index = metadata.pop('photosPeople', None)
+        automatic = metadata.pop('photosAutoAlbums', {})
+        try:
+            from .auto_albums import identities
+            if not isinstance(automatic, dict) or len(automatic) > 128:
+                raise LibraryError('Invalid automatic album memberships')
+            automatic = {self.album_name(name): identities(selected) for name, selected in automatic.items()}
+        except LibraryError:
+            automatic = {}; warning = True
         exported_albums = metadata.get('albums', [])
         if not isinstance(exported_albums, list):
             exported_albums = []
-        exported_albums = {name for name in exported_albums if isinstance(name, str) and name.strip() and len(name.encode()) <= 512}
-        albums = sorted((set(json.loads(existing['albums']) if existing else []) | {album} | exported_albums)
-                        - set(edits.get('removed_albums', [])))
-        for name in albums:
-            self._ensure_album(name)
-        combined = json.loads(existing['metadata']) if existing else {}
-        combined.update(metadata)
-        combined.pop('photosMotionScan', None)
-        if edits.get('live_separated'):
-            combined.pop('photosLive', None)
-            combined['photosLiveSeparated'] = True
-        if 'location' in edits:
-            combined.pop('geoData', None)
-            combined.pop('geoDataExif', None)
-            if edits['location'] is not None:
-                combined['geoData'] = edits['location']
-        if existing:
-            if packed(albums) != existing['albums'] or packed(combined) != existing['metadata']:
-                corrected = taken if metadata.get('photoTakenTime') and not edits.get('taken') else existing['taken']
-                self.db.execute('UPDATE photos SET albums=?,metadata=?,taken=?,updated=?,dirty=1 WHERE id=?',
-                                (packed(albums), packed(combined), corrected, time.time(), photo_id))
-        else:
-            caption = str(metadata.get('description', ''))
-            self.db.execute('''INSERT INTO photos(id,name,extension,kind,size,taken,width,height,metadata,albums,favorite,caption,tags,updated,archived)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-                (photo_id, path.name, photo['extension'], photo['kind'], stat.st_size, taken,
-                 width, height, packed(combined), packed(albums),
-                 int(album.casefold() in {'favorites', 'favourites'} or metadata.get('favorite') is True), caption,
-                 metadata.get('tags', '') if isinstance(metadata.get('tags', ''), str) else '', time.time(),
-                 int(metadata.get('archived') is True)))
-            self.preview(photo, destination)
-            if 'photosPeople' in metadata:
-                from . import people
-                try: people.accept_index(self,photo_id,metadata['photosPeople'])
-                except ValueError: warning = True
-        # Derived face data lives in its own private tables, never in the
-        # importer metadata blob or ordinary public details.
-        if not existing and 'photosAutoAlbums' in metadata:
-            from .auto_albums import import_memberships
-            try: import_memberships(self,photo_id,metadata['photosAutoAlbums'])
-            except LibraryError: warning = True
-        if 'photosPeople' in combined or 'photosAutoAlbums' in combined:
-            combined.pop('photosAutoAlbums',None)
-            combined.pop('photosPeople',None)
-            self.db.execute('UPDATE photos SET metadata=? WHERE id=?',(packed(combined),photo_id))
-        self.db.execute('INSERT OR REPLACE INTO sources VALUES(?,?,?,?,?)',
-                        (str(path), stat.st_size, stat.st_mtime_ns, stamp, photo_id))
-        self.db.commit()
+        albums = sorted({album} | {name for name in exported_albums
+                        if isinstance(name, str) and name.strip() and len(name.encode()) <= 512})
+        saved = importing.merge(self, dict(id=photo_id, name=path.name, extension=path.suffix.lower(),
+            kind='video' if path.suffix.lower() in VIDEOS else 'photo', size=stat.st_size, taken=taken,
+            width=width, height=height, metadata=metadata, albums=albums,
+            favorite=album.casefold() in {'favorites', 'favourites'} or metadata.get('favorite') is True,
+            archived=metadata.get('archived') is True, caption=str(metadata.get('description', '')),
+            tags=metadata.get('tags', '') if isinstance(metadata.get('tags', ''), str) else '',
+            correct_date=bool(metadata.get('photoTakenTime')), path=str(path),
+            mtime=stat.st_mtime_ns, stamp=stamp, auto_memberships=automatic, people_index=face_index), report=True)
+        added = bool(saved['added']); warning = warning or bool(saved.get('warning', 0))
+        if added:
+            photo = self.photo(photo_id)
+            self.preview(photo, self.original(photo))
+            self.db.commit()
         from . import motion
         try:
             motion.detect(self, photo_id)
         except LibraryError:
             warning = True
-        return 'warning' if warning else ('merged' if existing else 'added')
+        return 'warning' if warning else ('added' if added else 'merged')
 
     def import_folders(self, folders):
         if self.import_reader is None:
