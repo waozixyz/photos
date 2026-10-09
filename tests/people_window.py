@@ -51,6 +51,7 @@ with tempfile.TemporaryDirectory() as directory:
         library.edit(ids[i], 'taken', '2025-06-15T12:00:00Z')
     library.edit(ids[3], 'hidden_set', '1')
     library.edit(ids[4], 'taken', '2026-06-15T12:00:00Z')
+    library.set_setting('people_enabled',True)
     library.set_setting('people_processing',True)
     for i in range(3): people.store(library,ids[i],[dict(rect=[1000,1000,5000,6000],embedding=vector(.95-i*.05))],folder)
     person=library.db.execute('SELECT person_id FROM faces LIMIT 1').fetchone()[0]

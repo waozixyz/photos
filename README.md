@@ -499,6 +499,16 @@ survive source rescans, encrypted ThinkPad backup and export/reimport. Tags do n
 mark a photo's face scan complete. Hidden, Trash and Live Photo motion components
 cannot be manually tagged, and a mixed private selection is rejected together.
 
+Names, birthdays, ignore state, manual tags, face corrections and automatic people
+album rules use the native Ziran writer. Matching and face-scan publication share
+that transaction with scan completion, backup stamps and automatic memberships.
+Late scans preserve newer photo edits and restored indexes; paused or disabled
+processing and private or incomplete Live Photo pairs are skipped. A failed or
+interrupted write rolls every affected table back together. Removing automatic
+memberships keeps the still and motion components of a Live Photo in agreement.
+Portrait files publish privately after the index commits; a missing portrait uses
+the photo thumbnail. Model scheduling and the library adapter still use Python.
+
 Face detection, five-landmark alignment, embeddings and similarity matching run
 in headless Ziran helpers with the pinned YuNet/SFace models and ONNX Runtime's
 CPU engine; telemetry is disabled. Their licenses are in `assets/`. Recognition
@@ -549,7 +559,8 @@ The remaining replacement work includes:
   Album-definition import publication, automatic-membership import writes and
   private face-index import writes are native too. Local peer authentication,
   socket framing, connection limits and deadlines also run in Ziran. The remaining
-  automatic index mutations and credential-file/request adapter use Python.
+  credential-file/request adapter and model scheduling use Python. Local semantic
+  and face-index mutations and automatic people album writes are native Ziran.
   App/Hidden token generation, expiry, renewal, revocation and failed-attempt
   windows run in a private headless Ziran helper. Sync content
   encryption/decryption, chunk/metadata nonces and Ed25519 device identities/signatures
@@ -563,7 +574,7 @@ The remaining replacement work includes:
   face/semantic indexes and resume checkpoints in one transaction. It compares
   the exact request checkpoint against a fresh writer snapshot and retains newer
   local edits. Encrypted-envelope decoding and the compatibility record-import
-  adapter still use Python, along with automatic index mutations and scheduling.
+  adapter still use Python, along with model scheduling and library readers.
 
 Choose Play video to watch a video in the Photos window. Pause/resume, Replay,
 the position slider, five-second seek buttons, volume and Mute work offline.

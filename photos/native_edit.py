@@ -51,6 +51,33 @@ def semantic_index(library, operation, photo=None, blob=None):
     return bool(response['saved'])
 
 
+def people_change(library, operation, **fields):
+    if library.db.in_transaction:
+        raise LibraryError('Finish the current operation before changing People')
+    request = packed(dict(action='people', operation=operation, **fields)).encode()
+    if len(request) > 262144:
+        raise LibraryError('People change exceeds its limit')
+    environment = {key: value for key, value in os.environ.items() if key not in {
+        'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS', 'SESSION_MANAGER'}}
+    try:
+        result = subprocess.run(['prlimit', '--as=268435456', '--cpu=10', '--', str(program()),
+                                 str(library.root/'library.sqlite')], input=request+b'\n',
+                                env=environment, capture_output=True, timeout=15)
+        response = json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        raise LibraryError('People change outcome could not be confirmed; refresh before changing it again') from None
+    if not isinstance(response, dict):
+        raise LibraryError('People change returned an invalid response')
+    if response.get('error'):
+        raise LibraryError(response['error'])
+    if result.returncode != 0 or response.get('saved') not in (0, 1):
+        raise LibraryError('People change outcome could not be confirmed; refresh before changing it again')
+    identity = response.get('id')
+    if identity and (not isinstance(identity, str) or not HASH.fullmatch(identity)):
+        raise LibraryError('People change returned an invalid identity')
+    return response
+
+
 def album_change(library, name, action, value=None, search='', source=''):
     if library.db.in_transaction:
         raise LibraryError('Finish the current library operation before editing albums')

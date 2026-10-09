@@ -1,0 +1,151 @@
+// Names, manual tags and corrections publish with automatic album membership.
+// The caller owns BEGIN IMMEDIATE and rolls every table back on any failure.
+using SQLite :: #import "sqlite/SQLite";
+LivePhoto :: #import "live_photo";
+AutoAlbums :: #import "people_albums";
+AlbumMembership :: #import "album_edit";
+Index :: #import "people_index";
+#import "std/byte_text_linux"
+#import "std/json_scan"
+#import "std/text_buffer"
+Result :: struct { error: string; identity: [65]u8; saved: s32 }
+Execute :: (database: *void, sql: string) -> bool { return SqliteExecText(database,sql) == SQLITE_OK }
+Check :: (database: *void, sql: string) -> bool {
+    statement: *void
+    if SqlitePrepareText(database,sql,-1,*statement,null) != SQLITE_OK { return false }
+    defer { unused SqliteFinalize(statement) }
+    return SqliteStep(statement) == SQLITE_ROW && SqliteColumnInt(statement,0) == 1
+}
+Identity :: (text: string) -> bool {
+    if text.count != 64 { return false }
+    for byte: text { if !((byte>=48 && byte<=57) || (byte>=97 && byte<=102)) { return false } }; return true
+}
+Selection :: (database: *void, key: string, maximum: s32, empty: bool = false) -> bool {
+    sql: Vec(u8)
+    BuilderPrint(*sql,"SELECT coalesce(json_type(data,'$.%')='array' AND json_array_length(data,'$.%') BETWEEN % AND % AND NOT EXISTS(SELECT 1 FROM json_each(data,'$.%') WHERE type<>'text' OR length(CAST(value AS BLOB))<>64 OR value GLOB '*[^0-9a-f]*'),0) FROM people_request",key,key,ifx empty then 0 else 1,maximum,key)
+    if !Check(database,BuilderFinish(sql)) { return false }
+    create: Vec(u8); BuilderPrint(*create,"CREATE TEMP TABLE people_selected(id TEXT PRIMARY KEY); INSERT INTO people_selected SELECT DISTINCT value FROM people_request,json_each(data,'$.%')",key)
+    return Execute(database,BuilderFinish(create))
+}
+VisibleSQL :: () -> string {
+    sql: Vec(u8); BuilderPrint(*sql,"photos.hidden=0 AND photos.trashed=0 AND %",LivePhoto.GallerySQL); return BuilderFinish(sql)
+}
+Mutate :: (database: *void, json: string, now: float64) -> Result {
+    result: Result; result.error = "Cannot save the People change; refresh and try again"
+    if !Execute(database,"CREATE TEMP TABLE people_request(data TEXT,now REAL)") { return result }
+    statement: *void
+    if SqlitePrepareText(database,"INSERT INTO people_request VALUES(?,?)",-1,*statement,null) != SQLITE_OK { return result }
+    bound := AutoAlbums.Bind(statement,1,json) && SqliteBindDouble(statement,2,now) == SQLITE_OK
+    status := ifx bound then SqliteStep(statement) else -1; unused SqliteFinalize(statement); if status != SQLITE_DONE { return result }
+    operation: [32]u8; person: [65]u8; value: [513]u8
+    length := ReadStringText(json,FieldAt(json,0,"operation"),operation[:]); if length < 1 { return result }
+    action := TextFromBytes(operation[:length])
+    if action == "next" || action == "store" || action == "failure" {
+        index := Index.Mutate(database,json,action,now)
+        result.error=index.error; result.saved=index.saved; result.identity=index.identity; return result
+    }
+    if action == "retry" {
+        if !Execute(database,"DELETE FROM face_scans WHERE error<>''") { return result }; result.error=""; result.saved=1; return result
+    }
+    if action == "apply" {
+        photo: [65]u8; album: [65]u8
+        photoLength := ReadStringText(json,FieldAt(json,0,"photo"),photo[:]); albumLength := ReadStringText(json,FieldAt(json,0,"album"),album[:])
+        if photoLength < 0 || albumLength < 0 || (photoLength != 0 && !Identity(TextFromBytes(photo[:photoLength]))) || (albumLength != 0 && !Identity(TextFromBytes(album[:albumLength]))) { return result }
+        if !AutoAlbums.Apply(database,now,TextFromBytes(photo[:photoLength]),TextFromBytes(album[:albumLength])) { return result }
+        result.error=""; result.saved=1; return result
+    }
+    if action == "configure" {
+        name: [513]u8; nameLength := ReadStringText(json,FieldAt(json,0,"name"),name[:])
+        if nameLength < 1 || !AlbumMembership.NameValid(TextFromBytes(name[:nameLength])) || !Selection(database,"ids",64,true) || !Check(database,"SELECT json_type(data,'$.remove') IN ('true','false') FROM people_request") { result.error="Choose up to 64 people and whether to keep previously added photos"; return result }
+        if SqlitePrepareText(database,"CREATE TEMP TABLE people_album_current AS SELECT * FROM albums WHERE name=? AND deleted=0 AND filter=''",-1,*statement,null) != SQLITE_OK { return result }
+        status = ifx AutoAlbums.Bind(statement,1,TextFromBytes(name[:nameLength])) then SqliteStep(statement) else -1; unused SqliteFinalize(statement)
+        if status != SQLITE_DONE { return result }
+        if !Check(database,"SELECT count(*)=1 FROM people_album_current") { result.error="Choose a regular album for automatic people additions"; return result }
+        sql: Vec(u8)
+        BuilderPrint(*sql,"SELECT NOT EXISTS(SELECT 1 FROM people_selected s WHERE NOT EXISTS(SELECT 1 FROM people_album_current,json_each(auto_people) previous WHERE previous.value=s.id) AND (coalesce((SELECT value FROM settings WHERE key='people_enabled'),'false')<>'true' OR NOT EXISTS(SELECT 1 FROM people g JOIN person_photos f ON f.person_id=g.id JOIN photos ON photos.id=f.photo_id WHERE g.id=s.id AND g.ignored=0 AND g.name<>'' AND %)))",VisibleSQL())
+        if !Check(database,BuilderFinish(sql)) { result.error="Enable People and choose a named, visible person"; return result }
+        if !Execute(database,"UPDATE albums SET auto_people=(SELECT json_group_array(id) FROM (SELECT id FROM people_selected ORDER BY id)),updated=max(updated+0.00001,(SELECT now FROM people_request)),dirty=1 WHERE id=(SELECT id FROM people_album_current)") { return result }
+        removal: Vec(u8)
+        BuilderPrint(*removal,"CREATE TEMP TABLE people_removals AS SELECT photos.id FROM photos,people_album_current a WHERE (SELECT json_extract(data,'$.remove') FROM people_request)=1 AND EXISTS(SELECT 1 FROM json_each(a.auto_people) old WHERE old.value NOT IN(SELECT id FROM people_selected)) AND json_type(photos.edits,'$.auto_albums.'||a.id)='array' AND json_array_length(photos.edits,'$.auto_albums.'||a.id)>0 AND NOT EXISTS(SELECT 1 FROM json_each(photos.edits,'$.auto_albums.'||a.id) source WHERE source.value IN(SELECT id FROM people_selected)) AND NOT EXISTS(SELECT 1 FROM person_photos f JOIN people g ON g.id=f.person_id WHERE f.photo_id=photos.id AND g.id IN(SELECT id FROM people_selected) AND g.name<>'' AND g.ignored=0) AND %",VisibleSQL())
+        if !Execute(database,BuilderFinish(removal)) { return result }
+        if !Execute(database,"INSERT INTO people_removals SELECT json_extract(photos.metadata,'$.photosLive.video') FROM photos WHERE photos.id IN(SELECT id FROM people_removals) AND json_extract(photos.metadata,'$.photosLive.video') IS NOT NULL") { return result }
+        prepared := AlbumMembership.Prepare(database,"album_remove",TextFromBytes(name[:nameLength]),now)
+        if prepared.error != "" { result.error=prepared.error; return result }
+        update := prepared.statement
+        if SqlitePrepareText(database,"SELECT DISTINCT id FROM people_removals",-1,*statement,null) != SQLITE_OK { unused SqliteFinalize(update); return result }
+        ok := true
+        while true {
+            status=SqliteStep(statement); if status==SQLITE_DONE { break }; if status!=SQLITE_ROW { ok=false; break }
+            if SqliteBindDouble(update,3,now)!=SQLITE_OK || !AutoAlbums.Bind(update,4,AutoAlbums.Column(statement,0)) || SqliteStep(update)!=SQLITE_DONE { ok=false; break }
+            unused SqliteReset(update)
+        }
+        unused SqliteFinalize(statement); unused SqliteFinalize(update); if !ok { return result }
+        if SqlitePrepareText(database,"SELECT id FROM people_album_current",-1,*statement,null)!=SQLITE_OK { return result }
+        if SqliteStep(statement)!=SQLITE_ROW { unused SqliteFinalize(statement); return result }
+        identity:=TextFromCString(SqliteColumnText(statement,0)); if !Identity(identity) { unused SqliteFinalize(statement); return result }
+        for i: 0..63 { result.identity[i]=identity[i] }; unused SqliteFinalize(statement)
+        if !AutoAlbums.Apply(database,now,"",TextFromCString(*result.identity[0])) { return result }
+        result.error=""; result.saved=1; return result
+    }
+    tagging := action == "tag" || action == "untag"
+    if tagging {
+        if !Selection(database,"ids",1000) { result.error="Select up to 1000 photos or videos to tag"; return result }
+        if !Check(database,"SELECT coalesce((SELECT value FROM settings WHERE key='people_enabled')='true',0)") { result.error="Enable People before manually tagging a person"; return result }
+    } else {
+        if ReadStringText(json,FieldAt(json,0,"person"),person[:]) != 64 || !Identity(TextFromCString(*person[0])) { result.error="Choose a person"; return result }
+        if SqlitePrepareText(database,"CREATE TEMP TABLE people_current AS SELECT * FROM people WHERE id=?",-1,*statement,null) != SQLITE_OK { return result }
+        status = ifx AutoAlbums.Bind(statement,1,TextFromCString(*person[0])) then SqliteStep(statement) else -1; unused SqliteFinalize(statement)
+        if status != SQLITE_DONE { return result }
+        if !Check(database,"SELECT count(*)=1 FROM people_current") { result.error="Person not found"; return result }
+        sql: Vec(u8); BuilderPrint(*sql,"SELECT EXISTS(SELECT 1 FROM person_photos f JOIN photos ON photos.id=f.photo_id WHERE f.person_id=(SELECT id FROM people_current) AND %)",VisibleSQL())
+        if !Check(database,BuilderFinish(sql)) { result.error="Restore and unhide a photo in this group before changing the person"; return result }
+        if action == "person_remove" && !Selection(database,"ids",1000) { result.error="Select photos to remove from this person"; return result }
+    }
+    if tagging || action == "person_remove" {
+        sql: Vec(u8); BuilderPrint(*sql,"SELECT NOT EXISTS(SELECT 1 FROM people_selected s LEFT JOIN photos ON photos.id=s.id WHERE photos.id IS NULL OR NOT (%))",VisibleSQL())
+        if !Check(database,BuilderFinish(sql)) { result.error="Restore and unhide every selected item before changing people"; return result }
+    }
+    if !Execute(database,"CREATE TEMP TABLE people_touched(id TEXT PRIMARY KEY); CREATE TEMP TABLE people_target(id TEXT PRIMARY KEY)") { return result }
+    if tagging || action == "person_name" {
+        length = ReadStringText(json,FieldAt(json,0,"value"),value[:])
+        if length < 1 { result.error="Enter one person name of at most 512 bytes"; return result }
+        name := TextFromBytes(value[:length]); start: s32; end := length
+        for byte: name { if byte < 32 || byte == 127 { result.error="Enter one person name of at most 512 bytes"; return result } }
+        while start < end && name[start] == 32 { start += 1 }; while end > start && name[end-1] == 32 { end -= 1 }
+        name = name[start:end]; if name.count == 0 { result.error="Enter one person name of at most 512 bytes"; return result }
+        if SqlitePrepareText(database,"UPDATE people_request SET data=json_set(data,'$.value',?)",-1,*statement,null) != SQLITE_OK { return result }
+        status = ifx AutoAlbums.Bind(statement,1,name) then SqliteStep(statement) else -1; unused SqliteFinalize(statement); if status != SQLITE_DONE { return result }
+        if tagging {
+            if !Execute(database,"INSERT INTO people_target SELECT id FROM people WHERE name=(SELECT json_extract(data,'$.value') FROM people_request) COLLATE NOCASE ORDER BY updated DESC,id LIMIT 1") { return result }
+            if action == "untag" && !Check(database,"SELECT count(*)=1 FROM people_target") { result.error="No person with that name was found"; return result }
+            if !Execute(database,"INSERT INTO people_target SELECT lower(hex(randomblob(32))) WHERE NOT EXISTS(SELECT 1 FROM people_target); INSERT INTO people(id,name,ignored,updated) SELECT id,(SELECT json_extract(data,'$.value') FROM people_request),0,(SELECT now FROM people_request) FROM people_target WHERE NOT EXISTS(SELECT 1 FROM people WHERE people.id=people_target.id); INSERT INTO people_touched SELECT id FROM people_selected") { return result }
+            if action == "tag" {
+                if !Check(database,"SELECT NOT EXISTS(SELECT 1 FROM people_selected WHERE (SELECT count(*) FROM person_tags WHERE photo_id=people_selected.id)>=64 AND NOT EXISTS(SELECT 1 FROM person_tags WHERE photo_id=people_selected.id AND person_id=(SELECT id FROM people_target)))") { result.error="Tag up to 64 people in one item"; return result }
+                if !Execute(database,"INSERT OR IGNORE INTO person_tags SELECT id,(SELECT id FROM people_target) FROM people_selected") { return result }
+            } else { if !Execute(database,"DELETE FROM person_tags WHERE photo_id IN(SELECT id FROM people_selected) AND person_id=(SELECT id FROM people_target)") { return result } }
+            if !Execute(database,"INSERT OR IGNORE INTO person_tag_edits SELECT id FROM people_selected") { return result }
+        } else {
+            if !Execute(database,"INSERT INTO people_target SELECT id FROM people WHERE name=(SELECT json_extract(data,'$.value') FROM people_request) COLLATE NOCASE AND id<>(SELECT id FROM people_current) AND EXISTS(SELECT 1 FROM person_photos WHERE person_id=people.id) ORDER BY updated DESC,id LIMIT 1; INSERT INTO people_target SELECT id FROM people_current WHERE NOT EXISTS(SELECT 1 FROM people_target); INSERT OR IGNORE INTO people_touched SELECT photo_id FROM person_photos WHERE person_id IN(SELECT id FROM people_current UNION SELECT id FROM people_target)") { return result }
+            if !Check(database,"SELECT NOT EXISTS(SELECT 1 FROM faces,json_each(faces.excluded) e WHERE (faces.person_id=(SELECT id FROM people_current) AND e.value=(SELECT id FROM people_target)) OR (faces.person_id=(SELECT id FROM people_target) AND e.value=(SELECT id FROM people_current)))") { result.error="These groups contain corrected faces; move the photos deliberately instead"; return result }
+            if !Execute(database,"UPDATE faces SET person_id=(SELECT id FROM people_target) WHERE person_id=(SELECT id FROM people_current); INSERT OR IGNORE INTO person_tags SELECT photo_id,(SELECT id FROM people_target) FROM person_tags WHERE person_id=(SELECT id FROM people_current); DELETE FROM person_tags WHERE person_id=(SELECT id FROM people_current) AND (SELECT id FROM people_current)<>(SELECT id FROM people_target); UPDATE people SET name=CASE WHEN id=(SELECT id FROM people_current) THEN (SELECT json_extract(data,'$.value') FROM people_request) ELSE name END,ignored=CASE WHEN id<>(SELECT id FROM people_current) THEN 0 ELSE ignored END,birth=CASE WHEN birth='' THEN (SELECT birth FROM people_current) ELSE birth END WHERE id=(SELECT id FROM people_target); UPDATE albums SET auto_people=(SELECT json_group_array(value) FROM (SELECT DISTINCT CASE WHEN value=(SELECT id FROM people_current) THEN (SELECT id FROM people_target) ELSE value END value FROM json_each(albums.auto_people) ORDER BY value)),updated=max(updated+0.00001,(SELECT now FROM people_request)),dirty=1 WHERE (SELECT id FROM people_current)<>(SELECT id FROM people_target) AND EXISTS(SELECT 1 FROM json_each(albums.auto_people) WHERE value=(SELECT id FROM people_current))") { return result }
+        }
+    } else {
+        if !Execute(database,"INSERT INTO people_target SELECT id FROM people_current") { return result }
+        if action == "person_birth" {
+            if !Check(database,"SELECT coalesce(json_type(data,'$.value')='text' AND (json_extract(data,'$.value')='' OR (length(CAST(json_extract(data,'$.value') AS BLOB))=10 AND json_extract(data,'$.value') GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND json_extract(data,'$.value')>='1600-01-01' AND json_extract(data,'$.value')<=date('now','localtime') AND date(json_extract(data,'$.value'),'+0 days')=json_extract(data,'$.value'))),0) FROM people_request") { result.error="Use YYYY-MM-DD for a birth date, or leave empty to remove it"; return result }
+            if !Execute(database,"UPDATE people SET birth=(SELECT json_extract(data,'$.value') FROM people_request) WHERE id=(SELECT id FROM people_target)") { return result }
+        } else if action == "person_ignore" {
+            if !Execute(database,"UPDATE people SET ignored=1-ignored WHERE id=(SELECT id FROM people_target)") { return result }
+        } else if action == "person_remove" {
+            if !Check(database,"SELECT NOT EXISTS(SELECT 1 FROM faces WHERE photo_id IN(SELECT id FROM people_selected) AND person_id=(SELECT id FROM people_current) AND json_array_length(excluded)>=128 AND NOT EXISTS(SELECT 1 FROM json_each(excluded) WHERE value=faces.person_id))") { result.error="This face has reached its correction limit"; return result }
+            if !Execute(database,"INSERT INTO people_touched SELECT id FROM people_selected; CREATE TEMP TABLE people_corrections AS SELECT id,lower(hex(randomblob(32))) AS person FROM faces WHERE photo_id IN(SELECT id FROM people_selected) AND person_id=(SELECT id FROM people_current); INSERT INTO people(id,name,ignored,updated) SELECT person,'',0,(SELECT now FROM people_request) FROM people_corrections; UPDATE faces SET person_id=(SELECT person FROM people_corrections WHERE people_corrections.id=faces.id),excluded=(SELECT json_group_array(value) FROM (SELECT value FROM json_each(faces.excluded) UNION SELECT (SELECT id FROM people_current) ORDER BY value)) WHERE id IN(SELECT id FROM people_corrections); DELETE FROM person_tags WHERE photo_id IN(SELECT id FROM people_selected) AND person_id=(SELECT id FROM people_current); INSERT OR IGNORE INTO person_tag_edits SELECT id FROM people_selected") { return result }
+        } else { result.error="Unknown People action"; return result }
+        if action != "person_remove" && !Execute(database,"INSERT INTO people_touched SELECT DISTINCT photo_id FROM person_photos WHERE person_id=(SELECT id FROM people_target)") { return result }
+    }
+    if !Execute(database,"UPDATE people SET updated=max(updated+0.00001,(SELECT now FROM people_request)) WHERE id=(SELECT id FROM people_target); UPDATE photos SET updated=max(updated+0.00001,(SELECT now FROM people_request)),dirty=1 WHERE id IN(SELECT id FROM people_touched)") || !AutoAlbums.Apply(database,now) { return result }
+    if SqlitePrepareText(database,"SELECT id FROM people_target",-1,*statement,null) != SQLITE_OK { return result }
+    if SqliteStep(statement) != SQLITE_ROW { unused SqliteFinalize(statement); return result }
+    identity := TextFromCString(SqliteColumnText(statement,0)); if !Identity(identity) { unused SqliteFinalize(statement); return result }
+    for i: 0..63 { result.identity[i]=identity[i] }; unused SqliteFinalize(statement)
+    result.error=""; result.saved=1; return result
+}

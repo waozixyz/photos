@@ -6,6 +6,7 @@ AlbumDetails :: #import "album_details";
 Metadata :: #import "metadata_input";
 Cleanup :: #import "similar_cleanup";
 SemanticIndex :: #import "semantic_index";
+People :: #import "people_edit";
 #import "std/byte_text_linux"
 #import "std/json_scan"
 #import "std/text_buffer"
@@ -117,6 +118,20 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if ReadStringText(json,FieldAt(json,0,"action"),actionBytes[:]) < 0 { return Failure("Choose a photo action") }
     action := TextFromCString(*actionBytes[0]); valueLength := ReadStringText(json,FieldAt(json,0,"value"),valueBytes[:])
     if action == "album_definition" { return EditAlbum(TextFromCString(argv[1]),json) }
+    if action == "people" {
+        database: *void
+        if SqliteOpenText(TextFromCString(argv[1]),*database,SQLITE_OPEN_READWRITE) != SQLITE_OK { if database != null { unused SqliteClose(database) }; return Failure("Cannot open the private library database") }
+        defer { unused SqliteClose(database) }
+        unused SqliteBusyTimeout(database,5000)
+        if SqliteExecText(database,"BEGIN IMMEDIATE") != SQLITE_OK { return Failure("The library is busy; try the People change again") }
+        defer { unused SqliteExecText(database,"ROLLBACK") }
+        time: Timespec; if GetTime(0,*time) != 0 { return Failure("Cannot read the People edit time") }
+        now := cast(float64)time.seconds+cast(float64)time.nanoseconds/1000000000.0
+        result := People.Mutate(database,json,now)
+        if result.error != "" { return Failure(result.error) }
+        if SqliteExecText(database,"COMMIT") != SQLITE_OK { return Failure("Cannot save the People change") }
+        response: Vec(u8); BuilderPrint(*response,"{\"saved\":%,\"id\":\"%\"}",result.saved,TextFromCString(*result.identity[0])); unused Send(BuilderFinish(response)); return 0
+    }
     if action == "semantic_index" {
         database: *void
         if SqliteOpenText(TextFromCString(argv[1]),*database,SQLITE_OPEN_READWRITE) != SQLITE_OK { if database != null { unused SqliteClose(database) }; return Failure("Cannot open the private library database") }

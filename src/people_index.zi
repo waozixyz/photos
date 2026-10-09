@@ -1,0 +1,109 @@
+// Local face scans never replace completed/restored indexes or a newer edit.
+// Matching, exclusions and scan publication run inside the writer transaction.
+using SQLite :: #import "sqlite/SQLite";
+LivePhoto :: #import "live_photo";
+AutoAlbums :: #import "people_albums";
+Album :: #import "album_edit";
+Vector :: #import "face_match";
+#import "std/byte_text_linux"
+#import "std/json_scan"
+#import "std/text_buffer"
+c :: #system_library "c";
+Copy :: (out: *void, bytes: *void, count: usize) -> *void #foreign c "memcpy";
+Result :: struct { error: string; identity: [65]u8; saved: s32 }
+Nibble :: (byte: u8) -> s32 {
+    if byte>=48 && byte<=57 { return cast(s32)byte-48 }; if byte>=97 && byte<=102 { return cast(s32)byte-87 }; return -1
+}
+Hex :: (text: string, bytes: []u8) -> bool {
+    if text.count!=bytes.count*2 { return false }
+    for i: 0..bytes.count-1 { high:=Nibble(text[2*i]); low:=Nibble(text[2*i+1]); if high<0 || low<0 { return false }; bytes[i]=cast(u8)(high*16+low) }; return true
+}
+Check :: (database: *void, sql: string) -> bool {
+    statement: *void; if SqlitePrepareText(database,sql,-1,*statement,null)!=SQLITE_OK { return false }; defer { unused SqliteFinalize(statement) }
+    return SqliteStep(statement)==SQLITE_ROW && SqliteColumnInt(statement,0)==1
+}
+Match :: (database: *void, vector: []float32, person: []u8) -> s32 {
+    statement: *void
+    sql:="SELECT person_id,embedding FROM people_exemplars WHERE exemplar<=3 AND person_id NOT IN(SELECT id FROM people_used) ORDER BY id"
+    if SqlitePrepareText(database,sql,-1,*statement,null)!=SQLITE_OK { return -1 }; defer { unused SqliteFinalize(statement) }
+    best: float64=0.55; found: s32; count: s32
+    while true {
+        status:=SqliteStep(statement); if status==SQLITE_DONE { break }; if status!=SQLITE_ROW { return -1 }
+        if count>=100000 { return -1 }; count+=1
+        other: [128]float32
+        if SqliteColumnBytes(statement,1)!=512 { continue }
+        unused Copy(cast(*void)*other[0],cast(*void)SqliteColumnBlob(statement,1),512)
+        if !Vector.Valid(other[:]) { continue }
+        dot: float64; for i: 0..127 { dot+=cast(float64)vector[i]*cast(float64)other[i] }
+        if dot>=best {
+            id:=AutoAlbums.Column(statement,0); if id.count!=64 { return -1 }
+            for i: 0..63 { if Nibble(id[i])<0 { return -1 }; person[i]=id[i] }; person[64]=0; best=dot; found=1
+        }
+    }
+    return found
+}
+Mutate :: (database: *void, json: string, action: string, now: float64) -> Result {
+    result: Result; result.error="Cannot save the local face index; retry indexing"
+    sql: Vec(u8)
+    BuilderPrint(*sql,"SELECT id FROM photos WHERE kind='photo' AND hidden=0 AND trashed=0 AND % AND (SELECT value FROM settings WHERE key='people_enabled')='true' AND (SELECT value FROM settings WHERE key='people_processing')='true' AND NOT EXISTS(SELECT 1 FROM face_scans WHERE face_scans.photo_id=photos.id)",LivePhoto.GallerySQL)
+    eligibility:=BuilderFinish(sql); statement: *void
+    if action=="next" {
+        next: Vec(u8); BuilderPrint(*next,"% ORDER BY taken DESC,id LIMIT 1",eligibility)
+        if SqlitePrepareText(database,BuilderFinish(next),-1,*statement,null)!=SQLITE_OK { return result }
+        status:=SqliteStep(statement)
+        if status==SQLITE_ROW {
+            identity:=AutoAlbums.Column(statement,0); if identity.count!=64 { unused SqliteFinalize(statement); return result }
+            for i: 0..63 { if Nibble(identity[i])<0 { unused SqliteFinalize(statement); return result }; result.identity[i]=identity[i] }; result.saved=1
+        } else if status!=SQLITE_DONE { unused SqliteFinalize(statement); return result }
+        unused SqliteFinalize(statement); result.error=""; return result
+    }
+    identity: [65]u8; expectedText: [17]u8; stamp: [8]u8; expected: float64
+    if ReadStringText(json,FieldAt(json,0,"photo"),identity[:])!=64 || ReadStringText(json,FieldAt(json,0,"expected"),expectedText[:])!=16 || !Hex(TextFromCString(*expectedText[0]),stamp[:]) { return result }
+    for i: 0..63 { if Nibble(identity[i])<0 { return result } }
+    unused Copy(cast(*void)*expected,cast(*void)*stamp[0],8)
+    if expected!=expected || expected<0.0 || expected>32503680000.0 { return result }
+    check: Vec(u8); BuilderPrint(*check,"% AND id=?1 AND updated=?2",eligibility)
+    if SqlitePrepareText(database,BuilderFinish(check),-1,*statement,null)!=SQLITE_OK { return result }
+    bound:=AutoAlbums.Bind(statement,1,TextFromCString(*identity[0])) && SqliteBindDouble(statement,2,expected)==SQLITE_OK
+    status:=ifx bound then SqliteStep(statement) else -1; unused SqliteFinalize(statement)
+    if status==SQLITE_DONE { result.error=""; return result }; if status!=SQLITE_ROW { return result }
+    if action=="failure" {
+        if SqlitePrepareText(database,"INSERT INTO face_scans VALUES(?,'yunet-sface-v1','Local original could not be indexed')",-1,*statement,null)!=SQLITE_OK { return result }
+        status=ifx AutoAlbums.Bind(statement,1,TextFromCString(*identity[0])) then SqliteStep(statement) else -1; unused SqliteFinalize(statement)
+        if status!=SQLITE_DONE { return result }; result.error=""; result.saved=1; return result
+    }
+    if !Check(database,"SELECT coalesce(json_type(data,'$.faces')='array' AND json_array_length(data,'$.faces')<=32 AND NOT EXISTS(SELECT 1 FROM json_each(data,'$.faces') f WHERE NOT coalesce(f.type='object' AND json_type(f.value,'$.rect')='array' AND json_array_length(f.value,'$.rect')=4 AND json_type(f.value,'$.rect[0]')='integer' AND json_type(f.value,'$.rect[1]')='integer' AND json_type(f.value,'$.rect[2]')='integer' AND json_type(f.value,'$.rect[3]')='integer' AND json_extract(f.value,'$.rect[0]') BETWEEN 0 AND 9999 AND json_extract(f.value,'$.rect[1]') BETWEEN 0 AND 9999 AND json_extract(f.value,'$.rect[2]') BETWEEN 1 AND 10000-json_extract(f.value,'$.rect[0]') AND json_extract(f.value,'$.rect[3]') BETWEEN 1 AND 10000-json_extract(f.value,'$.rect[1]') AND json_type(f.value,'$.vector')='text' AND length(CAST(json_extract(f.value,'$.vector') AS BLOB))=1024,0)),0) FROM people_request") { return result }
+    exemplars: Vec(u8)
+    BuilderPrint(*exemplars,"CREATE TEMP TABLE people_exemplars AS SELECT f.id,f.person_id,f.embedding,row_number() OVER(PARTITION BY f.person_id ORDER BY f.id) AS exemplar FROM faces f JOIN people g ON g.id=f.person_id JOIN photos ON photos.id=f.photo_id WHERE g.ignored=0 AND photos.hidden=0 AND photos.trashed=0 AND %; CREATE TEMP TABLE people_used(id TEXT PRIMARY KEY)",LivePhoto.GallerySQL)
+    if !AutoAlbums.Execute(database,BuilderFinish(exemplars)) { return result }
+    if SqlitePrepareText(database,"SELECT f.key,json_extract(f.value,'$.rect'),json_extract(f.value,'$.vector') FROM people_request,json_each(data,'$.faces') f ORDER BY f.key",-1,*statement,null)!=SQLITE_OK { return result }
+    ok:=true
+    while true {
+        status=SqliteStep(statement); if status==SQLITE_DONE { break }; if status!=SQLITE_ROW { ok=false; break }
+        bytes: [512]u8; vector: [128]float32
+        if !Hex(AutoAlbums.Column(statement,2),bytes[:]) { ok=false; break }
+        unused Copy(cast(*void)*vector[0],cast(*void)*bytes[0],512)
+        if !Vector.Valid(vector[:]) { ok=false; break }
+        face: [65]u8; person: [65]u8; key: Vec(u8)
+        BuilderPrint(*key,"yunet-sface-v1:%:%",TextFromCString(*identity[0]),SqliteColumnInt(statement,0))
+        if !Album.Digest(BuilderFinish(key),face[:]) { ok=false; break }
+        match:=Match(database,vector[:],person[:]); if match<0 { ok=false; break }; if match==0 { person=face }
+        update: *void
+        if SqlitePrepareText(database,"INSERT OR IGNORE INTO people(id,name,ignored,updated) VALUES(?,'',0,?)",-1,*update,null)!=SQLITE_OK { ok=false; break }
+        bound=AutoAlbums.Bind(update,1,TextFromCString(*person[0])) && SqliteBindDouble(update,2,now)==SQLITE_OK
+        status=ifx bound then SqliteStep(update) else -1; unused SqliteFinalize(update); if status!=SQLITE_DONE { ok=false; break }
+        if SqlitePrepareText(database,"INSERT INTO faces VALUES(?,?,?,?,?,'[]')",-1,*update,null)!=SQLITE_OK { ok=false; break }
+        bound=AutoAlbums.Bind(update,1,TextFromCString(*face[0])) && AutoAlbums.Bind(update,2,TextFromCString(*identity[0])) && AutoAlbums.Bind(update,3,TextFromCString(*person[0])) && AutoAlbums.Bind(update,4,AutoAlbums.Column(statement,1)) && SqliteBindBlob(update,5,bytes[:])==SQLITE_OK
+        status=ifx bound then SqliteStep(update) else -1; unused SqliteFinalize(update); if status!=SQLITE_DONE { ok=false; break }
+        if SqlitePrepareText(database,"INSERT INTO people_used VALUES(?)",-1,*update,null)!=SQLITE_OK { ok=false; break }
+        status=ifx AutoAlbums.Bind(update,1,TextFromCString(*person[0])) then SqliteStep(update) else -1; unused SqliteFinalize(update); if status!=SQLITE_DONE { ok=false; break }
+    }
+    unused SqliteFinalize(statement); if !ok { return result }
+    if SqlitePrepareText(database,"INSERT INTO face_scans VALUES(?,'yunet-sface-v1','')",-1,*statement,null)!=SQLITE_OK { return result }
+    status=ifx AutoAlbums.Bind(statement,1,TextFromCString(*identity[0])) then SqliteStep(statement) else -1; unused SqliteFinalize(statement); if status!=SQLITE_DONE { return result }
+    if SqlitePrepareText(database,"UPDATE photos SET updated=max(updated+0.00001,?),dirty=1 WHERE id=?",-1,*statement,null)!=SQLITE_OK { return result }
+    bound=SqliteBindDouble(statement,1,now)==SQLITE_OK && AutoAlbums.Bind(statement,2,TextFromCString(*identity[0]))
+    status=ifx bound then SqliteStep(statement) else -1; unused SqliteFinalize(statement)
+    if status!=SQLITE_DONE || !AutoAlbums.Apply(database,now,TextFromCString(*identity[0])) { return result }
+    result.error=""; result.saved=1; return result
+}

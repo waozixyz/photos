@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.55
+
+- Save people names, birthdays, corrections and manual tags together with their automatic album changes, preserving the whole selection if saving fails.
+- Keep newer photo edits, completed face scans and private Live Photo components safe when a local face scan finishes late.
+- Keep both Live Photo components together when removing automatic album memberships.
+
 ## 0.1.54
 
 - Retain newer restored search indexes and photo edits when an older local scan finishes.

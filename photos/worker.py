@@ -180,9 +180,9 @@ def library_request(library, request, config, guest_bypass=False):
             result.update(view='auto_people',search='',album=album['name'],auto_selection=json.loads(album['auto_people']))
         return result
     if action in {'people_enable','people_pause','people_retry','people_disable'}:
-        from . import people
+        from . import people, native_edit
         if action=='people_retry':
-            with library.db: library.db.execute("DELETE FROM face_scans WHERE error<>''")
+            native_edit.people_change(library,'retry')
         people.enable(library,action in {'people_enable','people_retry'})
         if action=='people_disable': library.set_setting('people_enabled',False)
         return ui_query(library,request)

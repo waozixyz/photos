@@ -1,0 +1,37 @@
+// Automatic memberships share the People writer snapshot. Manual/source
+// memberships and removals stay authoritative; Live Photo components agree.
+using SQLite :: #import "sqlite/SQLite";
+LivePhoto :: #import "live_photo";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+Execute :: (database: *void, sql: string) -> bool { return SqliteExecText(database,sql) == SQLITE_OK }
+Column :: (statement: *void, index: s32) -> string {
+    return TextFromBytes(BytesFromPointer(SqliteColumnText(statement,index),cast(u64)SqliteColumnBytes(statement,index)))
+}
+Bind :: (statement: *void, index: s32, value: string) -> bool {
+    return SqliteBindTextString(statement,index,value,cast(s32)value.count) == SQLITE_OK
+}
+Apply :: (database: *void, now: float64, photo: string = "", album: string = "") -> bool {
+    sql: Vec(u8)
+    BuilderPrint(*sql,"CREATE TEMP TABLE people_matches AS SELECT DISTINCT photos.id AS photo_id,a.id AS album_id,a.name,(SELECT json_group_array(id) FROM (SELECT DISTINCT g.id FROM person_photos f JOIN people g ON g.id=f.person_id JOIN json_each(a.auto_people) chosen ON chosen.value=g.id WHERE f.photo_id=photos.id AND g.ignored=0 AND g.name<>'' ORDER BY g.id)) AS persons FROM photos JOIN person_photos f ON f.photo_id=photos.id JOIN people g ON g.id=f.person_id JOIN albums a JOIN json_each(a.auto_people) chosen ON chosen.value=g.id WHERE a.deleted=0 AND a.filter='' AND g.ignored=0 AND g.name<>'' AND photos.hidden=0 AND photos.trashed=0 AND % AND (SELECT value FROM settings WHERE key='people_enabled')='true'",LivePhoto.GallerySQL)
+    if photo != "" { BuilderPrint(*sql," AND photos.id=?1") }
+    if album != "" { BuilderPrint(*sql," AND a.id=?2") }
+    statement: *void
+    if SqlitePrepareText(database,BuilderFinish(sql),-1,*statement,null) != SQLITE_OK { return false }
+    bound := (photo == "" || Bind(statement,1,photo)) && (album == "" || Bind(statement,2,album))
+    status := ifx bound then SqliteStep(statement) else -1; unused SqliteFinalize(statement)
+    if status != SQLITE_DONE { return false }
+    if !Execute(database,"CREATE TEMP TABLE people_additions AS SELECT photo_id,album_id,name,persons FROM people_matches UNION SELECT json_extract(photos.metadata,'$.photosLive.video'),album_id,people_matches.name,persons FROM people_matches JOIN photos ON photos.id=photo_id WHERE json_extract(photos.metadata,'$.photosLive.video') IS NOT NULL") { return false }
+    if SqlitePrepareText(database,"SELECT photo_id,album_id,name,persons FROM people_additions ORDER BY photo_id,album_id",-1,*statement,null) != SQLITE_OK { return false }
+    defer { unused SqliteFinalize(statement) }
+    update: *void
+    text := "UPDATE photos SET albums=(SELECT json_group_array(value) FROM (SELECT value FROM json_each(photos.albums) UNION SELECT ?1 ORDER BY value)),edits=json_set(edits,'$.auto_albums.'||?2,json(?3)),updated=max(updated+0.00001,?4),dirty=1 WHERE id=?5 AND NOT EXISTS(SELECT 1 FROM json_each(edits,'$.removed_albums') WHERE value=?1) AND (NOT EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=?1) OR json_type(edits,'$.auto_albums.'||?2)='array') AND (NOT EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=?1) OR coalesce(json_extract(edits,'$.auto_albums.'||?2),'[]')<>?3)"
+    if SqlitePrepareText(database,text,-1,*update,null) != SQLITE_OK { return false }
+    defer { unused SqliteFinalize(update) }
+    while true {
+        status = SqliteStep(statement); if status == SQLITE_DONE { break }; if status != SQLITE_ROW { return false }
+        if !Bind(update,1,Column(statement,2)) || !Bind(update,2,Column(statement,1)) || !Bind(update,3,Column(statement,3)) || SqliteBindDouble(update,4,now) != SQLITE_OK || !Bind(update,5,Column(statement,0)) || SqliteStep(update) != SQLITE_DONE { return false }
+        unused SqliteReset(update); unused SqliteClearBindings(update)
+    }
+    return true
+}
