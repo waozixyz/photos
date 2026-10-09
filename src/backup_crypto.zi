@@ -1,0 +1,38 @@
+// Photos byte framing for existing Daochi encrypted backups. Encryption,
+// digests, randomness and buffer clearing belong to DaochiClient.
+#scope_module
+#import "std/byte_text_linux"
+Native :: #import "daochi_client/crypto_native";
+c :: #system_library "c";
+Allocate :: (bytes: usize) -> *void #foreign c "malloc";
+Release :: (bytes: *void) #foreign c "free";
+Valid :: (plain: s64, aad: s64, key: []u8) -> bool {
+    return plain>=0 && plain<=134217728 && aad>=0 && aad<=1048576 && key.count==32 && Native.Initialize()
+}
+#scope_export
+Clear :: (bytes: []u8) { Native.Clear(bytes) }
+Digest :: (input: []u8, output: []u8) -> bool { return Native.Digest(input,output) }
+// Preserve released resumable ciphertext and metadata nonces exactly.
+Seal :: (input: []u8, aad: []u8, key: []u8, output: []u8, resumable: bool) -> s64 {
+    if !Valid(input.count,aad.count,key) || output.count<input.count+40 { return -1 }
+    if resumable {
+        pointer:=cast(*u8)Allocate(cast(usize)(aad.count+32))
+        if pointer==null { return -1 }
+        // The caller framing binds the nonce to address and full byte digest.
+        scratch:=BytesFromPointer(pointer,cast(u64)(aad.count+32))
+        defer { Native.Clear(scratch); Release(cast(*void)pointer) }
+        for i: 0..aad.count-1 { scratch[i]=aad[i] }
+        hash: [32]u8; defer { Native.Clear(hash[:]) }
+        if !Native.Digest(input,scratch[aad.count:]) || !Native.HmacSha256(scratch,key,hash[:]) { return -1 }
+        for i: 0..23 { output[i]=hash[i] }
+    } else if !Native.RandomBytes(output[:24]) { return -1 }
+    length:=Native.Seal(input,aad,key,output[:24],output[24:])
+    if length!=input.count+16 { Native.Clear(output); return -1 }
+    return input.count+40
+}
+Open :: (sealed: []u8, aad: []u8, key: []u8, output: []u8) -> s64 {
+    if sealed.count<40 || !Valid(sealed.count-40,aad.count,key) || output.count<sealed.count-40 {
+        Native.Clear(output); return -1
+    }
+    return Native.Open(sealed[24:],aad,key,sealed[:24],output)
+}

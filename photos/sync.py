@@ -14,8 +14,8 @@ import urllib.error
 from urllib.parse import urlsplit
 from datetime import datetime, timezone
 
-from .sync_crypto import encrypt, decrypt, seal_blob, seal_record, device_seed, device_public, device_signature
-from . import account_sign, sync_http, sync_pages
+from .sync_crypto import encrypt, decrypt, seal_blob, seal_record, device_seed, device_public
+from . import account_sign, sync_http, sync_pages, sync_transaction
 
 from .library import atomic, packed, digest_file
 
@@ -100,15 +100,8 @@ class Client:
                  {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + self.token})
 
     def header(self, method, path, body):
-        value = dict(protocol_version=6, tx_id=secrets.token_hex(32), account_id=self.account,
-                     app_id=APP, device_key_id=self.device_id, method=method, path=path,
-                     body_sha256=hashlib.sha256(body or b'').hexdigest(), nonce=secrets.token_hex(32),
-                     expires_at=int(time.time()) + 120, signature_context='daochi-tx-v1')
-        message = '\n'.join(['daochi-tx-v1', '6', value['tx_id'], self.account, APP, self.device_id,
-                             method, path, value['body_sha256'], value['nonce'], str(value['expires_at']), '']).encode()
-        value['signature'] = account_sign.sign(self.private, message).hex()
-        value['device_signature'] = device_signature(message, self.device_key).hex()
-        return packed(value)
+        return sync_transaction.header(self.public, self.private, self.device_key,
+                                       method, path, body or b'', int(time.time()) + 120)
 
     def request(self, path, method='GET', body=None, binary=False):
         for attempt in range(2):

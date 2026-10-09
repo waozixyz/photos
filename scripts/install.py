@@ -69,6 +69,12 @@ def main():
     shutil.copyfile(account_signer,installed/'account_sign.next')
     os.chmod(installed/'account_sign.next',0o755)
     os.replace(installed/'account_sign.next',installed/'account_sign')
+    transaction = repo/'build/sync-transaction/sync_transaction'
+    if not transaction.is_file():
+        parser.error('Build native Daochi request signing before installing')
+    shutil.copyfile(transaction,installed/'sync_transaction.next')
+    os.chmod(installed/'sync_transaction.next',0o755)
+    os.replace(installed/'sync_transaction.next',installed/'sync_transaction')
     transport = repo/'build/sync-http/sync_http'
     if not transport.is_file():
         parser.error('Build native Photos loopback transport before installing')

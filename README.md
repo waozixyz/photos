@@ -379,12 +379,14 @@ and stalled replies expire after 60 seconds. Its socket is private to this user;
 opening another instance preserves the active endpoint and unrelated files.
 Photo/chunk and album/metadata encryption, authenticated decryption, metadata
 nonce generation and resumable chunk nonce derivation now run in a headless
-Ziran helper over a private binary channel. It retains the existing
+Ziran helper over a private binary channel using DaochiClient's shared native
+crypto provider. It retains the existing
 XChaCha20-Poly1305 backup format and content keys. An altered tag, account,
 address, key or nonce returns no plaintext. A missing or interrupted helper
 pauses that operation and preserves originals and keys. Ed25519 device seed
 generation, public keys and transaction signatures also run in Ziran and retain
-existing device identities. Account signing and loopback HTTP transport also
+existing device identities. Signed request messages and headers use
+DaochiClient's v6 protocol builders. Account signing and loopback HTTP transport also
 run in native helpers. The native transport checks the pinned node and its
 replication policy. A native SQLite writer merges each photo/album/index page
 and its resume checkpoint atomically; stale requests retain local edits and

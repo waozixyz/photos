@@ -112,7 +112,8 @@ class AccountSignTest(unittest.TestCase):
                                            content_key='42'*32)).encode())
                 before=identity.read_bytes();client=Client(library,config)
                 device=client.device_path.read_bytes()
-                with patch.object(signing,'program',side_effect=ValueError('unavailable')):
+                from photos import sync_transaction
+                with patch.object(sync_transaction,'program',side_effect=ValueError('unavailable')):
                     with self.assertRaises(ValueError):client.header('POST','/api/v1/sync',b'fixture')
                 self.assertEqual(identity.read_bytes(),before)
                 self.assertEqual(client.device_path.read_bytes(),device)
