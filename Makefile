@@ -28,6 +28,20 @@ app-lock-policy-test:
 	$(ZIRAN) bundle --project $(PACKAGE_FLAGS) --root tests --entry app_lock_policy_test:Answer -o build/app-lock-policy-test.zib tests/app_lock_policy_test.zi
 	test "$$($(ZIRAN) run build/app-lock-policy-test.zib)" = 42
 test: app-lock-policy-test
+.PHONY: selection-drag-test
+selection-drag-test:
+	$(ZIRAN) build --project $(PACKAGE_FLAGS) --root tests --target=c --entry selection_drag_test:main --exe -o build/selection-drag-test tests/selection_drag_test.zi
+	build/selection-drag-test/selection_drag_test
+	$(ZIRAN) bundle --project $(PACKAGE_FLAGS) --root tests --entry selection_drag_test:Answer -o build/selection-drag-test.zib tests/selection_drag_test.zi
+	test "$$($(ZIRAN) run build/selection-drag-test.zib)" = 42
+test: selection-drag-test
+.PHONY: swipe-window-test swipe-portable-test swipe-hosted-test
+swipe-window-test: build
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/swipe_window.py
+swipe-portable-test: bundle
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_SWIPE_PORTABLE=1 $(PYTHON) tests/swipe_window.py
+swipe-hosted-test: bundle
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_SWIPE_PORTABLE=1 PHOTOS_SWIPE_HOSTED=1 $(PYTHON) tests/swipe_window.py
 .PHONY: app-lock-window-test app-lock-portable-test app-lock-hosted-test
 app-lock-window-test: build
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/app_lock_window.py

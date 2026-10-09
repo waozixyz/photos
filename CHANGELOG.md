@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.46
+
+- Drag horizontally after selecting a photo to select or unselect a range, and reverse the gesture to restore items outside that range.
+- Keep selecting while the gallery scrolls at its edges and loads more photos; ordinary clicks and vertical scrolling remain available.
+- Choose whether swipe selection is enabled on this device, and cancel a held gesture when focus or library access changes.
+
 ## 0.1.45
 
 - Keep encrypted backup and restore requests on the private ThinkPad connection even when system proxy settings are configured.

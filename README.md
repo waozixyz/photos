@@ -182,7 +182,18 @@ service receives coordinates or searches.
 
 Use Select, Ctrl-click or Shift-click to select up to 1000 items. Select loaded
 selects the photos already loaded into the feed, including those outside the
-visible rows; scrolling loads more. Apply favorites, hiding, Trash, restore, album
+visible rows; scrolling loads more. After picking at least one item, drag
+horizontally over the gallery to activate Swipe to select. Continue in either
+direction to select the range from the starting photo; starting on a selected
+photo unselects that range. Reversing restores the initial selection outside the
+current range. Holding near the top or bottom scrolls and loads later pages.
+Ordinary clicks and vertical scrolling remain available. Local sync has a
+Swipe to select switch, saved on this device. Focus loss, replacement gallery
+pages, navigation and expired private access cancel a held gesture. Guest view
+does not offer selection. This follows Ente's
+[swipe selection behavior](https://ente.com/help/photos/features/utilities/swipe-to-select);
+phone touch integration remains part of the unfinished mobile clients.
+Apply favorites, hiding, Trash, restore, album
 membership, corrected dates or export to the selection. Bulk property changes
 set the chosen state consistently, including selections with mixed states.
 Favorites, Hidden, Archive, Trash, restore, captions, tags, album memberships,

@@ -9,8 +9,10 @@ Viewer :: #import "viewer";
 Map :: #import "map";
 TextDetection :: #import "text_detection";
 QRDetection :: #import "qr_detection";
+SelectionDrag :: #import "selection_drag";
 HostWindow :: #import "kryon/Window";
 #if #defined(POSIX_THREADS) {
+    Clock :: #import "kryon/ClockLinux";
     Window :: #import "desktop";
     HostTheme :: #import "kryon/SystemThemeHostLinux";
     Record :: (id: s32, label: string, bounds: Rectangle, enabled: bool) {
@@ -22,6 +24,7 @@ HostWindow :: #import "kryon/Window";
     }
     Publish :: () { Window.Publish() }
 } else {
+    Clock :: #import "kryon/Clock";
     Record :: (id: s32, label: string, bounds: Rectangle, enabled: bool) {}
     HostTheme :: #import "kryon/SystemThemeHost";
     Prepare :: () { PrepareTheme() }
@@ -66,6 +69,68 @@ LayoutFeed :: (cols: s32, height: float32) -> float32 {
     return y
 }
 feed_height: float32;
+swipe: SelectionDrag.State;
+swipe_epoch: s64;
+swipe_end: s32 = -1;
+CancelSwipe :: () {
+    SelectionDrag.Reset(*swipe)
+    Model.ClearSwipeSelection(); swipe_end = -1
+}
+GalleryHit :: (px: float32, py: float32, body: Rectangle, cell: float32, nearest: bool) -> s32 {
+    if Model.count == 0 || body.width <= 0.0 || body.height <= 0.0 ||
+        px < body.x || px >= body.x+body.width { return -1 }
+    if !nearest && (py < body.y || py >= body.y+body.height) { return -1 }
+    if nearest {
+        if py < body.y { py = body.y }
+        if py >= body.y+body.height { py = body.y+body.height-1.0 }
+    }
+    local_y := py-body.y+cast(float32)Model.scroll
+    first: s32; end := Model.count
+    while first < end {
+        middle := (first+end)/2
+        if item_y[middle]+cell <= local_y { first = middle+1 } else { end = middle }
+    }
+    if first >= Model.count { return ifx nearest then Model.count-1 else -1 }
+    row := item_y[first]; closest := first
+    for i: first..Model.count-1 {
+        if item_y[i] != row { break }
+        bx := body.x+cast(float32)item_column[i]*(cell+12.0)
+        if px >= bx && px < bx+cell {
+            if nearest || local_y >= row { return i }; return -1
+        }
+        if px >= bx { closest = i }
+    }
+    return ifx nearest then closest else -1
+}
+SwipeSelection :: (session: Session, pointer: Input.PointerFrame, body: Rectangle, cell: float32) -> bool {
+    eligible := Model.swipe_selection_enabled && Model.selecting && !Model.busy && !Model.CatalogView() && !Model.guest_active &&
+        !Model.app_locked && Model.editor == "" && Model.selected < 0 && HostWindow.WindowFocused() &&
+        (Model.view != "hidden" || Model.vault_unlocked)
+    hit := GalleryHit(pointer.x,pointer.y,body,cell,swipe.active)
+    selected := hit >= 0 && Model.IsPicked(TextUntilNul(Model.photos[hit].id[:]))
+    decision := SelectionDrag.Update(*swipe,eligible,Model.picked_count,hit,selected,
+        pointer.x,pointer.y,pointer.pressed,pointer.down,pointer.released,
+        Clock.Milliseconds(),body.y,body.height,pointer.x >= body.x && pointer.x < body.x+body.width)
+    if decision.began {
+        swipe_epoch = Model.gallery_epoch; swipe_end = -1
+        if !Model.SaveSwipeSelection() { CancelSwipe(); return false }
+    }
+    if decision.claimed {
+        Input.TreePointerCancel(session); ScrollDevice.ScrollDeviceRelease()
+        Model.scroll += decision.scroll
+        maximum := cast(s32)(feed_height-body.height); if maximum < 0 { maximum = 0 }
+        if Model.scroll < 0 { Model.scroll = 0 }; if Model.scroll > maximum { Model.scroll = maximum }
+        hit = GalleryHit(pointer.x,pointer.y,body,cell,true)
+        if hit >= 0 && hit != swipe_end && !decision.canceled {
+            // Rebuild from the initial selection so reversing the gesture
+            // restores items outside its current range, including older picks.
+            if !Model.SwipeRange(swipe.anchor,hit,swipe.remove) { CancelSwipe(); return true }
+            swipe_end = hit
+        }
+    }
+    if decision.finished || decision.canceled { CancelSwipe() }
+    return decision.claimed
+}
 
 Label :: (session: Session, key: u64, value: string, bounds: Rectangle, font: s32 = 15) {
     props: TextProps; props.key = key; props.text = value; props.bounds = bounds; props.font = font
@@ -445,6 +510,12 @@ GuestView :: (session: Session, viewport: Rectangle, key: s32, modifiers: s32, t
 Frame :: (session: Session, viewport: Rectangle) -> s32 {
     Prepare(); defer { Publish() }
     Model.Tick(HostWindow.WindowFocused())
+    if (swipe.pending || swipe.active) && (!Model.swipe_selection_enabled || !Model.selecting || Model.busy || Model.guest_active ||
+        Model.app_locked || Model.editor != "" || Model.selected >= 0 || Model.CatalogView() ||
+        Model.gallery_epoch != swipe_epoch || !HostWindow.WindowFocused() ||
+        (Model.view == "hidden" && !Model.vault_unlocked)) {
+        Input.TreePointerCancel(session); CancelSwipe()
+    }
     background: BoxProps; background.key = 1; background.bounds = viewport; background.fill = BackgroundColor(); Box(session, background)
     key := KeyboardTake(session); modifiers := KeyboardModifiers(session); typed_bytes: [256]u8; typed := TypedTextTake(session, typed_bytes[:])
     if Model.guest_active { GuestView(session,viewport,key,modifiers,typed); return 0 }
@@ -640,6 +711,10 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, 212, "Continuous export", .{x + 178.0, body.y + 336.0, 174.0, 38.0}, !Model.loading) { Model.BeginEdit("export_continuous", "Enable continuous export", "", "Separate folder; album changes are mirrored in the background") }
         if Model.export_continuous {
             if Action(session, 213, "Stop export", .{x + 366.0, body.y + 336.0, 126.0, 38.0}, !Model.loading) { Model.Apply("export_stop") }
+        }
+        Label(session,650,"Gallery selection",.{x+18.0,body.y+392.0,width-36.0,30.0},22)
+        if Action(session,651,ifx Model.swipe_selection_enabled then "Swipe to select: on" else "Swipe to select: off",.{x+18.0,body.y+434.0,210.0,38.0},!Model.loading) {
+            Model.Apply("swipe_selection",ifx Model.swipe_selection_enabled then "off" else "on")
         }
     } else if Model.selected >= 0 && Model.selected < Model.count {
         photo: *Photo = *Model.photos[Model.selected]
@@ -859,13 +934,16 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
             if Model.selecting { BulkBar(session, .{x, body.y, width, 80.0}); height: float32 = ifx width < 720.0 then 176.0 else 88.0; if width < 620.0 && Model.picked_count >= 2 && Model.picked_count <= 6 { height += 44.0 }; body.y += height; body.height -= height }
         }
         pointer := Input.PointerSample(session)
-        ScrollDevice.BeginScrollFrame(session, .{pointer.x, pointer.y}, pointer.pressed, pointer.down, pointer.released, PointerWheelTake(session, body), cast(float64)Model.ticks / 60.0)
         cols := cast(s32)(width / 196.0); if cols < 2 { cols = 2 }; if cols > 8 { cols = 8 }
         cell := (width - cast(float32)(cols - 1) * 12.0) / cast(float32)cols
         item_count := ifx Model.CatalogView() then Model.album_count else Model.count
         height: float32 = ifx Model.CatalogView() then 68.0 else cell + 12.0
         rows := ifx Model.CatalogView() then item_count else (item_count + cols - 1) / cols
         props: ScrollProps; props.key = 80; props.bounds = body; props.content_height = cast(s32)(ifx Model.CatalogView() then cast(float32)rows * height else LayoutFeed(cols,height)); props.scroll_offset = Model.scroll
+        swiping := false
+        if !Model.CatalogView() { swiping = SwipeSelection(session,pointer,body,cell); props.scroll_offset = Model.scroll }
+        ScrollDevice.BeginScrollFrame(session,.{pointer.x,pointer.y},pointer.pressed && !swiping,pointer.down && !swiping,
+            pointer.released && !swiping,ifx swiping then 0.0 else PointerWheelTake(session,body),cast(float64)Model.ticks/60.0)
         scrolling := Scroll(session, props); Model.scroll = scrolling.scroll_offset
         first: s32
         if !Model.CatalogView() {
@@ -908,7 +986,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                     badge: BoxProps; badge.key = cast(u64)(2300000 + i); badge.bounds = .{bx + 6.0, by + 6.0, 82.0, 28.0}; badge.fill = BackgroundColor(); Box(session, badge)
                     Label(session, cast(u64)(2200000 + i), "Selected", .{bx + 12.0, by + 8.0, 72.0, 24.0}, 14)
                 }
-                if clicked {
+                if clicked && !swiping {
                     if Model.selecting || (modifiers & Input.KeyModifierControl) != 0 || (modifiers & Input.KeyModifierShift) != 0 { Model.Pick(i, (modifiers & Input.KeyModifierShift) != 0) }
                     else { Model.Choose(i) }; break
                 }

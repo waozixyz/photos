@@ -192,6 +192,8 @@ scroll: s32;
 offset: s32;
 feed_base: s32;
 revision: s64;
+gallery_epoch: s64;
+swipe_selection_enabled: bool = true;
 loading: bool;
 busy: bool;
 appending: bool;
@@ -394,6 +396,7 @@ Tick :: (window_focused: bool) {
         ReadHeader(json)
         if Lookup(json,0,"app_lock_method") >= 0 { app_lock_method = Number(json,0,"app_lock_method"); if app_locked { editor_hint = AppLockHint() } }
         if Lookup(json,0,"app_lock_delay") >= 0 { app_lock_delay = Number(json,0,"app_lock_delay") }
+        if Lookup(json,0,"swipe_selection_enabled") >= 0 { swipe_selection_enabled = Number(json,0,"swipe_selection_enabled") > 0 }
         if Lookup(json,0,"guest_configured") >= 0 { guest_configured = Number(json,0,"guest_configured") > 0 }
         if guest_active && (Lookup(json,0,"guest_active") < 0 || (Number(json,0,"guest_active") == 0 && Number(json,0,"guest_exit_authorized") != 1)) {
             ClearGuestDisplay(); Set(message[:],"Guest view is unavailable; authenticate to leave"); return
@@ -568,7 +571,7 @@ Tick :: (window_focused: bool) {
         }
         previous: [65]u8
         if selected >= 0 && selected < count { Set(previous[:], TextUntilNul(photos[selected].id[:])) }
-        if !appending { selected = -1; last_pick = -1; VecClear(photos); count = 0; feed_base = offset }; revision += 1
+        if !appending { selected = -1; last_pick = -1; VecClear(photos); count = 0; feed_base = offset; gallery_epoch += 1 }; revision += 1
         array := Lookup(json, 0, "photos"); at := Space(json, array + 1); page_count: s32
         while at >= 0 && at < cast(s32)json.count && json[at] != 93 && page_count < 60 {
             empty: Photo; if !VecPush(photos, empty) { Set(message[:], "Unable to load more photos"); break }
@@ -689,7 +692,40 @@ Choose :: (index: s32) {
     detail_caption[0] = 0; detail_tags[0] = 0; detail_people[0] = 0; detail_albums[0] = 0; detail_taken[0] = 0; detail_location[0] = 0; detail_size = 0
     Request("open", TextUntilNul(photos[index].id[:]))
 }
-ClearSelection :: () { VecClear(picked); picked_count = 0; last_pick = -1; selecting = false }
+swipe_picked: Vec(Selection);
+swipe_count: s32;
+ClearSwipeSelection :: () {
+    for i: 0..swipe_count-1 { Wipe(swipe_picked[i].id[:]) }
+    VecClear(swipe_picked); swipe_count = 0
+}
+SaveSwipeSelection :: () -> bool {
+    ClearSwipeSelection()
+    for i: 0..picked_count-1 {
+        copy: Selection; Set(copy.id[:],TextUntilNul(picked[i].id[:]))
+        if !VecPush(swipe_picked,copy) { ClearSwipeSelection(); Set(message[:],"Unable to begin swipe selection"); return false }
+        swipe_count += 1
+    }
+    return true
+}
+SwipeRange :: (first: s32, end: s32, remove: bool) -> bool {
+    if first < 0 || end < 0 || first >= count || end >= count || busy { return false }
+    // Keep the current selection intact if allocating its restored copy fails.
+    restored: Vec(Selection)
+    for i: 0..swipe_count-1 {
+        copy: Selection; Set(copy.id[:],TextUntilNul(swipe_picked[i].id[:]))
+        if !VecPush(restored,copy) { VecFree(restored); Set(message[:],"Unable to update swipe selection"); return false }
+    }
+    VecSwap(picked,restored); VecFree(restored); picked_count = swipe_count
+    last_pick = end
+    if first > end { swap := first; first = end; end = swap }
+    for i: first..end {
+        chosen := IsPicked(TextUntilNul(photos[i].id[:]))
+        if chosen == remove { Pick(i) }
+    }
+    if !remove && picked_count >= 1000 { Set(message[:],"Selection is limited to 1000 items") }
+    return true
+}
+ClearSelection :: () { ClearSwipeSelection(); VecClear(picked); picked_count = 0; last_pick = -1; selecting = false }
 StopPlayback :: () {
     if playback_started { Playback.Stop() }
     playback_started = false; Wipe(playback_id[:]); Wipe(playback_path[:]); playback_expanded = false

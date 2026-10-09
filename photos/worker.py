@@ -90,6 +90,7 @@ def ui_query(library, request):
     export = library.setting('export', {})
     result['export_status'] = export.get('status', 'Choose a separate destination for a folder backup')
     result['export_continuous'] = int(bool(export.get('continuous')))
+    result['swipe_selection_enabled'] = int(library.setting('swipe_selection_enabled', True) is True)
     from . import semantic
     result.update(semantic.state(library))
     semantic.kick(library)
@@ -109,6 +110,12 @@ def library_request(library, request, config, guest_bypass=False):
                 return result
             return response
     action = request.get('action', 'query')
+    if action == 'swipe_selection':
+        value = request.get('value')
+        if not isinstance(value, str) or value not in {'on', 'off'}:
+            raise ValueError('Choose on or off for swipe selection')
+        library.set_setting('swipe_selection_enabled', value == 'on')
+        return ui_query(library, request)
     if action in {'collage_begin', 'collage_check', 'collage_save'}:
         from . import collage
         if action == 'collage_begin':
