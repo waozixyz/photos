@@ -1,0 +1,47 @@
+// Album unions and stable shuffle are read-only native gallery operations.
+Search :: #import "search";
+#import "std/json_scan"
+#import "std/byte_text_linux"
+#import "std/text"
+#import "std/text_buffer"
+sqlite :: #system_library "sqlite3";
+Scalar :: #type (context: *void, argc: s32, argv: **void) #c_call;
+Create :: (database: *void, name: *u8, argc: s32, flags: s32, data: *void, callback: Scalar, step: *void, final: *void, destroy: *void) -> s32 #foreign sqlite "sqlite3_create_function_v2";
+ValueText :: (value: *void) -> *u8 #foreign sqlite "sqlite3_value_text";
+ValueInt :: (value: *void) -> s64 #foreign sqlite "sqlite3_value_int64";
+ResultInt :: (context: *void, value: s64) #foreign sqlite "sqlite3_result_int64";
+Shuffle :: (context: *void, argc: s32, argv: **void) {
+    if argc != 2 { ResultInt(context,0); return }
+    hash: u64 = cast(u64)ValueInt(argv[1]) ^ 14695981039346656037
+    text := TextFromCString(ValueText(argv[0]))
+    for byte: text { hash = (hash ^ cast(u64)byte) * 1099511628211 }
+    hash = (hash ^ (hash >> 30)) * 13787848793156543929
+    hash = (hash ^ (hash >> 27)) * 10723151780598845931
+    ResultInt(context,cast(s64)((hash ^ (hash >> 31)) & 9223372036854775807))
+}
+Register :: (database: *void) -> bool {
+    name: [14]u8 = .{112,104,111,116,111,115,95,111,114,100,101,114,0,0}
+    callback: Scalar = Shuffle
+    return Create(database,*name[0],2,0x200801,null,callback,null,null,null) == 0
+}
+Albums :: (query: *Search.Predicate, json: string) {
+    array := FieldAt(json,0,"slide_albums"); if array < 0 { return }
+    if json[array] != 91 { query.error = "Choose valid slideshow albums"; return }
+    at := Space(json,array+1); count: s32
+    Search.AddSQL(query," AND (0")
+    while at >= 0 && at < cast(s32)json.count && json[at] != 93 {
+        if json[at] != 123 || count >= 64 { query.error = "Choose up to 64 slideshow albums"; return }
+        name: [513]u8; filter: [513]u8
+        size := ReadStringText(json,FieldAt(json,at,"name"),name[:])
+        if size < 1 || size >= 513 { query.error = "Choose valid slideshow albums"; return }; name[size] = 0
+        size = ReadStringText(json,FieldAt(json,at,"filter"),filter[:])
+        if size < 0 || size >= 513 { query.error = "Choose valid slideshow albums"; return }; filter[size] = 0
+        Search.AddSQL(query," OR (1")
+        if filter[0] != 0 { Search.Parse(query,TextUntilNul(filter[:])) }
+        else { Search.AddSQL(query," AND EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=?)"); Search.Bind(query,TextUntilNul(name[:])) }
+        Search.AddSQL(query,")"); count += 1
+        at = Space(json,ValueEnd(json,at,0)); if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json,at+1) } else { break }
+    }
+    Search.AddSQL(query,")")
+    if count == 0 || at < 0 || at >= cast(s32)json.count || json[at] != 93 { query.error = "Choose at least one slideshow album" }
+}

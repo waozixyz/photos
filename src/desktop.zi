@@ -39,6 +39,7 @@ Publish :: () {
     Model.Property(*out,"sort",Model.sort)
     BuilderPrint(*out,",\"vault_unlocked\":%",Model.vault_unlocked)
     BuilderPrint(*out,",\"detected_words\":%",TextDetection.count)
+    BuilderPrint(*out,",\"slideshow_active\":%,\"slideshow_paused\":%,\"slideshow_offset\":%,\"slideshow_count\":%,\"slideshow_interval\":%,\"slideshow_albums\":%",Model.slide_active,Model.slide_paused,Model.slide_offset,Model.slide_count,Model.slide_intervals[Model.slide_interval],Model.slide_album_count)
     BuilderPrint(*out,",\"playback_state\":%,\"playback_position\":%,\"playback_duration\":%,\"playback_speed\":%,\"playback_volume\":%",Model.PlaybackState(),Model.PlaybackPosition(),Model.PlaybackDuration(),Model.playback_speed,Model.playback_volume)
     BuilderPrint(*out,",\"crop\":[%,%,%,%]",Model.crop_candidate[0],Model.crop_candidate[1],Model.crop_candidate[2],Model.crop_candidate[3])
     BuilderPrint(*out,",\"photo_zoom\":%,\"photo_center\":[%,%],\"photo_expanded\":%",Viewer.zoom,Viewer.center_x,Viewer.center_y,Viewer.expanded)

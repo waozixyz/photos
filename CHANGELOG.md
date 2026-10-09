@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.20
+
+- Play photos and Live Photo stills from one or several albums as a slideshow, without duplicating photos that belong to multiple selected albums.
+- Choose capture order or shuffle, seven time intervals, black or blurred backgrounds, and pause, resume or browse with buttons and keyboard controls.
+- Play Memory Lane across eligible years with year and optional age captions, while keeping Hidden, Trash, ignored people and archived memories private.
+- Clear displayed slides when access changes or the local service stops responding, and keep originals and encrypted ThinkPad backup unchanged.
+
 ## 0.1.19
 
 - Browse a person's Memory Lane by year, with years-ago and optional birth-date captions; keep private, ignored and archived items out of the timeline.

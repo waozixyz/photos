@@ -71,6 +71,9 @@ def ui_query(library, request):
 
 def library_request(library, request, config):
     action = request.get('action', 'query')
+    if action in {'slide_frame', 'slide_check'}:
+        from . import slideshow
+        return slideshow.frame(library, request, config)
     if action in {'auto_people_begin','album_auto_people','album_auto_people_remove'}:
         from . import auto_albums
         album = library.album_details(request.get('album',''))

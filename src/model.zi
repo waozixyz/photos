@@ -4,6 +4,11 @@ Crop :: #import "crop";
 Viewer :: #import "viewer";
 Map :: #import "map";
 TextDetection :: #import "text_detection";
+#if #defined(POSIX_THREADS) {
+    Clock :: #import "kryon/ClockLinux";
+} else {
+    Clock :: #import "kryon/Clock";
+}
 text_request: bool;
 text_check_pending: bool;
 text_poll: s64;
@@ -44,6 +49,30 @@ Photo :: struct {
     width: s32
     height: s32
 }
+SlideAlbum :: struct { name: [513]u8 }
+slide_albums: Vec(SlideAlbum);
+slide_album_count: s32;
+slide_picking: bool;
+slide_active: bool;
+slide_paused: bool;
+slide_controls: bool = true;
+slide_shuffle: bool;
+slide_blur: bool;
+slide_interval: s32;
+slide_intervals: [7]s32 = .{5,10,15,30,60,300,600};
+slide_seed: s32 = 1;
+slide_offset: s32;
+slide_count: s32;
+slide_id: [65]u8;
+slide_name: [513]u8;
+slide_path: [4097]u8;
+slide_background: [4097]u8;
+slide_caption: [1025]u8;
+slide_due: s64;
+slide_poll: s64;
+slide_valid_until: s64;
+slide_request: bool;
+slide_checking: bool;
 Selection :: struct { id: [65]u8 }
 Album :: struct { name: [513]u8; thumbnail: [4097]u8; count: s32; pinned: bool; archived: bool; smart: bool; place: bool; id: [65]u8; ignored: bool }
 person: [65]u8;
@@ -181,10 +210,12 @@ Request :: (action: string = "query", id: string = "", value: string = "") {
     SendRequest(action, id, value)
 }
 SendRequest :: (action: string, id: string, value: string) {
+    slide_request = action == "slide_frame" || action == "slide_check"
+    slide_checking = action == "slide_check"
     text_check_pending = action == "text_check"
     text_request = action == "detect_text" || action == "text_check"
     playback_request = action == "playback_check"
-    if action != "query" { offset = ifx selected >= 0 then feed_base + selected / 60 * 60 else feed_base; appending = false }
+    if action != "query" && !slide_request { offset = ifx selected >= 0 then feed_base + selected / 60 * 60 else feed_base; appending = false }
     out: Vec(u8)
     BuilderPrint(*out, "{\"gallery_format\":2,\"action\":"); Quoted(*out, action)
     Property(*out, "view", view); Property(*out, "search", TextUntilNul(search[:]))
@@ -197,6 +228,12 @@ SendRequest :: (action: string, id: string, value: string) {
     Property(*out, "vault_token", TextUntilNul(vault_token[:]))
     Property(*out, "video_job", TextUntilNul(video_job[:]))
     BuilderPrint(*out,",\"lane_year\":%",lane_year)
+    if slide_request {
+        BuilderPrint(*out,",\"slide_offset\":%,\"slide_seed\":%,\"slide_shuffle\":%,\"slide_blur\":%",slide_offset,slide_seed,ifx slide_shuffle then 1 else 0,ifx slide_blur then 1 else 0)
+        BuilderPrint(*out,",\"slide_albums\":[")
+        for i: 0..slide_album_count-1 { if i > 0 { BuilderPrint(*out,",") }; Quoted(*out,TextUntilNul(slide_albums[i].name[:])) }
+        BuilderPrint(*out,"]")
+    }
     if view == "map" {
         region := ifx Map.gallery then Map.gallery_bounds else Map.bounds
         BuilderPrint(*out, ",\"map_bounds\":[%,%,%,%],\"map_gallery\":%", region[0], region[1], region[2], region[3], ifx Map.gallery then 1 else 0)
@@ -212,7 +249,7 @@ SendRequest :: (action: string, id: string, value: string) {
     loading = Transport.Start(request)
     Release(request)
     if !loading { Set(message[:], Transport.error); if appending { more_due = ticks + 300; appending = false } }
-    busy = loading && action != "query" && action != "playback_check" && action != "text_check"; next_refresh = ticks + 300
+    busy = loading && action != "query" && action != "playback_check" && action != "text_check" && !slide_request; next_refresh = ticks + 300
 }
 HeaderField :: struct { key: [65]u8; at: s32 }
 header_fields: [64]HeaderField;
@@ -276,6 +313,10 @@ ReadPhoto :: (json: string, start: s32, photo: *Photo) -> s32 {
 }
 Tick :: () {
     ticks += 1;
+    now := Clock.Milliseconds()
+    if slide_active && (now < 0 || (slide_id[0] != 0 && now >= slide_valid_until)) {
+        StopSlides(); Set(message[:],"Slideshow access ended; reopen the gallery to retry")
+    }
     if editor == "text" && TextDetection.active && ticks > text_valid_until { CancelEditor(); Set(message[:], "Text access ended; reopen the photo to retry") }
     if playback_id[0] != 0 {
         valid := editor == "playback" && selected >= 0 && selected < count
@@ -289,9 +330,28 @@ Tick :: () {
     if !initialized { initialized = true; Request() }
     if Transport.Poll() {
         loading = false; busy = false
-        if Transport.error != "" { Set(message[:], Transport.error); if editor == "text" { CancelEditor() }; if playback_id[0] != 0 { StopPlayback() }; if appending { more_due = ticks + 300; appending = false }; return }
+        if Transport.error != "" { Set(message[:], Transport.error); if slide_active { StopSlides() }; if editor == "text" { CancelEditor() }; if playback_id[0] != 0 { StopPlayback() }; if appending { more_due = ticks + 300; appending = false }; return }
         json := Transport.Value()
         ReadHeader(json)
+        if slide_request {
+            slide_request = false
+            if !slide_active { return }
+            if queued_request && TextUntilNul(queued_action[:]) == "slide_frame" { return }
+            Decode(json,0,"error",message[:]); fresh_id: [65]u8; Decode(json,0,"slide_id",fresh_id[:])
+            if message[0] != 0 || fresh_id[0] == 0 || (slide_checking && TextUntilNul(fresh_id[:]) != TextUntilNul(slide_id[:])) {
+                StopSlides(); if message[0] == 0 { Set(message[:],"Slideshow access ended") }; return
+            }
+            if !slide_checking {
+                Decode(json,0,"slide_path",slide_path[:]); Decode(json,0,"slide_background",slide_background[:])
+                if slide_path[0] == 0 { StopSlides(); Set(message[:],"This photo is unavailable"); return }
+                Set(slide_id[:],TextUntilNul(fresh_id[:]))
+                slide_offset = Number(json,0,"slide_offset")
+                slide_due = Clock.Milliseconds()+cast(s64)slide_intervals[slide_interval]*1000
+            }
+            Decode(json,0,"slide_name",slide_name[:]); Decode(json,0,"slide_caption",slide_caption[:])
+            slide_count = Number(json,0,"slide_count"); now = Clock.Milliseconds(); slide_valid_until = now+2500; slide_poll = now+500
+            return
+        }
         if Lookup(json, 0, "vault_configured") >= 0 { vault_configured = Number(json, 0, "vault_configured") > 0; vault_unlocked = Number(json, 0, "vault_unlocked") > 0 }
         if Lookup(json, 0, "vault_token") >= 0 { Decode(json, 0, "vault_token", vault_token[:]) }
         if view == "hidden" && !vault_unlocked {
@@ -429,12 +489,18 @@ Tick :: () {
     if !loading && queued_request {
         queued_request = false; SendRequest(TextUntilNul(queued_action[:]), TextUntilNul(queued_id[:]), TextUntilNul(queued_value[:])); return
     }
+    if slide_active {
+        if !loading && !slide_paused && slide_id[0] != 0 && now >= slide_due { MoveSlide(1); return }
+        if !loading && slide_id[0] != 0 && now >= slide_poll { slide_poll = now+500; Request("slide_check",TextUntilNul(slide_id[:])); return }
+        return
+    }
     if !loading && playback_id[0] != 0 && ticks >= playback_poll { playback_poll = ticks + 30; Request("playback_check", TextUntilNul(playback_id[:])); return }
     if !loading && editor == "text" && TextDetection.active && selected >= 0 && selected < count && ticks >= text_poll { text_poll = ticks + 30; Request("text_check", TextUntilNul(photos[selected].id[:])); return }
     if !loading && video_job[0] != 0 && ticks >= video_poll { video_poll = ticks + 60; Request("video_status"); return }
     if !loading && ticks > next_refresh && ((scroll == 0 && selected < 0) || (view == "hidden" && vault_unlocked)) { if selected < 0 && view != "people" { offset = ifx date_jumped then feed_base else 0 }; Request() }
 }
 Navigate :: (target: string) {
+    StopSlides(); slide_picking = false; VecClear(slide_albums); slide_album_count = 0
     TextDetection.Clear()
     Viewer.Reset()
     StopPlayback()
@@ -449,6 +515,38 @@ Navigate :: (target: string) {
     if target == "map" { Map.Reset() }
     date_jumped = false; lane_year = 0
     ClearSelection(); editor = ""; view = target; appending = false; feed_base = 0; album[0] = 0; person[0] = 0; selected = -1; offset = 0; scroll = 0; Request()
+}
+BeginSlides :: (multiple: bool = false) {
+    if loading || (multiple && slide_album_count == 0) { return }
+    if !multiple { VecClear(slide_albums); slide_album_count = 0 }
+    StopPlayback(); TextDetection.Clear(); CancelEditor()
+    slide_picking = false; slide_active = true; slide_paused = false; slide_controls = true; slide_offset = 0; slide_count = 0
+    if view == "lane" { slide_shuffle = false }
+    Wipe(slide_id[:]); Wipe(slide_path[:]); Wipe(slide_background[:]); Wipe(slide_caption[:])
+    now := Clock.Milliseconds(); slide_seed = cast(s32)(now % 2147483646)+1
+    Request("slide_frame")
+}
+StopSlides :: () {
+    slide_active = false; Wipe(slide_id[:]); Wipe(slide_path[:]); Wipe(slide_background[:]); Wipe(slide_caption[:]); Wipe(slide_name[:])
+    if queued_request && (TextUntilNul(queued_action[:]) == "slide_frame" || TextUntilNul(queued_action[:]) == "slide_check") { queued_request = false }
+}
+MoveSlide :: (direction: s32) {
+    if !SlideReady() || !slide_active || slide_count <= 0 { return }
+    slide_offset += direction; if slide_offset < 0 { slide_offset = slide_count-1 }; if slide_offset >= slide_count { slide_offset = 0 }
+    // Revoke the old image immediately rather than extending its lease while
+    // a new original is downloaded or decoded.
+    Wipe(slide_id[:]); Wipe(slide_path[:]); Wipe(slide_background[:]); Request("slide_frame")
+}
+PauseSlides :: () { slide_paused = !slide_paused; slide_due = Clock.Milliseconds()+cast(s64)slide_intervals[slide_interval]*1000 }
+SlideInterval :: () { slide_interval = (slide_interval+1)%7; slide_due = Clock.Milliseconds()+cast(s64)slide_intervals[slide_interval]*1000 }
+SlideReady :: () -> bool { return !loading || (slide_request && slide_checking) }
+SlideOrder :: () { if !SlideReady() { return }; slide_shuffle = !slide_shuffle; slide_offset = 0; Wipe(slide_id[:]); Wipe(slide_path[:]); Wipe(slide_background[:]); Request("slide_frame") }
+SlideBackground :: () { if !SlideReady() { return }; slide_blur = !slide_blur; Wipe(slide_id[:]); Wipe(slide_path[:]); Wipe(slide_background[:]); Request("slide_frame") }
+SlideAlbumChosen :: (name: string) -> bool { for i: 0..slide_album_count-1 { if TextUntilNul(slide_albums[i].name[:]) == name { return true } }; return false }
+SlideAlbumToggle :: (name: string) {
+    for i: 0..slide_album_count-1 { if TextUntilNul(slide_albums[i].name[:]) == name { slide_albums[i] = slide_albums[slide_album_count-1]; unused VecPop(slide_albums); slide_album_count -= 1; return } }
+    if slide_album_count >= 64 { Set(message[:],"Choose up to 64 albums"); return }
+    choice: SlideAlbum; Set(choice.name[:],name); if VecPush(slide_albums,choice) { slide_album_count += 1 }
 }
 Choose :: (index: s32) {
     if busy || index < 0 || index >= count { return }

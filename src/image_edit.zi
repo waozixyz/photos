@@ -34,6 +34,7 @@ Gray :: (red: u8, green: u8, blue: u8) -> float64 {
     return cast(float64)red * 0.299 + cast(float64)green * 0.587 + cast(float64)blue * 0.114
 }
 main :: (argc: s32, argv: **u8) -> s32 {
+    if argc == 4 && TextFromCString(argv[1]) == "blur" { return Blur(argv[2],argv[3]) }
     if argc != 11 && argc != 15 { print("Expected source, output, adjustments and preview limit\n"); return 2 }
     values: [7]s32
     for i: 0..6 { values[i] = Integer(TextFromCString(argv[i + 3])) }
@@ -118,4 +119,19 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if profile != null { keys[0] = *profile_name[0]; contents[0] = profile }
     if Save(result, argv[2], *format[0], *keys[0], *contents[0], null) == 0 { print("Unable to save edited image\n"); return 3 }
     return 0
+}
+// Strong, bounded soft background from a small oriented thumbnail. The
+// foreground always uses the original display asset rather than this copy.
+Blur :: (path: *u8, destination: *u8) -> s32 {
+    loaded := Load(path,null); if loaded == null { return 3 }; defer { Unref(loaded) }
+    source := Orient(loaded); if source == null { return 3 }; defer { Unref(source) }
+    width := Width(source); height := Height(source)
+    if width <= 0 || height <= 0 || width > 1024 || height > 1024 { return 3 }
+    large := ifx width > height then width else height
+    small_width := width * 16 / large; small_height := height * 16 / large
+    if small_width < 1 { small_width = 1 }; if small_height < 1 { small_height = 1 }
+    small := Scale(source,small_width,small_height,2); if small == null { return 3 }; defer { Unref(small) }
+    image := Scale(small,width,height,2); if image == null { return 3 }; defer { Unref(image) }
+    format: [4]u8 = .{112,110,103,0}
+    if Save(image,destination,*format[0],null,null,null) == 0 { return 3 }; return 0
 }

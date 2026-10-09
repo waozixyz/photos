@@ -5,6 +5,7 @@ Search :: #import "search";
 Locations :: #import "locations";
 Geo :: #import "geo";
 Semantic :: #import "semantic";
+Presentation :: #import "presentation";
 Clock :: #import "std/date_time_linux";
 #import "std/date_parse"
 #import "std/byte_text_linux"
@@ -35,12 +36,12 @@ Prepare :: (database: *void, sql: string, query: *Search.Predicate, statement: *
 }
 main :: (argc: s32, argv: **u8) -> s32 {
     if argc != 2 { return Failure("Supply the private library database") }
-    input: [16385]u8; length: s32
-    while length < 16384 {
-        amount := Read(0, *input[length], cast(usize)(16384 - length))
+    input: [65537]u8; length: s32
+    while length < 65536 {
+        amount := Read(0, *input[length], cast(usize)(65536 - length))
         if amount < 0 { return Failure("Cannot read gallery request") }; if amount == 0 { break }; length += cast(s32)amount
     }
-    if length == 0 || length >= 16384 { return Failure("Gallery request exceeds its limit") }
+    if length == 0 || length >= 65536 { return Failure("Gallery request exceeds its limit") }
     json := TextFromBytes(input[:length])
     if Space(json, ValueEnd(json, 0, 0)) != length || json[0] != 123 { return Failure("Choose a valid gallery request") }
     view: [32]u8; search: [513]u8; album: [513]u8; sort: [16]u8; memory: [11]u8; filter: [513]u8; person: [65]u8; birth: [11]u8; jump: [11]u8
@@ -50,6 +51,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if order != "newest" && order != "oldest" { return Failure("Choose newest first or oldest first") }
     if limit < 1 { limit = 1 }; if limit > 100 { limit = 100 }
     query: Search.Predicate
+    slideshow := Number(json,"slideshow",0) == 1
     name := TextUntilNul(view[:]); hidden := Number(json,"hidden_access",0) == 1
     if name == "trash" { Search.AddSQL(*query, "trashed>0"); if !hidden { Search.AddSQL(*query, " AND hidden=0") } }
     else if name == "hidden" { Search.AddSQL(*query, ifx hidden then "trashed=0 AND hidden=1" else "0") }
@@ -93,6 +95,10 @@ main :: (argc: s32, argv: **u8) -> s32 {
         Search.Bind(*query,TextUntilNul(memory[5:11])); Search.BindNumber(*query,UtcSeconds(DateNumber(TextUntilNul(memory[:]),0,4),1,1,0,0,0))
     }
     Search.Parse(*query,TextUntilNul(filter[:])); Search.Parse(*query,TextUntilNul(search[:]))
+    if slideshow {
+        Search.AddSQL(*query," AND kind='photo' AND hidden=0 AND trashed=0")
+        Presentation.Albums(*query,json)
+    }
     map_bounds: Locations.Bounds = .{-180000000, -90000000, 180000000, 90000000}
     if name == "map" {
         if !Locations.ReadBounds(json, *map_bounds) { return Failure("Choose valid map bounds in microdegrees") }
@@ -104,6 +110,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if SqliteOpenText(TextFromCString(argv[1]),*database,1) != SQLITE_OK { if database != null { unused SqliteClose(database) }; return Failure("Cannot open the private gallery database") }
     defer { unused SqliteClose(database) }
     if !Geo.Register(database) { return Failure("Cannot initialize local radius search") }
+    if slideshow && !Presentation.Register(database) { return Failure("Cannot initialize slideshow ordering") }
     if name == "semantic" {
         tensor: [4097]u8
         if !Decode(json,"semantic_tensor",tensor[:]) || tensor[0] == 0 || !Semantic.Register(database,TextUntilNul(tensor[:])) { return Failure("Cannot read the local semantic search query") }
@@ -132,7 +139,11 @@ main :: (argc: s32, argv: **u8) -> s32 {
             if lane_year == 0 { lane_year = lane_years[0] }
             valid: bool; for i: 0..lane_count-1 { if lane_years[i] == lane_year { valid = true } }
             if !valid { lane_year = lane_years[0] }
-            Search.AddSQL(*query," AND cast(strftime('%Y',taken,'unixepoch') AS INTEGER)=?"); Search.BindNumber(*query,cast(s64)lane_year)
+            if slideshow {
+                Search.AddSQL(*query," AND cast(strftime('%Y',taken,'unixepoch') AS INTEGER) IN (")
+                for i: 0..lane_count-1 { BuilderPrint(*query.sql,"% %",ifx i == 0 then "" else ",",lane_years[i]) }
+                Search.AddSQL(*query,")")
+            } else { Search.AddSQL(*query," AND cast(strftime('%Y',taken,'unixepoch') AS INTEGER)=?"); Search.BindNumber(*query,cast(s64)lane_year) }
         }
     }
     where := BuilderFinish(query.sql)
@@ -141,6 +152,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if !Prepare(database,count_sql,*query,*statement) { return Failure("Cannot prepare the gallery query") }
     if SqliteStep(statement) != SQLITE_ROW { unused SqliteFinalize(statement); return Failure("Cannot count gallery matches") }
     matches := SqliteColumnInt64(statement,0); unused SqliteFinalize(statement); statement = null
+    if slideshow { page = ifx matches > 0 then cast(s32)(cast(s64)page % matches) else 0; limit = 1 }
     if jump[0] != 0 {
         day := Search.Date(TextUntilNul(jump[:]))
         if day < 0 || name == "semantic" || name == "map" || name == "lane" { return Failure("Choose a gallery date in YYYY-MM-DD format") }
@@ -151,7 +163,12 @@ main :: (argc: s32, argv: **u8) -> s32 {
         target := SqliteColumnInt64(statement,0); unused SqliteFinalize(statement); statement = null; query.count -= 1
         if matches == 0 { page = 0 } else { page = cast(s32)(ifx target >= matches then matches-1 else target) }
     }
-    rows: Vec(u8); BuilderPrint(*rows,"SELECT id FROM photos WHERE % ORDER BY ",where)
+    rows: Vec(u8); BuilderPrint(*rows,"SELECT id FROM photos WHERE %",where)
+    check: [65]u8
+    if slideshow && !Decode(json,"slide_id",check[:]) { return Failure("Choose a valid slideshow photo") }
+    if check[0] != 0 { BuilderPrint(*rows," AND id=?"); Search.Bind(*query,TextUntilNul(check[:])); page = 0 }
+    BuilderPrint(*rows," ORDER BY ")
+    if slideshow && Number(json,"slide_shuffle",0) == 1 { BuilderPrint(*rows,"photos_order(id,%) ASC,",Number(json,"slide_seed",1)) }
     if name == "semantic" { BuilderPrint(*rows,"% DESC,",Semantic.RankSQL) }
     BuilderPrint(*rows,"taken %,id LIMIT % OFFSET %",ifx order == "newest" then "DESC" else "ASC",limit,page)
     rows_sql := BuilderFinish(rows)
@@ -169,6 +186,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
         BuilderPrint(*output,"%\"%\"",ifx count == 0 then "" else ",",id); count += 1
     }
     BuilderPrint(*output,"]")
+    if slideshow { BuilderPrint(*output,",\"slide_offset\":%",page) }
     if jump[0] != 0 { BuilderPrint(*output,",\"jump_offset\":%",page) }
     if name == "lane" {
         current: [11]u8; unused WriteIsoDay(Clock.UnixNow(),current[:])

@@ -21,6 +21,11 @@ discovery-window-test: build
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/discovery_window.py
 discovery-portable-test: bundle
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_DISCOVERY_PORTABLE=1 $(PYTHON) tests/discovery_window.py
+.PHONY: slideshow-window-test slideshow-portable-test
+slideshow-window-test: build
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/slideshow_window.py
+slideshow-portable-test: bundle
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_SLIDESHOW_PORTABLE=1 $(PYTHON) tests/slideshow_window.py
 text-engine:
 	LDLIBS='-l:libtesseract.so.5 -lgdk_pixbuf-2.0 -lgobject-2.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry detect_text:main --exe -o build/detect-text src/detect_text.zi
 text-models:

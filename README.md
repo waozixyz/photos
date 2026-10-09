@@ -100,8 +100,25 @@ in each of two years. An optional Birth date adds age captions and excludes
 photos before age three; leap-day birthdays use February 28 in a non-leap year.
 Birth dates are preserved in the private encrypted face index and exports.
 Hidden, Trash, ignored people and individually or album-archived photos stay
-excluded. Timeline playback, public Memory Lane links and curated stories remain
-unfinished.
+excluded. Play Memory Lane presents eligible photos across all its years in
+capture order, with year and optional age captions. Public Memory Lane links
+and curated stories remain unfinished.
+
+Slideshow plays an album's photos and Live Photo stills across the Photos window;
+videos are excluded. In Albums, choose Slideshow albums, select up to 64 regular,
+smart or place albums, then Play selected albums. A photo in several selected
+albums appears once. Search filters still apply. In order uses oldest-first
+capture order; Shuffle gives a stable shuffled cycle with Previous and Next.
+Choose 5, 10, 15 or 30 seconds, or 1, 5 or 10 minutes per photo. Pause or resume,
+switch between Black and Blurred backgrounds, or hide controls. Tap the middle
+to show controls and the sides to browse; Space pauses, arrow keys browse and
+Escape stops. Pausing keeps privacy checks active. Hidden and Trash stay excluded
+even while Hidden is unlocked; Memory Lane also excludes archived and ignored
+items. A privacy or membership change ends access, and a stalled or unavailable
+service clears the displayed image within its short access lease. Photos already
+stored on the device work offline; missing originals can come only from the
+pinned ThinkPad. An unavailable original stops playback with a message. Live
+Photo motion playback and music during slideshows remain unfinished.
 
 Map shows GPS locations on a bundled offline world map. Zoom with buttons or
 the wheel, drag to pan, and choose a numbered cluster or View photos to browse
@@ -242,8 +259,8 @@ Install them with `scripts/install.py --semantic-models build/models`. No photo,
 query or index is sent to a model service. The CLIP model is primarily English;
 results are approximate and exclude similarities below 0.20. Indexing covers
 still images whose originals are present locally, including the still component
-of Live Photos. Failed files remain stored and can be retried. Face recognition,
-video-content search, automatic curation and a Ziran tokenizer/indexing service
+of Live Photos. Failed files remain stored and can be retried. Video-content search,
+automatic curation and a Ziran tokenizer/indexing service
 remain unfinished. CLIP's MIT attribution is in `assets/CLIP-LICENSE.txt`.
 
 People provides opt-in local face grouping. Enable People to index local photos,
@@ -341,6 +358,7 @@ make places-window-test places-portable-test
 make codec-window-test codec-portable-test
 make playback-window-test playback-portable-test
 make face-models people-window-test people-portable-test
+make slideshow-window-test slideshow-portable-test
 PHOTOS_DAOCHI=/path/to/daochi make sync-test
 ```
 
