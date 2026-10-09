@@ -298,6 +298,17 @@ merged back by reusing the rejected name. Originals and album memberships stay
 unchanged. Search a name or combine `person:"Ada"` with other filters. A saved
 search using this filter updates as new faces join that named person.
 
+Tag person assigns a named person to a photo, Live Photo still or video even when
+no face was detected. Use it in the viewer or with a selection of up to 1000
+visible items. Existing names reuse that person; each item supports up to 64
+manual people. Remove person tag removes only the manual assignment and retains
+detected faces. Not this person in a person's gallery removes manual assignments
+as well as correcting detected faces. Manual tags appear in People, name searches,
+automatic people albums and eligible still-photo Memory Lane timelines; they
+survive source rescans, encrypted ThinkPad backup and export/reimport. Tags do not
+mark a photo's face scan complete. Hidden, Trash and Live Photo motion components
+cannot be manually tagged, and a mixed private selection is rejected together.
+
 Face detection, five-landmark alignment, embeddings and similarity matching run
 in headless Ziran helpers with the pinned YuNet/SFace models and ONNX Runtime's
 CPU engine; telemetry is disabled. Their licenses are in `assets/`. Recognition

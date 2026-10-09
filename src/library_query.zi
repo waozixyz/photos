@@ -73,10 +73,11 @@ main :: (argc: s32, argv: **u8) -> s32 {
     Search.AddSQL(*query, " AND coalesce(json_extract(metadata,'$.photosLive.photo'),'')='' AND (json_extract(metadata,'$.photosLive.video') IS NULL OR EXISTS(SELECT 1 FROM photos motion WHERE motion.id=json_extract(photos.metadata,'$.photosLive.video') AND motion.kind='video' AND json_extract(motion.metadata,'$.photosLive.photo')=photos.id AND motion.hidden=photos.hidden AND (motion.trashed>0)=(photos.trashed>0)))")
     if album[0] != 0 && filter[0] == 0 { Search.AddSQL(*query," AND EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=?)"); Search.Bind(*query,TextUntilNul(album[:])) }
     if name == "people" || name == "lane" {
-        Search.AddSQL(*query," AND hidden=0 AND trashed=0 AND EXISTS(SELECT 1 FROM faces WHERE faces.photo_id=photos.id AND faces.person_id=?)")
+        Search.AddSQL(*query," AND hidden=0 AND trashed=0 AND EXISTS(SELECT 1 FROM person_photos WHERE person_photos.photo_id=photos.id AND person_photos.person_id=?)")
         Search.Bind(*query,TextUntilNul(person[:]))
     }
     if name == "lane" {
+        Search.AddSQL(*query," AND kind='photo'")
         Search.AddSQL(*query," AND (SELECT ignored FROM people WHERE id=?)=0"); Search.Bind(*query,TextUntilNul(person[:]))
         if birth[0] != 0 {
             value := TextUntilNul(birth[:]); year := DateNumber(value,0,4); month := DateNumber(value,5,2); day := DateNumber(value,8,2)

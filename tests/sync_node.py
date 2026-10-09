@@ -257,6 +257,21 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         assert client.sync()==0
         assert first.query(album='Automatic fixture')['count']==1
         assert first.query(album='Automatic fixture')['photos'][0]['id']==batch_ids[0]
+        # Manual assignments are encrypted separately from detected faces.
+        # A tag-only peer must not mark originals scanned, nor erase local faces.
+        second.set_setting('people_enabled',True)
+        tagged=people.tag(first,[photo_id],'Manually tagged person')
+        while client.sync(): pass
+        assert peer.sync()==0
+        assert second.query(search='person:"Manually tagged person"')['count']==1
+        assert not second.db.execute('SELECT 1 FROM face_scans WHERE photo_id=?',(photo_id,)).fetchone()
+        assert people.export_index(first,photo_id)==people.export_index(second,photo_id)
+        people.tag(second,[photo_id],'Manually tagged person',remove=True)
+        while peer.sync(): pass
+        assert client.sync()==0
+        assert first.query(search='person:"Manually tagged person"')['count']==0
+        assert people.export_index(first,photo_id)['tags']==[]
+        assert not first.db.execute('SELECT 1 FROM face_scans WHERE photo_id=?',(photo_id,)).fetchone()
         print('Isolated Daochi v6: signed sync, byte-limited face-rich and compact semantic index batches, originals, editing, places, codecs, Live Photo privacy and separation round trip passed')
     finally:
         process.terminate()

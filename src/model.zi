@@ -34,7 +34,7 @@ playback_expanded: bool;
 #if #defined(POSIX_THREADS) {
 libc :: #system_library "libc";
 Free :: (memory: *void) #foreign libc "free";
-Release :: (value: string) { descriptor := cast(*TextDescriptor)(*value); Free(cast(*void)descriptor.data) }
+Release :: (value: string) { if value.count == 0 { return }; descriptor := cast(*TextDescriptor)(*value); Free(cast(*void)descriptor.data) }
 } else {
 Release :: (value: string) {}
 }
@@ -130,6 +130,7 @@ edit_value: [8193]u8;
 detail_id: [65]u8;
 detail_caption: [8193]u8;
 detail_tags: [8193]u8;
+detail_people: [8193]u8;
 detail_albums: [4097]u8;
 detail_taken: [65]u8;
 detail_location: [257]u8;
@@ -468,6 +469,7 @@ Tick :: () {
         if detail >= 0 {
             Decode(json, detail, "id", detail_id[:]); Decode(json, detail, "caption", detail_caption[:])
             Decode(json, detail, "tags", detail_tags[:]); Decode(json, detail, "albums", detail_albums[:])
+            Decode(json,detail,"people",detail_people[:])
             Decode(json, detail, "taken", detail_taken[:]); Decode(json, detail, "location", detail_location[:])
             size := ReadNumber(json, FieldAt(json, detail, "size")); detail_size = ifx size.valid then cast(s64)size.value else 0
             detail_caption_editable = Number(json, detail, "caption_editable") > 0
@@ -575,7 +577,7 @@ Choose :: (index: s32) {
     Viewer.Reset(); Viewer.expanded = was_expanded && TextUntilNul(photos[index].kind[:]) == "photo"
     selected = index
     detail_id[0] = 0
-    detail_caption[0] = 0; detail_tags[0] = 0; detail_albums[0] = 0; detail_taken[0] = 0; detail_location[0] = 0; detail_size = 0
+    detail_caption[0] = 0; detail_tags[0] = 0; detail_people[0] = 0; detail_albums[0] = 0; detail_taken[0] = 0; detail_location[0] = 0; detail_size = 0
     Request("open", TextUntilNul(photos[index].id[:]))
 }
 ClearSelection :: () { VecClear(picked); picked_count = 0; last_pick = -1; selecting = false }

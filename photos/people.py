@@ -92,6 +92,51 @@ def visible(library, photo_id):
     return photo['kind']=='photo' and all(not p['hidden'] and not p['trashed'] for p in live.components(library,photo))
 
 
+def member_visible(library, photo_id):
+    from . import live
+    photo = library.photo(photo_id)
+    # A Live Photo's motion belongs to its still rather than a second person item.
+    link=json.loads(photo['metadata']).get('photosLive',{})
+    return not (isinstance(link,dict) and link.get('photo')) and all(
+        not p['hidden'] and not p['trashed'] for p in live.components(library,photo))
+
+
+def tag(library, ids, name, remove=False):
+    if not isinstance(ids,list) or not 0<len(ids)<=1000 or any(not isinstance(i,str) or not HASH.fullmatch(i) for i in ids):
+        raise LibraryError('Select up to 1000 photos or videos to tag')
+    if not isinstance(name,str) or not name.strip() or len(name.strip().encode())>512 or any(ord(c)<32 or ord(c)==127 for c in name):
+        raise LibraryError('Enter one person name of at most 512 bytes')
+    name=name.strip();ids=sorted(set(ids))
+    with library.db:
+        library.db.execute('BEGIN IMMEDIATE')
+        if not library.setting('people_enabled',False):
+            raise LibraryError('Enable People before manually tagging a person')
+        for photo_id in ids:
+            if not member_visible(library,photo_id):
+                raise LibraryError('Restore and unhide every selected item before tagging people')
+        target=library.db.execute('SELECT id FROM people WHERE name=? COLLATE NOCASE ORDER BY updated DESC,id LIMIT 1',(name,)).fetchone()
+        if target is None and remove:
+            raise LibraryError('No person with that name was found')
+        person=target[0] if target else hashlib.sha256(f'manual:{name}:{time.time_ns()}'.encode()).hexdigest()
+        now=time.time()
+        if target is None:
+            library.db.execute('INSERT INTO people(id,name,ignored,updated) VALUES(?,?,0,?)',(person,name,now))
+        for photo_id in ids:
+            if remove:
+                library.db.execute('DELETE FROM person_tags WHERE photo_id=? AND person_id=?',(photo_id,person))
+            else:
+                count=library.db.execute('SELECT count(*) FROM person_tags WHERE photo_id=?',(photo_id,)).fetchone()[0]
+                existing=library.db.execute('SELECT 1 FROM person_tags WHERE photo_id=? AND person_id=?',(photo_id,person)).fetchone()
+                if count>=64 and not existing:raise LibraryError('Tag up to 64 people in one item')
+                library.db.execute('INSERT OR IGNORE INTO person_tags VALUES(?,?)',(photo_id,person))
+            library.db.execute('INSERT OR IGNORE INTO person_tag_edits VALUES(?)',(photo_id,))
+            library.db.execute('UPDATE photos SET updated=?,dirty=1 WHERE id=?',(now,photo_id))
+        # Manual assignments do not run recognition or mark face scans complete.
+        from . import auto_albums
+        auto_albums.apply(library)
+    return person
+
+
 def infer(library, photo, folder):
     from . import decoding
     original = library.original(photo)
@@ -246,7 +291,7 @@ def catalog(library, search='', mode='active', offset=0, named_only=False):
     if not isinstance(search,str) or len(search.encode())>512 or mode not in {'active','ignored'}:
         raise LibraryError('Choose an active or ignored people view')
     rows = library.db.execute('''SELECT g.*,count(DISTINCT f.photo_id) count FROM people g
-        JOIN faces f ON f.person_id=g.id JOIN photos p ON p.id=f.photo_id
+        JOIN person_photos f ON f.person_id=g.id JOIN photos p ON p.id=f.photo_id
         WHERE p.hidden=0 AND p.trashed=0 AND g.ignored=? GROUP BY g.id
         ORDER BY (g.name=''),g.name COLLATE NOCASE,g.id''',(int(mode=='ignored'),)).fetchall()
     result = []
@@ -255,11 +300,14 @@ def catalog(library, search='', mode='active', offset=0, named_only=False):
         if search.casefold() not in group['name'].casefold(): continue
         faces = library.db.execute('SELECT id,photo_id FROM faces WHERE person_id=? ORDER BY id',(group['id'],)).fetchall()
         visible_faces = [f for f in faces if visible(library,f['photo_id'])]
-        if not visible_faces: continue
-        face = visible_faces[0]; portrait = library.root/'private/faces'/f'{face["id"]}.png'
-        thumbnail = portrait if portrait.is_file() else library.thumbnail(face['photo_id'])
+        members=[r[0] for r in library.db.execute('SELECT photo_id FROM person_photos WHERE person_id=? ORDER BY photo_id',(group['id'],)) if member_visible(library,r[0])]
+        if not members:continue
+        if visible_faces:
+            face=visible_faces[0];portrait=library.root/'private/faces'/f'{face["id"]}.png'
+            thumbnail=portrait if portrait.is_file() else library.thumbnail(face['photo_id'])
+        else:thumbnail=library.thumbnail(members[0])
         result.append(dict(id=group['id'],name=group['name'] or 'Unnamed person',
-                           count=len({f['photo_id'] for f in visible_faces}),thumbnail=str(thumbnail) if thumbnail.is_file() else '',
+                           count=len(members),thumbnail=str(thumbnail) if thumbnail.is_file() else '',
                            ignored=group['ignored'],pinned=0,archived=0,smart=0,place=0))
     return result[max(0,int(offset)):max(0,int(offset))+60],len(result)
 
@@ -274,15 +322,15 @@ def group(library, person):
 def edit(library, action, person, value='', ids=None):
     with library.db:
         library.db.execute('BEGIN IMMEDIATE')
-        current = group(library,person); touched = {r[0] for r in library.db.execute('SELECT photo_id FROM faces WHERE person_id=?',(person,))}
-        if not any(visible(library,i) for i in touched):
+        current = group(library,person); touched = {r[0] for r in library.db.execute('SELECT photo_id FROM person_photos WHERE person_id=?',(person,))}
+        if not any(member_visible(library,i) for i in touched):
             raise LibraryError('Restore and unhide a photo in this group before changing the person')
         if action=='person_name':
             if not isinstance(value,str) or not value.strip() or len(value.strip().encode())>512 or any(ord(c)<32 for c in value):
                 raise LibraryError('Enter a person name of at most 512 bytes')
             name = value.strip()
             target = library.db.execute('''SELECT id FROM people WHERE name=? COLLATE NOCASE AND id<>?
-                AND EXISTS(SELECT 1 FROM faces WHERE person_id=people.id)''',(name,person)).fetchone()
+                AND EXISTS(SELECT 1 FROM person_photos WHERE person_id=people.id)''',(name,person)).fetchone()
             if target:
                 target = target[0]
                 # Respect corrections in both directions when merging groups.
@@ -290,6 +338,8 @@ def edit(library, action, person, value='', ids=None):
                 if any((target if r['person_id']==person else person) in json.loads(r['excluded']) for r in rows):
                     raise LibraryError('These groups contain corrected faces; move the photos deliberately instead')
                 library.db.execute('UPDATE faces SET person_id=? WHERE person_id=?',(target,person)); person = target
+                library.db.execute('INSERT OR IGNORE INTO person_tags SELECT photo_id,? FROM person_tags WHERE person_id=?',(target,current['id']))
+                library.db.execute('DELETE FROM person_tags WHERE person_id=?',(current['id'],))
                 library.db.execute('UPDATE people SET ignored=0 WHERE id=?',(person,))
                 if current['birth']:
                     library.db.execute("UPDATE people SET birth=? WHERE id=? AND birth=''",(current['birth'],person))
@@ -299,7 +349,7 @@ def edit(library, action, person, value='', ids=None):
                     if current['id'] in selected:
                         selected = sorted(set(target if p==current['id'] else p for p in selected))
                         library.db.execute('UPDATE albums SET auto_people=?,updated=?,dirty=1 WHERE id=?',(packed(selected),time.time(),album['id']))
-                touched.update(r[0] for r in library.db.execute('SELECT photo_id FROM faces WHERE person_id=?',(person,)))
+                touched.update(r[0] for r in library.db.execute('SELECT photo_id FROM person_photos WHERE person_id=?',(person,)))
             else: library.db.execute('UPDATE people SET name=? WHERE id=?',(name,person))
         elif action=='person_birth':
             if not valid_birth(value): raise LibraryError('Use YYYY-MM-DD for a birth date, or leave empty to remove it')
@@ -311,7 +361,9 @@ def edit(library, action, person, value='', ids=None):
                 raise LibraryError('Select photos to remove from this person')
             touched = set(ids)
             for photo_id in touched:
-                if not visible(library,photo_id): raise LibraryError('Restore and unhide photos before correcting faces')
+                if not member_visible(library,photo_id): raise LibraryError('Restore and unhide photos before correcting people')
+                library.db.execute('DELETE FROM person_tags WHERE photo_id=? AND person_id=?',(photo_id,person))
+                library.db.execute('INSERT OR IGNORE INTO person_tag_edits VALUES(?)',(photo_id,))
                 for face in library.db.execute('SELECT * FROM faces WHERE photo_id=? AND person_id=?',(photo_id,person)).fetchall():
                     excluded = set(json.loads(face['excluded'])); excluded.add(person)
                     if len(excluded)>128: raise LibraryError('This face has reached its correction limit')
@@ -336,13 +388,31 @@ def valid_birth(value):
 
 def export_index(library, photo_id):
     scan = library.db.execute('SELECT * FROM face_scans WHERE photo_id=? AND model=? AND error=?',(photo_id,MODEL,'')).fetchone()
-    if not scan: return None
-    rows = library.db.execute('SELECT * FROM faces WHERE photo_id=? ORDER BY id',(photo_id,)).fetchall()
+    tags=[group(library,r[0]) for r in library.db.execute('SELECT person_id FROM person_tags WHERE photo_id=? ORDER BY person_id',(photo_id,))]
+    edited=library.db.execute('SELECT 1 FROM person_tag_edits WHERE photo_id=?',(photo_id,)).fetchone()
+    if not scan and not tags and not edited:return None
+    rows = library.db.execute('SELECT * FROM faces WHERE photo_id=? ORDER BY id',(photo_id,)).fetchall() if scan else []
     result = []
     for face in rows:
         result.append(dict(id=face['id'],rect=json.loads(face['rect']),vector=base64.b64encode(face['embedding']).decode('ascii'),
                            person=group(library,face['person_id']),excluded=json.loads(face['excluded'])))
-    return dict(model=MODEL,faces=result)
+    return dict(model=MODEL,faces=result,scanned=bool(scan),tags=tags)
+
+
+def validate_person(person):
+    if not isinstance(person,dict) or not isinstance(person['id'],str) or not HASH.fullmatch(person['id']):raise ValueError()
+    if not isinstance(person['name'],str) or len(person['name'].encode())>512 or any(ord(c)<32 for c in person['name']):raise ValueError()
+    if type(person['ignored']) is not int or person['ignored'] not in (0,1):raise ValueError()
+    if type(person['updated']) not in (int,float) or not 0<=person['updated']<32503680000:raise ValueError()
+    if not valid_birth(person.get('birth','')):raise ValueError()
+
+
+def accept_person(library,person):
+    prior=library.db.execute('SELECT updated,birth FROM people WHERE id=?',(person['id'],)).fetchone()
+    if prior is None or prior[0]<person['updated']:
+        birth=person.get('birth',prior['birth'] if prior else '')
+        library.db.execute('INSERT OR REPLACE INTO people(id,name,ignored,updated,birth) VALUES(?,?,?,?,?)',
+            (person['id'],person['name'],person['ignored'],person['updated'],birth))
 
 
 def accept_index(library, photo_id, value):
@@ -350,6 +420,16 @@ def accept_index(library, photo_id, value):
     try:
         if not isinstance(value,dict) or value.get('model')!=MODEL or not isinstance(value.get('faces'),list) or len(value['faces'])>32:
             raise ValueError()
+        scanned=value.get('scanned',True)
+        if type(scanned) is not bool or (not scanned and value['faces']):raise ValueError()
+        tags=value.get('tags')
+        if tags is not None:
+            if not isinstance(tags,list) or len(tags)>64:raise ValueError()
+            tagged=set()
+            for person in tags:
+                validate_person(person)
+                if not person['name'] or person['id'] in tagged:raise ValueError()
+                tagged.add(person['id'])
         records = []; seen = set()
         for face in value['faces']:
             identity, person = face['id'],face['person']
@@ -358,11 +438,7 @@ def accept_index(library, photo_id, value):
             if not valid_rect(face['rect']) or not isinstance(face['vector'],str) or len(face['vector'])!=684: raise ValueError()
             blob = base64.b64decode(face['vector'],validate=True)
             if not valid_vector(blob): raise ValueError()
-            if not isinstance(person,dict) or not isinstance(person['id'],str) or not HASH.fullmatch(person['id']): raise ValueError()
-            if not isinstance(person['name'],str) or len(person['name'].encode())>512 or any(ord(c)<32 for c in person['name']): raise ValueError()
-            if type(person['ignored']) is not int or person['ignored'] not in (0,1): raise ValueError()
-            if type(person['updated']) not in (int,float) or not 0<=person['updated']<32503680000: raise ValueError()
-            if not valid_birth(person.get('birth','')): raise ValueError()
+            validate_person(person)
             excluded = face['excluded']
             if not isinstance(excluded,list) or len(excluded)>128 or any(not isinstance(i,str) or not HASH.fullmatch(i) for i in excluded): raise ValueError()
             prior = library.db.execute('SELECT photo_id FROM faces WHERE id=?',(identity,)).fetchone()
@@ -370,12 +446,15 @@ def accept_index(library, photo_id, value):
             records.append((face,blob))
     except (KeyError, TypeError, ValueError, binascii.Error):
         raise ValueError('Invalid private face index') from None
-    library.db.execute('DELETE FROM faces WHERE photo_id=?',(photo_id,))
+    if scanned:library.db.execute('DELETE FROM faces WHERE photo_id=?',(photo_id,))
     for face,blob in records:
         person = face['person']
-        prior = library.db.execute('SELECT updated,birth FROM people WHERE id=?',(person['id'],)).fetchone()
-        if prior is None or prior[0]<person['updated']:
-            birth = person.get('birth',prior['birth'] if prior else '')
-            library.db.execute('INSERT OR REPLACE INTO people(id,name,ignored,updated,birth) VALUES(?,?,?,?,?)',(person['id'],person['name'],person['ignored'],person['updated'],birth))
+        accept_person(library,person)
         library.db.execute('INSERT INTO faces VALUES(?,?,?,?,?,?)',(face['id'],photo_id,person['id'],packed(face['rect']),blob,packed(face['excluded'])))
-    library.db.execute('INSERT OR REPLACE INTO face_scans VALUES(?,?,?)',(photo_id,MODEL,''))
+    if scanned:library.db.execute('INSERT OR REPLACE INTO face_scans VALUES(?,?,?)',(photo_id,MODEL,''))
+    if tags is not None:
+        library.db.execute('DELETE FROM person_tags WHERE photo_id=?',(photo_id,))
+        for person in tags:
+            accept_person(library,person)
+            library.db.execute('INSERT INTO person_tags VALUES(?,?)',(photo_id,person['id']))
+        library.db.execute('INSERT OR IGNORE INTO person_tag_edits VALUES(?)',(photo_id,))

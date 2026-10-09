@@ -40,7 +40,7 @@ with tempfile.TemporaryDirectory() as directory:
     source = folder / 'source/Trip'
     source.mkdir(parents=True)
     ids, originals = [], {}
-    for index in range(4):
+    for index in range(5):
         path = source / f'Photo {index}.png'
         Image.new('RGB', (300 + index, 200), (80 + index * 30, 160, 100)).save(path)
         ids.append(digest_file(path)); originals[path] = path.read_bytes()
@@ -50,6 +50,7 @@ with tempfile.TemporaryDirectory() as directory:
         library.edit(ids[i], 'location', location)
         library.edit(ids[i], 'taken', '2025-06-15T12:00:00Z')
     library.edit(ids[3], 'hidden_set', '1')
+    library.edit(ids[4], 'taken', '2026-06-15T12:00:00Z')
     library.set_setting('people_processing',True)
     for i in range(3): people.store(library,ids[i],[dict(rect=[1000,1000,5000,6000],embedding=vector(.95-i*.05))],folder)
     person=library.db.execute('SELECT person_id FROM faces LIMIT 1').fetchone()[0]
@@ -144,9 +145,37 @@ with tempfile.TemporaryDirectory() as directory:
             time.sleep(.5);control('All people',345,208);time.sleep(.5);control('Show active',275,278);time.sleep(.5)
             control('Disable People',630,234)
             disabled=wait(lambda:result('people_disable'),'Disable missing');assert not disabled['people_enabled'] and not disabled['albums']
+            # Tag a photo with no recognized faces, then tag a mixed selection.
+            # Recognition stays paused while exercising the real UI/service.
+            library.set_setting('people_enabled',True)
+            control('Photos',90,86);time.sleep(.6)
+            control('Photo 4.png',310,385)
+            wait(lambda:result('open'),'Manual photo did not open');time.sleep(.5)
+            control('Tag person',1097,617);text('Ada');control('Save',250,350)
+            tagged=wait(lambda:result('person_tag'),'Single person tag missing')
+            assert tagged['detail']['id']==ids[4] and tagged['detail']['people']=='People: Ada'
+            assert not library.db.execute('SELECT 1 FROM faces WHERE photo_id=?',(ids[4],)).fetchone()
+            time.sleep(.6);shoot('people-manual-portable.png' if portable else 'people-manual-native.png')
+            control('Remove person tag',1097,647);text('Ada');control('Save',250,350)
+            removed=wait(lambda:result('person_untag'),'Single untag missing');assert removed['detail']['people']==''
+            time.sleep(.5);control('Back',235,166);time.sleep(.5)
+            control('Select',245,166);time.sleep(.4);control('Select loaded',355,166);time.sleep(.4)
+            start=len(calls);control('Tag person',926,254);text('Ada');control('Save',250,350)
+            tagged=wait(lambda:result('person_tag',start),'Selection tag missing')
+            tag_request=next(q for q,r in calls[start:] if q.get('action')=='person_tag')
+            assert set(tag_request['ids'])=={ids[0],ids[1],ids[2],ids[4]}
+            assert library.query(search='person:Ada')['count']==4
+            time.sleep(.5);control('People',90,698)
+            wait(lambda:next((r for q,r in reversed(calls) if q.get('view')=='people' and any(a['name']=='Ada' and a['count']==4 for a in r.get('albums',[]))),None),'Manually tagged person catalog missing')
+            time.sleep(.5);control('Ada',450,328);time.sleep(.5)
+            control('Select',245,332);time.sleep(.4);control('Select loaded',355,332);time.sleep(.4)
+            start=len(calls);control('Not this person',290,252)
+            corrected=wait(lambda:result('person_remove',start),'Manual people correction missing');assert not corrected['photos']
+            assert library.query(search='person:Ada')['count']==0
+            assert library.db.execute('SELECT count(*) FROM faces').fetchone()[0]==3
             for path,data in originals.items(): assert path.read_bytes()==data
-            assert library.query()['total']==4
-            print(('Portable' if portable else 'Native')+' People: opt-in, pause, naming, grouping, selected correction, ignore/unignore, disable, private exclusion and unchanged originals passed')
+            assert library.query()['total']==5
+            print(('Portable' if portable else 'Native')+' People: recognition controls, single and selection manual tagging, untagging, catalog and correction, private exclusion and unchanged originals passed')
 
         finally:
             if sys.exc_info()[0] is not None:

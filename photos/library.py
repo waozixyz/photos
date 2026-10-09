@@ -108,6 +108,13 @@ class Library:
                 excluded TEXT NOT NULL DEFAULT '[]');
             CREATE INDEX IF NOT EXISTS faces_person ON faces(person_id,photo_id);
             CREATE INDEX IF NOT EXISTS faces_photo ON faces(photo_id);
+            CREATE TABLE IF NOT EXISTS person_tags (
+                photo_id TEXT NOT NULL, person_id TEXT NOT NULL,
+                PRIMARY KEY(photo_id,person_id));
+            CREATE INDEX IF NOT EXISTS person_tags_person ON person_tags(person_id,photo_id);
+            CREATE TABLE IF NOT EXISTS person_tag_edits (photo_id TEXT PRIMARY KEY);
+            CREATE VIEW IF NOT EXISTS person_photos AS
+                SELECT photo_id,person_id FROM faces UNION SELECT photo_id,person_id FROM person_tags;
             CREATE TABLE IF NOT EXISTS albums (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL DEFAULT '',
                 cover TEXT NOT NULL DEFAULT '', pinned INTEGER NOT NULL DEFAULT 0,
@@ -655,9 +662,15 @@ class Library:
         geo = coordinates(metadata)
         from . import live
         parts = live.components(self, photo)
+        from . import people
+        names=[]
+        if self.setting('people_enabled',False) and people.member_visible(self,photo_id):
+            names=[r[0] for r in self.db.execute('''SELECT DISTINCT g.name FROM person_photos f JOIN people g ON g.id=f.person_id
+                WHERE f.photo_id=? AND g.name<>'' AND g.ignored=0 ORDER BY g.name COLLATE NOCASE,g.id''',(photo_id,))]
         return dict(id=photo_id, name=photo['name'], live=int(len(parts) == 2),
                     caption=photo['caption'].encode()[:8192].decode('utf-8', 'ignore'),
                     tags=photo['tags'].encode()[:8192].decode('utf-8', 'ignore'),
+                    people=('People: '+' · '.join(names)).encode()[:8192].decode('utf-8','ignore') if names else '',
                     caption_editable=int(len(photo['caption'].encode()) <= 8192),
                     tags_editable=int(len(photo['tags'].encode()) <= 8192),
                     albums=' · '.join(json.loads(photo['albums'])), size=sum(p['size'] for p in parts),

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.22
+
+- Tag people in photos, Live Photo stills and videos without requiring a detected face, individually or in a selection.
+- Find manually tagged people through search and People, use eligible photos in Memory Lane and automatic people albums, and keep assignments in encrypted backup and exports.
+- Remove manual tags while retaining detected faces, originals and album memberships; keep private items out of tagging and People.
+
 ## 0.1.21
 
 - Detect QR codes in photos, screenshots and Live Photo stills locally, select each code and copy its complete contents.

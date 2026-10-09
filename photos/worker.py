@@ -71,6 +71,17 @@ def ui_query(library, request):
 
 def library_request(library, request, config):
     action = request.get('action', 'query')
+    if action in {'person_tag','person_untag'}:
+        from . import people
+        ids=request.get('ids')
+        if ids is None:ids=[request['id']] if request.get('id') else []
+        people.tag(library,ids,request.get('value',''),remove=action=='person_untag')
+        result=ui_query(library,request)
+        if request.get('id') and people.member_visible(library,request['id']):
+            detail=library.details(request['id'])
+            if people.member_visible(library,request['id']):result['detail']=detail
+        result['status']='Person tag removed; detected faces and originals retained' if action=='person_untag' else 'Person tagged; originals retained'
+        return result
     if action in {'slide_frame', 'slide_check'}:
         from . import slideshow
         return slideshow.frame(library, request, config)

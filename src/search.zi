@@ -51,7 +51,7 @@ TextMatch :: (query: *Predicate, value: string) {
     AddSQL(query, "(name LIKE ? ESCAPE '\\' OR caption LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\' OR albums LIKE ? ESCAPE '\\' OR strftime('%Y-%m-%d',taken,'unixepoch') LIKE ? ESCAPE '\\'")
     for i: 0..4 { Bind(query, value, true) }
     AddSQL(query, " OR EXISTS(SELECT 1 FROM albums places WHERE places.deleted=0 AND places.filter LIKE 'near:%' AND places.name LIKE ? ESCAPE '\\' AND ")
-    Bind(query, value, true); RadiusMatch(query, "substr(places.filter,6)"); AddSQL(query, ") OR EXISTS(SELECT 1 FROM faces f JOIN people g ON g.id=f.person_id WHERE f.photo_id=photos.id AND g.ignored=0 AND g.name<>'' AND g.name LIKE ? ESCAPE '\\' AND photos.hidden=0 AND photos.trashed=0 AND (SELECT value FROM settings WHERE key='people_enabled')='true'))")
+    Bind(query, value, true); RadiusMatch(query, "substr(places.filter,6)"); AddSQL(query, ") OR EXISTS(SELECT 1 FROM person_photos f JOIN people g ON g.id=f.person_id WHERE f.photo_id=photos.id AND g.ignored=0 AND g.name<>'' AND g.name LIKE ? ESCAPE '\\' AND photos.hidden=0 AND photos.trashed=0 AND (SELECT value FROM settings WHERE key='people_enabled')='true'))")
     Bind(query,value,true)
 }
 RadiusMatch :: (query: *Predicate, spec: string) {
@@ -79,7 +79,7 @@ ApplyTerm :: (query: *Predicate, key: string, value: string) {
     } else if key == "album" {
         AddSQL(query, "EXISTS(SELECT 1 FROM json_each(photos.albums) WHERE value=? COLLATE NOCASE)"); Bind(query, value)
     } else if key == "person" {
-        AddSQL(query,"hidden=0 AND trashed=0 AND (SELECT value FROM settings WHERE key='people_enabled')='true' AND EXISTS(SELECT 1 FROM faces f JOIN people g ON g.id=f.person_id WHERE f.photo_id=photos.id AND g.ignored=0 AND g.name=? COLLATE NOCASE)"); Bind(query,value)
+        AddSQL(query,"hidden=0 AND trashed=0 AND (SELECT value FROM settings WHERE key='people_enabled')='true' AND EXISTS(SELECT 1 FROM person_photos f JOIN people g ON g.id=f.person_id WHERE f.photo_id=photos.id AND g.ignored=0 AND g.name=? COLLATE NOCASE)"); Bind(query,value)
     } else if key == "near" {
         radius: Geo.Radius
         if !Geo.Parse(value, *radius) { query.error = "Use near:latitude,longitude,radius-km (0.001 to 20040 km)"; return }

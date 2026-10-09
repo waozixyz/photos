@@ -137,6 +137,8 @@ BulkBar :: (session: Session, bounds: Rectangle) {
     if Action(session, 68, "Remove from album", BulkBounds(bounds, 7), ready && Model.album[0] != 0 && Model.album_filter[0] == 0) { Model.Apply("album_remove", TextUntilNul(Model.album[:])) }
     if Action(session, 69, ifx Model.view == "archive" then "Unarchive" else "Archive", BulkBounds(bounds, 8), ready) { Model.Apply("archived_set", ifx Model.view == "archive" then "0" else "1") }
     if Action(session, 214, "Edit location", BulkBounds(bounds, 9), ready) { Model.BeginEdit("location", "Set location for selection", "", "Latitude, longitude; leave empty to remove location") }
+    if Action(session,519,"Tag person",BulkBounds(bounds,10),ready && Model.people_enabled && Model.view!="hidden" && Model.view!="trash") { Model.BeginEdit("person_tag","Tag person in selection","","One person's name; existing names reuse that person") }
+    if Action(session,520,"Remove person tag",BulkBounds(bounds,11),ready && Model.people_enabled && Model.view!="hidden" && Model.view!="trash") { Model.BeginEdit("person_untag","Remove manual person tag","","One person's name; detected faces stay assigned") }
 }
 
 ImageEditor :: (session: Session, body: Rectangle) {
@@ -528,9 +530,13 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         }
         details: Vec(u8); BuilderPrint(*details, "% · % x % · % bytes", TextUntilNul(Model.detail_taken[:]), photo.width, photo.height, Model.detail_size)
         text := BuilderFinish(details); Label(session, 76, text, .{x, body.y + body.height - 232.0, width, 22.0}, 13); Model.Release(text)
-        Label(session, 77, TextUntilNul(Model.detail_caption[:]), .{x, body.y + body.height - 202.0, width, 22.0}, 14)
-        Label(session, 78, TextUntilNul(Model.detail_albums[:]), .{x, body.y + body.height - 172.0, width, 22.0}, 13)
-        Label(session, 79, TextUntilNul(Model.detail_tags[:]), .{x, body.y + body.height - 142.0, width, 22.0}, 13)
+        Label(session, 77, TextUntilNul(Model.detail_caption[:]), .{x, body.y + body.height - 202.0, width-148.0, 22.0}, 14)
+        if Action(session,519,"Tag person",.{x+width-138.0,body.y+body.height-210.0,138.0,30.0},ready && Model.people_enabled && !photo.hidden && !photo.trashed) { Model.BeginEdit("person_tag","Tag person in this item","","One person's name; no detected face is required") }
+        Label(session, 78, TextUntilNul(Model.detail_albums[:]), .{x, body.y + body.height - 172.0, width-148.0, 22.0}, 13)
+        if Action(session,520,"Remove person tag",.{x+width-138.0,body.y+body.height-180.0,138.0,30.0},ready && Model.people_enabled && !photo.hidden && !photo.trashed) { Model.BeginEdit("person_untag","Remove manual person tag","","One person's name; detected faces stay assigned") }
+        tags: Vec(u8); BuilderPrint(*tags,"%",TextUntilNul(Model.detail_tags[:]))
+        if Model.detail_people[0] != 0 { if Model.detail_tags[0] != 0 { BuilderPrint(*tags," · ") }; BuilderPrint(*tags,"%",TextUntilNul(Model.detail_people[:])) }
+        tag_text := BuilderFinish(tags); Label(session,79,tag_text,.{x,body.y+body.height-142.0,width,22.0},13); Model.Release(tag_text)
         Label(session, 96, TextUntilNul(Model.detail_location[:]), .{x, body.y + body.height - 114.0, width - 148.0, 22.0}, 13)
         if Action(session, 420, "Name place", .{x + width - 138.0, body.y + body.height - 122.0, 138.0, 30.0}, ready && !photo.hidden && !photo.trashed && Model.detail_location[0] != 0) { Model.BeginPlace(true) }
         step := (width - 32.0) / 5.0
