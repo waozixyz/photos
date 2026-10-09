@@ -48,3 +48,13 @@ def heif(path, clip, codec=1):
     with path.open('ab') as output:
         output.write((len(clip)+8).to_bytes(4,'big')+b'mpvd'+clip)
     return path
+
+
+def samsung(path,clip):
+    import struct
+    Image.new('RGB',(96,64),(190,70,30)).save(path)
+    data = struct.pack('<HHI',0,0x0a30,16)+b'MotionPhoto_Data'+clip
+    directory = b'SEFH'+struct.pack('<IIHHII',101,1,0,0x0a30,len(data),len(data))
+    with path.open('ab') as output:
+        output.write(data+directory+struct.pack('<I',len(directory))+b'SEFT')
+    return path

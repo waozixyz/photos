@@ -23,7 +23,7 @@ def descriptor(photo):
         return None
     if type(value.get('version')) is not int or value['version'] != 1 or any(type(value.get(k)) is not int for k in ['offset', 'length']) or \
             not 16 <= value['length'] <= 128*1024*1024 or not 0 < value['offset'] <= photo['size']-value['length'] or \
-            value['offset']+value['length'] != photo['size']:
+            value['offset']+value['length'] > photo['size']:
         return None
     return {key: value[key] for key in ['version', 'offset', 'length']}
 
@@ -48,7 +48,7 @@ def read(source, output=None):
         value = json.loads(result.stdout)
         size = source.stat().st_size
         if type(value.get('version')) is not int or value['version'] != 1 or any(type(value.get(k)) is not int for k in ['offset', 'length']) or \
-                not 16 <= value['length'] <= 128*1024*1024 or value['offset'] <= 0 or value['offset']+value['length'] != size:
+                not 16 <= value['length'] <= 128*1024*1024 or value['offset'] <= 0 or value['offset']+value['length'] > size:
             raise ValueError()
         return value
     except (OSError, ValueError, subprocess.TimeoutExpired):
@@ -60,7 +60,7 @@ def detect(library, photo_id, unchanged=False):
     if photo['extension'] not in EXTENSIONS or photo['kind'] != 'photo':
         return
     metadata = json.loads(photo['metadata'])
-    if unchanged and library.db.execute('SELECT 1 FROM motion_scans WHERE photo_id=? AND reader_version=1', (photo_id,)).fetchone():
+    if unchanged and library.db.execute('SELECT 1 FROM motion_scans WHERE photo_id=? AND reader_version=2', (photo_id,)).fetchone():
         return
     if metadata.get('photosLive') or metadata.get('photosLiveSeparated') or json.loads(photo['edits']).get('live_separated'):
         return
@@ -72,7 +72,7 @@ def detect(library, photo_id, unchanged=False):
         metadata = json.loads(photo['metadata'])
         if metadata.get('photosLive') or metadata.get('photosLiveSeparated') or json.loads(photo['edits']).get('live_separated'):
             return
-        library.db.execute('INSERT OR REPLACE INTO motion_scans VALUES(?,1)', (photo_id,))
+        library.db.execute('INSERT OR REPLACE INTO motion_scans VALUES(?,2)', (photo_id,))
         if metadata.get('photosMotion') == value or value is None and 'photosMotion' not in metadata:
             return
         if value is None:

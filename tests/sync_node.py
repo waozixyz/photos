@@ -280,13 +280,14 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         assert json.loads(second.photo(collage_id)['metadata'])['photosCollage']==collage_spec
         assert Path(peer.materialize(collage_id)).read_bytes()==first.original(first.photo(collage_id)).read_bytes()
         assert second.query(album='Collages')['photos'][0]['id']==collage_id
-        from motion_fixtures import jpeg as motion_jpeg, heif as motion_heif
+        from motion_fixtures import jpeg as motion_jpeg, heif as motion_heif, samsung as motion_samsung
         from photos import motion, live
         motion_folder=folder/'embedded/Camera';motion_folder.mkdir(parents=True)
         clip=movie.read_bytes()
         motion_jpeg(motion_folder/'EmbeddedMP.jpg',clip)
         motion_heif(motion_folder/'EmbeddedMP.heic',clip)
         motion_heif(motion_folder/'EmbeddedMP.avif',clip,4)
+        motion_samsung(motion_folder/'Samsung.jpg',clip)
         first.import_folders([motion_folder.parent])
         while client.sync(): pass
         assert peer.sync()==0

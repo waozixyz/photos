@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.25
+
+- Play older Samsung JPEG Motion Photos without altering their original trailer metadata.
+- Recognize Google motion metadata written as XML elements as well as attributes, with duplicate and malformed values rejected.
+- Retain separation, encrypted backup, export and privacy behavior across the additional camera formats.
+
 ## 0.1.24
 
 - Browse Android Motion Photos with embedded video as one item, including modern JPEG, HEIC and AVIF files and legacy Google JPEGs.

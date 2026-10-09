@@ -221,7 +221,7 @@ encrypted ThinkPad backup retain both original files and their pairing metadata.
 Separate files restores independent gallery items and survives rescans and sync.
 Incomplete pairs and inconsistent privacy updates stay out of galleries until
 both records agree. Embedded Android Motion Photos also appear as one item.
-Modern JPEG XMP directories, legacy Google MicroVideo JPEGs, and modern HEIC/AVIF
+Modern JPEG XMP directories, legacy Google MicroVideo and Samsung SEF JPEGs, and modern HEIC/AVIF
 `mpvd` containers are recognized during import or source rescan. Play Live Photo
 extracts a private local playback asset while the entire combined original stays
 unchanged in backup and export. Separate files saves a video copy, preserving
@@ -233,8 +233,11 @@ complete MP4 boxes; stale flags, invalid ranges and malformed files stay ordinar
 retained photos. It uses libxml2 and libheif without external XML documents or
 network requests, following the
 [Android Motion Photo format](https://developer.android.com/media/platform/motion-photo-format).
-Older Samsung SEF containers without supported XMP, extended JPEG XMP packets,
-non-attribute XMP properties and native phone Live Photo capture remain unfinished.
+Samsung JPEG trailers are read through validated SEFH/SEFT directory entries;
+their original trailer remains in backup and exports. Camera flags can be XML
+attributes or scalar elements, independently of their namespace prefix. Samsung
+HEIC `sefd` trailers, extended JPEG XMP packets, non-attribute container item
+properties and native phone Live Photo capture remain unfinished.
 
 This version is a local photo library with sync, not complete Ente feature parity.
 

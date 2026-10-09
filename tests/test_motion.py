@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from motion_fixtures import jpeg, heif
+from motion_fixtures import jpeg, heif, samsung
 from test_live import movie
 from photos import editing, live, motion
 from photos.export import Export
@@ -180,6 +180,32 @@ class MotionTest(unittest.TestCase):
         self.library.db.execute('UPDATE photos SET metadata=? WHERE id=?',(packed(metadata),self.photo_id)); self.library.db.commit()
         self.assertIsNone(motion.descriptor(self.library.photo(self.photo_id)))
         self.assertEqual(self.library.query(search='type:live')['count'],1)
+
+    def test_samsung_sef_ranges_preserve_directory_and_reject_corruption(self):
+        path = samsung(self.source/'Samsung.jpg',self.clip)
+        original = path.read_bytes()
+        value = motion.read(path)
+        self.assertEqual(value['length'],len(self.clip))
+        self.assertLess(value['offset']+value['length'],len(original))
+        self.library.import_folders([self.source.parent]); photo_id = digest_file(path)
+        self.assertEqual(Path(self.request(action='playback_check',id=photo_id)['playback_path']).read_bytes(),self.clip)
+        self.assertEqual(self.library.query(search='type:live')['count'],2)
+        for offset in [-4,-8,-12,-16,-24,len(original)-len(self.clip)-56]:
+            damaged = bytearray(original); damaged[offset] ^= 128
+            bad = self.root/'bad-sef.jpg';bad.write_bytes(damaged)
+            self.assertIsNone(motion.read(bad),offset)
+        self.assertEqual(path.read_bytes(),original)
+
+    def test_namespaced_rdf_scalar_elements_and_disabled_motion_flags(self):
+        xml = f'''<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:C="http://ns.google.com/photos/1.0/camera/">
+            <C:MicroVideo> 1 </C:MicroVideo><C:MicroVideoOffset>{len(self.clip)}</C:MicroVideoOffset></x:xmpmeta>'''
+        path = jpeg(self.root/'elements.jpg',self.clip,xml=xml)
+        self.assertEqual(motion.read(path)['length'],len(self.clip))
+        for invalid in [xml.replace('<C:MicroVideo> 1 </C:MicroVideo>','<C:MicroVideo/>'),
+                        xml.replace('</x:xmpmeta>','<C:MicroVideo>1</C:MicroVideo></x:xmpmeta>'),
+                        xml.replace('<C:MicroVideo> 1 </C:MicroVideo>','<C:MotionPhoto>0</C:MotionPhoto><C:MicroVideo>1</C:MicroVideo>')]:
+            jpeg(path,self.clip,xml=invalid)
+            self.assertIsNone(motion.read(path))
 
 
 if __name__ == '__main__':
