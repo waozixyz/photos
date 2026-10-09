@@ -211,9 +211,9 @@ def main():
     launcher.chmod(0o755)
     desktop = args.prefix/'share/applications/photos.desktop'
     atomic(desktop,('[Desktop Entry]\nType=Application\nName=Photos\nComment=Private local photos synced with ThinkPad\nExec='+str(launcher)+'\nIcon=photos\nTerminal=false\nCategories=Graphics;Photography;\n').encode())
-    icon = args.prefix/'share/icons/hicolor/scalable/apps/photos.svg'
+    icon = args.prefix/'share/icons/hicolor/256x256/apps/photos.png'
     icon.parent.mkdir(parents=True,exist_ok=True)
-    shutil.copyfile(repo/'assets/photos.svg',icon)
+    shutil.copyfile(repo/'assets/photos.png',icon)
     (installed/'assets').mkdir(exist_ok=True)
     for name in ['world.png', 'MAP-LICENSE.txt', 'SEMANTIC-MODELS.json', 'CLIP-LICENSE.txt', 'TEXT-MODELS.json', 'TESSERACT-LICENSE.txt','FACE-MODELS.json','SFACE-LICENSE.txt','YUNET-LICENSE.txt','OQS-LICENSE.txt','LIBOQS-LICENSE.txt']:
         shutil.copyfile(repo/'assets'/name, installed/'assets'/name)
@@ -237,6 +237,8 @@ def main():
         for key, value in dict(label='Photos', icon='▧', description='Private local photos synced with ThinkPad',
                                renderer='window', registry_id='photos', icon_path=str(icon)).items():
             descriptor.setdefault(key, value)
+        if descriptor.get('icon_path') == str(args.prefix/'share/icons/hicolor/scalable/apps/photos.svg'):
+            descriptor['icon_path'] = str(icon)
         atomic(catalog_path, packed(catalog).encode())
     if not args.no_service:
         if args.ssh_host:
