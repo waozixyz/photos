@@ -1,3 +1,6 @@
 Pillow>=10,<13
 PyNaCl>=1.5,<2
 pqcrypto>=0.3,<0.5
+numpy>=1.26,<3
+onnxruntime>=1.20,<2
+tokenizers>=0.20,<1

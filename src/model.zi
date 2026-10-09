@@ -98,6 +98,10 @@ album_archived: bool;
 album_place: bool;
 export_status: [1025]u8;
 export_continuous: bool;
+semantic_status: [1025]u8;
+semantic_enabled: bool;
+semantic_processing: bool;
+semantic_working: bool;
 view: string = "photos";
 sort: string = "newest";
 album: [513]u8;
@@ -283,13 +287,16 @@ Tick :: () {
         }
         if FieldAt(json, 0, "memory_date") >= 0 { Decode(json, 0, "memory_date", memory_date[:]) }
         Decode(json, 0, "export_status", export_status[:]); export_continuous = Number(json, 0, "export_continuous") > 0
+        Decode(json, 0, "semantic_status", semantic_status[:])
+        semantic_enabled = Number(json, 0, "semantic_enabled") > 0; semantic_working = Number(json, 0, "semantic_working") > 0
+        semantic_processing = Number(json, 0, "semantic_processing") > 0
         if mutation { ClearSelection(); editor = "" }
         if Number(json, 0, "place_open") > 0 { selected = -1; detail_id[0] = 0 }
         if FieldAt(json, 0, "album") >= 0 { Decode(json, 0, "album", album[:]); offset = 0; scroll = 0 }
         if FieldAt(json, 0, "search") >= 0 { Decode(json, 0, "search", search[:]); search_cursor = 0; search_anchor = 0 }
         if FieldAt(json, 0, "view") >= 0 {
             fresh_view: [32]u8; Decode(json, 0, "view", fresh_view[:])
-            for i: 0..cast(s32)11 { if View(i) == TextUntilNul(fresh_view[:]) { view = View(i) } }
+            for i: 0..cast(s32)12 { if View(i) == TextUntilNul(fresh_view[:]) { view = View(i) } }
         }
         album_detail := FieldAt(json, 0, "album_detail")
         album_description[0] = 0; album_filter[0] = 0; album_pinned = false; album_archived = false; album_place = false
@@ -346,9 +353,9 @@ Navigate :: (target: string) {
     Viewer.Reset()
     StopPlayback()
     queued_request = false
-    if loading { for i: 0..cast(s32)11 { if View(i) == target { queued_view = i } }; return }
+    if loading { for i: 0..cast(s32)12 { if View(i) == target { queued_view = i } }; return }
     if view == "hidden" && target != "hidden" && vault_token[0] != 0 {
-        for i: 0..cast(s32)11 { if View(i) == target { queued_view = i } }
+        for i: 0..cast(s32)12 { if View(i) == target { queued_view = i } }
         vault_unlocked = false; selected = -1; ClearSelection(); editor = ""; Wipe(edit_value[:]); Wipe(vault_first[:]); Wipe(edit_preview[:])
         Request("vault_lock"); Wipe(vault_token[:]); return
     }
@@ -602,4 +609,4 @@ BeginPlace :: (from_photo: bool = false) {
     else { Set(place_area[:], "0, 0, 1") }
     BeginEdit("place_name", "Name this place", "", "A name such as Home; photos in its radius match automatically")
 }
-View :: (index: s32) -> string { names: [12]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized", "memories", "map", "places"}; return names[index] }
+View :: (index: s32) -> string { names: [13]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized", "memories", "map", "places", "semantic"}; return names[index] }

@@ -4,6 +4,11 @@ PYTHON ?= build/venv/bin/python
 PREFIX ?= $(HOME)/.local
 PACKAGE_FLAGS := $(if $(wildcard ziran.local.toml),,--locked)
 .PHONY: build bundle image-editor video-editor vault-auth library-query photo-decoder test sync-test window-test video-window-test video-portable-test playback-window-test playback-portable-test portable-test hosted-test install
+.PHONY: semantic-engine semantic-models
+semantic-engine:
+	LDLIBS='-ldl -lm' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry semantic_infer:main --exe -o build/semantic-infer src/semantic_infer.zi
+semantic-models:
+	$(PYTHON) scripts/semantic-models.py
 photo-decoder:
 	@set -e; ziran_source=$$($(ZIRAN) pkg path ziran $(PACKAGE_FLAGS)); \
 	LDLIBS='-l:libheif.so.1 -l:libraw.so.23 -lgdk_pixbuf-2.0 -lgobject-2.0' "$$ziran_source/build/bin/ziran" build --root src --target=c --entry photo_decode:main --exe -o build/photo-decoder src/photo_decode.zi
@@ -17,13 +22,13 @@ vault-auth:
 	LDLIBS='-l:libsodium.so.23' "$$ziran_source/build/bin/ziran" build --root src --target=c --entry vault_auth:main --exe -o build/vault-auth src/vault_auth.zi
 library-query:
 	LDLIBS='-l:libsqlite3.so.0' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry library_query:main --exe -o build/library-query src/library_query.zi
-build: image-editor video-editor vault-auth library-query photo-decoder
+build: image-editor video-editor vault-auth library-query photo-decoder semantic-engine
 	$(ZIRAN) build $(PACKAGE_FLAGS)
 	cp scripts/worker.py build/
 	cp -r photos build/
-bundle: image-editor video-editor vault-auth library-query photo-decoder
+bundle: image-editor video-editor vault-auth library-query photo-decoder semantic-engine
 	$(ZIRAN) tool kryon build portable $(PACKAGE_FLAGS)
-test: image-editor video-editor vault-auth library-query photo-decoder
+test: image-editor video-editor vault-auth library-query photo-decoder semantic-engine
 	$(PYTHON) -m unittest discover -s tests -v
 sync-test:
 	$(PYTHON) tests/sync_node.py
@@ -73,3 +78,9 @@ places-window-test: build
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/places_window.py
 places-portable-test: bundle
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_PLACES_PORTABLE=1 $(PYTHON) tests/places_window.py
+
+.PHONY: semantic-window-test semantic-portable-test
+semantic-window-test: build
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/semantic_window.py
+semantic-portable-test: bundle
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_SEMANTIC_PORTABLE=1 $(PYTHON) tests/semantic_window.py

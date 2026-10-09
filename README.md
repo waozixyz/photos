@@ -169,8 +169,8 @@ Decoding is limited to 100 megapixels and bounded memory/time; an unsupported or
 damaged original stays stored and can still be backed up and exported. Existing
 imports gain missing thumbnails during source rescans or when opened. Video
 thumbnails need ffmpeg. Videos can be stored, synced, previewed and exported;
-in-app playback is available on Linux with GStreamer and its installed codecs. Facial recognition, semantic image
-search, public links and phone camera backup are not implemented.
+in-app playback is available on Linux with GStreamer and its installed codecs. Facial recognition,
+public links and phone camera backup are not implemented.
 Exported Live Photos with an image and a MOV/MP4 motion file appear as one item.
 Automatic pairing requires the same folder and base name, unambiguous components,
 capture dates or source file times within one day, and a motion file of one to ten
@@ -185,6 +185,25 @@ both records agree. Embedded Android motion-photo extraction and native phone
 Live Photo capture remain unfinished.
 
 This version is a local photo library with sync, not complete Ente feature parity.
+Semantic search finds image content from natural language descriptions, with
+closest matches first. Enable it in Semantic search to index local photos in the
+background, see progress, pause/resume processing or retry unavailable originals.
+Completed indexes remain searchable while processing is paused.
+Disable search stops processing and results without removing the saved index.
+Hidden and Trash are excluded even while Hidden is unlocked. Encrypted ThinkPad backup includes
+indexes; receiving an index does not enable processing or search on that device.
+The native Ziran inference and ranking engines run locally, using verified CLIP
+ViT-B/32 quantized models and ONNX Runtime with telemetry disabled. Models are
+optional: run `make semantic-models` to download their pinned public assets, or
+`scripts/semantic-models.py --source DIR` to copy previously downloaded assets.
+Install them with `scripts/install.py --semantic-models build/models`. No photo,
+query or index is sent to a model service. The CLIP model is primarily English;
+results are approximate and exclude similarities below 0.20. Indexing covers
+still images whose originals are present locally, including the still component
+of Live Photos. Failed files remain stored and can be retried. Face recognition,
+video-content search, automatic curation and a Ziran tokenizer/indexing service
+remain unfinished. CLIP's MIT attribution is in `assets/CLIP-LICENSE.txt`.
+
 Hidden requires a separate local password, with confirmation when first created.
 The native Ziran helper uses libsodium's Argon2id verifier; passwords never enter
 process arguments or app inspection state. Locked photos cannot be read, exported
@@ -208,7 +227,7 @@ and [export behavior](https://ente.com/help/photos/features/backup-and-sync/expo
 The remaining replacement work includes:
 
 - Mobile clients, permission-aware background camera backup and device space recovery.
-- On-device face grouping, semantic search, detailed maps, curated memories and automatically curated trip/people albums.
+- On-device face grouping, detailed maps, curated memories and automatically curated trip/people albums.
 - Advanced photo editing, encrypted video streaming, animated editing previews, embedded Android motion photos, HDR display and broader codec/camera coverage.
 - Private sharing, collaboration, public links, comments and account recovery.
   Any sharing design needs to honor the owner's ThinkPad-only sync restriction.

@@ -1,0 +1,45 @@
+// Native cosine ranking over local normalized CLIP vectors. Never opens a
+// window or connects to a network; the gallery owns privacy filtering.
+#import "std/c_string"
+sqlite :: #system_library "sqlite3";
+libc :: #system_library "c";
+Open :: (path: *u8, mode: *u8) -> *void #foreign libc "fopen";
+Read :: (bytes: *void, size: usize, count: usize, file: *void) -> usize #foreign libc "fread";
+Get :: (file: *void) -> s32 #foreign libc "fgetc";
+Close :: (file: *void) -> s32 #foreign libc "fclose";
+Copy :: (out: *void, bytes: *void, count: usize) -> *void #foreign libc "memcpy";
+Scalar :: #type (context: *void, argc: s32, argv: **void) #c_call;
+Create :: (database: *void, name: *u8, argc: s32, flags: s32, data: *void, callback: Scalar, step: *void, final: *void, destroy: *void) -> s32 #foreign sqlite "sqlite3_create_function_v2";
+ValueType :: (value: *void) -> s32 #foreign sqlite "sqlite3_value_type";
+ValueBytes :: (value: *void) -> s32 #foreign sqlite "sqlite3_value_bytes";
+ValueBlob :: (value: *void) -> *void #foreign sqlite "sqlite3_value_blob";
+Result :: (context: *void, value: float64) #foreign sqlite "sqlite3_result_double";
+vector: [512]float32;
+Model :: "clip-vit-b32-int8-v1";
+RankSQL :: "photos_semantic_score((SELECT embedding FROM semantic_embeddings WHERE photo_id=photos.id AND model='clip-vit-b32-int8-v1'))";
+Score :: (context: *void, argc: s32, argv: **void) {
+    Result(context,-1.0)
+    if argc != 1 || ValueType(argv[0]) != 4 || ValueBytes(argv[0]) != 2048 { return }
+    blob := ValueBlob(argv[0]); if blob == null { return }
+    values: [512]float32; unused Copy(cast(*void)*values[0],blob,2048)
+    sum: float64; norm: float64
+    for i: 0..511 {
+        value := cast(float64)values[i]
+        if value != value || value < -1.001 || value > 1.001 { return }
+        norm += value * value; sum += value * cast(float64)vector[i]
+    }
+    if norm < 0.99 || norm > 1.01 { return }
+    Result(context,sum)
+}
+Register :: (database: *void, path: string) -> bool {
+    bytes: [4097]u8; mode: [3]u8 = .{114,98,0}
+    if !CopyCString(path,bytes[:]) { return false }
+    file := Open(*bytes[0],*mode[0]); if file == null { return false }
+    defer { unused Close(file) }
+    if Read(cast(*void)*vector[0],1,2048,file) != 2048 || Get(file) != -1 { return false }
+    norm: float64
+    for i: 0..511 { value := cast(float64)vector[i]; if value != value || value < -1.001 || value > 1.001 { return false }; norm += value * value }
+    if norm < 0.99 || norm > 1.01 { return false }
+    name: [32]u8; unused CopyCString("photos_semantic_score",name[:]); callback: Scalar = Score
+    return Create(database,*name[0],1,0x200801,null,callback,null,null,null) == 0
+}

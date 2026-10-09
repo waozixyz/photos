@@ -64,6 +64,13 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         client = Client(first, config)
         assert client.sync() == 0
         photo_id = digest_file(source/'fixture.jpg')
+        from photos import semantic
+        import struct
+        embedding = struct.pack('<512f', 1.0, *([0.0] * 511))
+        first.db.execute('INSERT INTO semantic_embeddings VALUES(?,?,?,?)', (photo_id, semantic.MODEL, embedding, ''))
+        first.db.commit()
+        first.edit(photo_id, 'favorite_set', '0')
+        assert client.sync() == 0
         second = Library(folder/'thinkpad')
         identity = second.root/'private/identity.json'
         identity.parent.mkdir(mode=0o700)
@@ -72,6 +79,8 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         peer = Client(second, config)
         assert peer.sync() == 0
         assert second.query()['total'] == 2
+        assert semantic.encrypted_index(second, photo_id) == semantic.encrypted_index(first, photo_id)
+        assert not second.setting('semantic_enabled', False)
         original = Path(peer.materialize(photo_id))
         assert original.read_bytes() == (source/'fixture.jpg').read_bytes()
         second.edit(photo_id,'favorite')

@@ -58,11 +58,24 @@ def ui_query(library, request):
     export = library.setting('export', {})
     result['export_status'] = export.get('status', 'Choose a separate destination for a folder backup')
     result['export_continuous'] = int(bool(export.get('continuous')))
+    from . import semantic
+    result.update(semantic.state(library))
+    semantic.kick(library)
     return result
 
 
 def library_request(library, request, config):
     action = request.get('action', 'query')
+    if action in {'semantic_enable', 'semantic_pause', 'semantic_retry', 'semantic_disable'}:
+        from . import semantic
+        if action == 'semantic_disable':
+            semantic.enable(library, False)
+            library.set_setting('semantic_enabled', False)
+        elif action == 'semantic_retry':
+            semantic.retry(library)
+        else:
+            semantic.enable(library, action == 'semantic_enable')
+        return ui_query(library, request)
     def authorize(photo):
         return not photo['hidden'] or vault.unlocked(library, request.get('vault_token', ''))
     def require_access(photo_id):
@@ -357,6 +370,8 @@ def run_worker(library, config, once=False):
                     raise
         if once:
             return
+        from . import semantic
+        semantic.kick(library)
         if pending:
             continue
         for _ in range(30):

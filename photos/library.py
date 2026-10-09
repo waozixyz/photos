@@ -93,6 +93,9 @@ class Library:
                 path TEXT PRIMARY KEY, size INTEGER, mtime INTEGER,
                 meta_stamp TEXT, photo_id TEXT REFERENCES photos(id));
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS semantic_embeddings (
+                photo_id TEXT PRIMARY KEY, model TEXT NOT NULL,
+                embedding BLOB, error TEXT NOT NULL DEFAULT '');
             CREATE TABLE IF NOT EXISTS albums (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL DEFAULT '',
                 cover TEXT NOT NULL DEFAULT '', pinned INTEGER NOT NULL DEFAULT 0,
@@ -632,9 +635,14 @@ class Library:
         album_detail = self.db.execute('SELECT * FROM albums WHERE name=? AND deleted=0', (album,)).fetchone() if album else None
         smart_filter = album_detail['filter'] if album_detail else ''
         map_request = dict(map_bounds=map_bounds) if map_bounds is not None else {}
-        response = page(self, view=view, search=search, album=album, offset=max(0, int(offset)),
+        request = dict(view=view, search=search, album=album, offset=max(0, int(offset)),
                         limit=max(1, min(100, int(limit))), sort=sort, memory_date=memory_date,
                         hidden_access=int(bool(hidden_access)), filter=smart_filter, map_gallery=int(bool(map_gallery)), **map_request)
+        if view == 'semantic':
+            from .semantic import search_page
+            response = search_page(self, request, page)
+        else:
+            response = page(self, **request)
         count = response['count']
         rows = [self.photo(photo_id) for photo_id in response['ids']] if view != 'map' or map_gallery else []
         photos = []
@@ -642,14 +650,14 @@ class Library:
             photo = dict(row)
             # Native ID paging and row hydration are separate reads. A photo
             # hidden by another request in between must not expose its paths.
-            if (photo['hidden'] and (not hidden_access or view == 'map')) or (view == 'map' and photo['trashed']):
+            if (photo['hidden'] and (not hidden_access or view in {'map', 'semantic'})) or (view in {'map', 'semantic'} and photo['trashed']):
                 continue
             from . import live
             try:
                 parts = live.components(self, photo)
             except LibraryError:
                 continue
-            if any(p['hidden'] and (not hidden_access or view == 'map') for p in parts):
+            if any(p['hidden'] and (not hidden_access or view in {'map', 'semantic'}) for p in parts):
                 continue
             if any(bool(p['trashed']) != bool(photo['trashed']) for p in parts):
                 continue

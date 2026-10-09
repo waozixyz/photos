@@ -1,0 +1,126 @@
+// Headless CLIP inference for Photos. Tensor and embedding files stay
+// local; ONNX Runtime supplies model operators through its versioned C API.
+#import "std/byte_text_linux"
+libc :: #system_library "c";
+loader :: #system_library "dl";
+math :: #system_library "m";
+OpenLibrary :: (path: *u8, flags: s32) -> *void #foreign loader "dlopen";
+Symbol :: (library: *void, name: *u8) -> *void #foreign loader "dlsym";
+CloseLibrary :: (library: *void) -> s32 #foreign loader "dlclose";
+Open :: (path: *u8, mode: *u8) -> *void #foreign libc "fopen";
+Read :: (bytes: *void, size: usize, count: usize, file: *void) -> usize #foreign libc "fread";
+Write :: (bytes: *void, size: usize, count: usize, file: *void) -> usize #foreign libc "fwrite";
+Copy :: (destination: *void, source: *void, size: usize) -> *void #foreign libc "memcpy";
+Get :: (file: *void) -> s32 #foreign libc "fgetc";
+Close :: (file: *void) -> s32 #foreign libc "fclose";
+Sqrt :: (value: float64) -> float64 #foreign math "sqrt";
+BaseFn :: #type () -> *ApiBase #c_call;
+ApiFn :: #type (version: u32) -> *Api #c_call;
+EnvFn :: #type (severity: s32, label: *u8, out: **void) -> *void #c_call;
+UnaryFn :: #type (value: *void) -> *void #c_call;
+CreateFn :: #type (out: **void) -> *void #c_call;
+OptionFn :: #type (options: *void, value: s32) -> *void #c_call;
+SessionFn :: #type (env: *void, model: *u8, options: *void, out: **void) -> *void #c_call;
+MemoryFn :: #type (allocator: s32, kind: s32, out: **void) -> *void #c_call;
+TensorFn :: #type (memory: *void, bytes: *void, length: usize, shape: *s64, dimensions: usize, kind: s32, out: **void) -> *void #c_call;
+RunFn :: #type (session: *void, options: *void, names: **u8, inputs: **void, count: usize, output_names: **u8, outputs_count: usize, outputs: **void) -> *void #c_call;
+PointerFn :: #type (value: *void, out: **void) -> *void #c_call;
+CountFn :: #type (info: *void, out: *usize) -> *void #c_call;
+ReleaseFn :: #type (value: *void) #c_call;
+// Layout of OrtApi v20 through the last function used here. Reserved slots
+// preserve the official C ABI; typed fields keep calls checked by Ziran.
+ApiBase :: struct { GetApi: ApiFn; version: *void }
+Api :: struct {
+    reserved_0: [3]*void
+    CreateEnv: EnvFn
+    reserved_4: [2]*void
+    DisableTelemetry: UnaryFn
+    CreateSession: SessionFn
+    reserved_8: [1]*void
+    Run: RunFn
+    CreateOptions: CreateFn
+    reserved_11: [12]*void
+    Optimize: OptionFn
+    IntraThreads: OptionFn
+    InterThreads: OptionFn
+    reserved_26: [23]*void
+    CreateTensor: TensorFn
+    reserved_50: [1]*void
+    TensorData: PointerFn
+    reserved_52: [12]*void
+    TensorCount: CountFn
+    TensorInfo: PointerFn
+    reserved_66: [3]*void
+    CreateMemory: MemoryFn
+    reserved_70: [22]*void
+    ReleaseEnv: ReleaseFn
+    ReleaseStatus: ReleaseFn
+    ReleaseMemory: ReleaseFn
+    ReleaseSession: ReleaseFn
+    ReleaseValue: ReleaseFn
+    reserved_97: [2]*void
+    ReleaseInfo: ReleaseFn
+    ReleaseOptions: ReleaseFn
+}
+api: *Api;
+base_call: BaseFn;
+Checked :: (status: *void) -> bool {
+    if status == null { return true }
+    api.ReleaseStatus(status)
+    return false
+}
+Release :: (value: *void, callback: ReleaseFn) { if value != null { callback(value) } }
+Failure :: (message: string) -> s32 { print("%\n", message); return 1 }
+main :: (argc: s32, argv: **u8) -> s32 {
+    if argc != 8 { return Failure("Supply runtime, image/text mode, verified model, tensor, embedding and tensor names") }
+    mode := TextFromCString(argv[2]); image := mode == "image"
+    if !image && mode != "text" { return Failure("Choose image or text embedding") }
+    library := OpenLibrary(argv[1], 2)
+    if library == null { return Failure("Install the local Photos model runtime") }
+    defer { unused CloseLibrary(library) }
+    symbol_name: [14]u8 = .{79,114,116,71,101,116,65,112,105,66,97,115,101,0}
+    entry := Symbol(library, *symbol_name[0])
+    if entry == null { return Failure("Unsupported local model runtime") }
+    unused Copy(cast(*void)*base_call, cast(*void)*entry, size_of(*void))
+    base := base_call()
+    if base == null { return Failure("Unsupported local model runtime") }
+    api = base.GetApi(20)
+    if api == null { return Failure("The local model runtime needs API version 20") }
+    environment: *void; options: *void; session: *void; memory: *void; input: *void; output: *void; info: *void
+    defer { Release(info,api.ReleaseInfo); Release(output,api.ReleaseValue); Release(input,api.ReleaseValue); Release(memory,api.ReleaseMemory); Release(session,api.ReleaseSession); Release(options,api.ReleaseOptions); Release(environment,api.ReleaseEnv) }
+    label: [7]u8 = .{80,104,111,116,111,115,0}
+    if !Checked(api.CreateEnv(4,*label[0],*environment)) { return Failure("Cannot start local model inference") }
+    if !Checked(api.DisableTelemetry(environment)) { return Failure("Cannot disable model telemetry") }
+    if !Checked(api.CreateOptions(*options)) { return Failure("Cannot configure local model inference") }
+    if !Checked(api.IntraThreads(options,2)) || !Checked(api.InterThreads(options,1)) || !Checked(api.Optimize(options,99)) { return Failure("Cannot bound local model threads") }
+    if !Checked(api.CreateSession(environment,argv[3],options,*session)) { return Failure("Cannot load this verified photo model") }
+    read_mode: [3]u8 = .{114,98,0}; file := Open(argv[4], *read_mode[0])
+    if file == null { return Failure("Cannot read the local photo tensor") }
+    defer { unused Close(file) }
+    pixels: [150528]float32; tokens: [77]s64
+    size: usize = ifx image then 602112 else 616
+    bytes := ifx image then cast(*void)*pixels[0] else cast(*void)*tokens[0]
+    if Read(bytes,1,size,file) != size || Get(file) != -1 { return Failure("Photo tensor has an invalid size") }
+    if !Checked(api.CreateMemory(1,0,*memory)) { return Failure("Cannot allocate local inference memory") }
+    shape: [4]s64 = .{1,3,224,224}; text_shape: [2]s64 = .{1,77}
+    dimensions: usize = ifx image then 4 else 2
+    tensor_shape := ifx image then *shape[0] else *text_shape[0]
+    if !Checked(api.CreateTensor(memory,bytes,size,tensor_shape,dimensions,ifx image then 1 else 7,*input)) { return Failure("Cannot create the local photo tensor") }
+    names: [1]*u8 = .{argv[6]}; output_names: [1]*u8 = .{argv[7]}
+    inputs: [1]*void = .{input};
+    if !Checked(api.Run(session,null,*names[0],*inputs[0],1,*output_names[0],1,*output)) { return Failure("Local photo model could not process this tensor") }
+    count: usize
+    if !Checked(api.TensorInfo(output,*info)) || !Checked(api.TensorCount(info,*count)) || count != 512 { return Failure("Photo model produced an invalid embedding") }
+    data: *void
+    if !Checked(api.TensorData(output,*data)) || data == null { return Failure("Cannot read the photo embedding") }
+    values := cast(*float32)data; normalized: [512]float32; norm: float64
+    for i: 0..511 { number := cast(float64)values[i]; if number != number || number < -1000000.0 || number > 1000000.0 { return Failure("Photo model produced an invalid embedding") }; norm += number * number }
+    if norm < 0.000000000001 { return Failure("Photo model produced an empty embedding") }
+    norm = Sqrt(norm)
+    for i: 0..511 { normalized[i] = cast(float32)(cast(float64)values[i] / norm) }
+    write_mode: [3]u8 = .{119,98,0}; target := Open(argv[5], *write_mode[0])
+    if target == null { return Failure("Cannot save the local photo embedding") }
+    written := Write(cast(*void)*normalized[0],4,512,target); closed := Close(target)
+    if written != 512 || closed != 0 { return Failure("Cannot save the complete photo embedding") }
+    return 0
+}

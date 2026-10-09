@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.16
+
+- Describe objects, scenes and colors in Semantic search to find local photos by their image content, ordered by relevance.
+- Enable local indexing, see its progress, pause and resume it, and retry unavailable originals while keeping completed indexes searchable.
+- Keep Hidden and Trash out of semantic results, leave originals unchanged, and include search indexes only inside encrypted ThinkPad backup.
+
 ## 0.1.15
 
 - Name places from a photo's location or enter an area manually, and browse matching photos as imports and location corrections update the library.

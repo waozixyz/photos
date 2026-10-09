@@ -25,6 +25,7 @@ def main():
     parser.add_argument('--source', action='append', default=[])
     parser.add_argument('--no-dependencies', action='store_true')
     parser.add_argument('--no-service', action='store_true')
+    parser.add_argument('--semantic-models', type=Path, help='Install verified local semantic models from this directory')
     parser.add_argument('--harmony', action='store_true', help='Register an already installed signed Photos package in Harmony')
     args = parser.parse_args()
     if args.ssh_host and (not re.fullmatch('[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+', args.ssh_host) or not args.node):
@@ -60,6 +61,9 @@ def main():
     decoder = repo/'build/photo-decoder/photo_decode'
     if not decoder.is_file():
         parser.error('Build the Photos HEIC/RAW decoder before installing')
+    semantic = repo/'build/semantic-infer/semantic_infer'
+    if not semantic.is_file():
+        parser.error('Build the Photos semantic search engine before installing')
     shutil.copyfile(binary,installed/'photos-desktop.next')
     os.chmod(installed/'photos-desktop.next',0o755)
     os.replace(installed/'photos-desktop.next',installed/'photos-desktop')
@@ -78,6 +82,9 @@ def main():
     shutil.copyfile(decoder,installed/'photo_decode.next')
     os.chmod(installed/'photo_decode.next',0o755)
     os.replace(installed/'photo_decode.next',installed/'photo_decode')
+    shutil.copyfile(semantic,installed/'semantic_infer.next')
+    os.chmod(installed/'semantic_infer.next',0o755)
+    os.replace(installed/'semantic_infer.next',installed/'semantic_infer')
     shutil.copyfile(repo/'scripts/worker.py',installed/'worker.py')
     shutil.copyfile(repo/'scripts/service.py',installed/'service.py')
     shutil.copytree(repo/'photos',installed/'photos',dirs_exist_ok=True,ignore=shutil.ignore_patterns('__pycache__'))
@@ -104,8 +111,11 @@ def main():
     icon.parent.mkdir(parents=True,exist_ok=True)
     shutil.copyfile(repo/'assets/photos.svg',icon)
     (installed/'assets').mkdir(exist_ok=True)
-    for name in ['world.png', 'MAP-LICENSE.txt']:
+    for name in ['world.png', 'MAP-LICENSE.txt', 'SEMANTIC-MODELS.json', 'CLIP-LICENSE.txt']:
         shutil.copyfile(repo/'assets'/name, installed/'assets'/name)
+    if args.semantic_models:
+        subprocess.run(['python3',str(repo/'scripts/semantic-models.py'),'--source',str(args.semantic_models),
+                        '--destination',str(installed/'models')],check=True)
     if args.harmony:
         catalog_path = Path.home()/'.config/harmony/apps.json'
         catalog = json.loads(catalog_path.read_bytes()) if catalog_path.is_file() else {}

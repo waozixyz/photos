@@ -222,6 +222,8 @@ class Client:
         photo['metadata'] = json.loads(photo['metadata'])
         photo['edits'] = json.loads(photo['edits'])
         photo.pop('dirty', None)
+        from .semantic import encrypted_index
+        photo['semantic'] = encrypted_index(self.library, photo['id'])
         return self.seal_record(photo, COLLECTION, 'photos.media.v1')
 
     def album_record(self, album):
@@ -299,6 +301,9 @@ class Client:
         existing = self.library.db.execute('SELECT * FROM photos WHERE id=?', (photo['id'],)).fetchone()
         if existing and existing['updated'] >= photo['updated']:
             return
+        if 'semantic' in photo:
+            from .semantic import accept_index
+            accept_index(self.library, photo['id'], photo['semantic'])
         columns = ['id', 'name', 'extension', 'kind', 'size', 'taken', 'width', 'height', 'metadata', 'albums',
                    'favorite', 'hidden', 'trashed', 'archived', 'caption', 'tags', 'updated', 'manifest', 'edits']
         for key in ['metadata', 'albums', 'manifest', 'edits']:

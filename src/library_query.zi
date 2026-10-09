@@ -4,6 +4,7 @@ using SQLite :: #import "sqlite/SQLite";
 Search :: #import "search";
 Locations :: #import "locations";
 Geo :: #import "geo";
+Semantic :: #import "semantic";
 Clock :: #import "std/date_time_linux";
 #import "std/date_parse"
 #import "std/byte_text_linux"
@@ -88,6 +89,12 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if SqliteOpenText(TextFromCString(argv[1]),*database,1) != SQLITE_OK { if database != null { unused SqliteClose(database) }; return Failure("Cannot open the private gallery database") }
     defer { unused SqliteClose(database) }
     if !Geo.Register(database) { return Failure("Cannot initialize local radius search") }
+    if name == "semantic" {
+        tensor: [4097]u8
+        if !Decode(json,"semantic_tensor",tensor[:]) || tensor[0] == 0 || !Semantic.Register(database,TextUntilNul(tensor[:])) { return Failure("Cannot read the local semantic search query") }
+        Search.AddSQL(*query," AND kind='photo' AND hidden=0 AND trashed=0 AND ")
+        Search.AddSQL(*query,Semantic.RankSQL); Search.AddSQL(*query," >= 0.20")
+    }
     unused SqliteBusyTimeout(database,10000)
     if SqliteExecText(database,"BEGIN") != SQLITE_OK { return Failure("Cannot open a gallery snapshot") }
     defer { unused SqliteExecText(database,"ROLLBACK") }
@@ -97,7 +104,9 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if !Prepare(database,count_sql,*query,*statement) { return Failure("Cannot prepare the gallery query") }
     if SqliteStep(statement) != SQLITE_ROW { unused SqliteFinalize(statement); return Failure("Cannot count gallery matches") }
     matches := SqliteColumnInt64(statement,0); unused SqliteFinalize(statement); statement = null
-    rows: Vec(u8); BuilderPrint(*rows,"SELECT id FROM photos WHERE % ORDER BY taken %,id LIMIT % OFFSET %",where,ifx order == "newest" then "DESC" else "ASC",limit,page)
+    rows: Vec(u8); BuilderPrint(*rows,"SELECT id FROM photos WHERE % ORDER BY ",where)
+    if name == "semantic" { BuilderPrint(*rows,"% DESC,",Semantic.RankSQL) }
+    BuilderPrint(*rows,"taken %,id LIMIT % OFFSET %",ifx order == "newest" then "DESC" else "ASC",limit,page)
     rows_sql := BuilderFinish(rows)
     if !Prepare(database,rows_sql,*query,*statement) { return Failure("Cannot prepare the gallery page") }
     defer { unused SqliteFinalize(statement) }

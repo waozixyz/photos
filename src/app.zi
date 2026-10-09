@@ -343,9 +343,9 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
     sidebar: float32 = ifx viewport.width < 800.0 then 126.0 else 166.0
     x := left + sidebar + 14.0; width := viewport.width - sidebar - 38.0
     Label(session, 2, "Photos", .{left, top + 2.0, sidebar, 36.0}, 28)
-    labels: [12]string = .{"Photos", "Albums", "Favorites", "Videos", "Hidden", "Trash", "Local sync", "Archive", "Uncategorized", "Memories", "Map", "Places"}
-    views: [12]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized", "memories", "map", "places"}
-    for i: 0..11 {
+    labels: [13]string = .{"Photos", "Albums", "Favorites", "Videos", "Hidden", "Trash", "Local sync", "Archive", "Uncategorized", "Memories", "Map", "Places", "Semantic search"}
+    views: [13]string = .{"photos", "albums", "favorites", "videos", "hidden", "trash", "sync", "archive", "uncategorized", "memories", "map", "places", "semantic"}
+    for i: 0..12 {
         if Action(session, cast(s32)(10 + i), labels[i], .{left, top + 58.0 + cast(float32)i * 47.0, sidebar, 39.0}) { Model.Navigate(views[i]) }
     }
     Label(session, 3, "ThinkPad only", .{left, viewport.y + viewport.height - 76.0, sidebar, 22.0}, 13)
@@ -473,6 +473,15 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
             body.y += 44.0; body.height -= 44.0
         }
         if !Model.CatalogView() {
+            if Model.view == "semantic" {
+                Label(session, 430, TextUntilNul(Model.semantic_status[:]), .{x, body.y, width, 26.0}, 14)
+                Label(session, 431, "Describe objects, scenes or colors · closest matches first", .{x, body.y + 30.0, width, 26.0}, 14)
+                if Action(session, 432, ifx Model.semantic_processing then "Pause indexing" else (ifx Model.semantic_enabled then "Resume indexing" else "Enable semantic search"), .{x, body.y + 64.0, 190.0, 36.0}, !Model.loading) { Model.Apply(ifx Model.semantic_processing then "semantic_pause" else "semantic_enable") }
+                if Action(session, 433, "Retry unavailable", .{x + 200.0, body.y + 64.0, 156.0, 36.0}, !Model.loading && Model.semantic_enabled && !Model.semantic_working) { Model.Apply("semantic_retry") }
+                if Action(session, 434, "Disable search", .{x + (ifx width >= 510.0 then 366.0 else 0.0), body.y + (ifx width >= 510.0 then 64.0 else 108.0), 138.0, 36.0}, !Model.loading && Model.semantic_enabled) { Model.Apply("semantic_disable") }
+                if width < 510.0 { body.y += 44.0; body.height -= 44.0 }
+                body.y += 108.0; body.height -= 108.0
+            }
             if Model.view == "map" {
                 if Action(session, 416, "Back to map", .{x, body.y, 138.0, 36.0}, !Model.loading) { Model.MapBack() }
                 Label(session, 417, "Photos in the selected location", .{x + 148.0, body.y + 7.0, width - 148.0, 26.0}, 14)
@@ -492,7 +501,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                 if Action(session, 321, "Search tips", .{x + 224.0, body.y, 112.0, 36.0}) { Model.CancelEditor(); Model.editor = "search_help" }
             }
             if !Model.selecting {
-                if Action(session, 60, ifx Model.sort == "newest" then "Newest first" else "Oldest first", .{x + width - 132.0, body.y, 132.0, 36.0}, !Model.loading) { Model.ToggleSort() }
+                if Action(session, 60, ifx Model.view == "semantic" then "Closest first" else (ifx Model.sort == "newest" then "Newest first" else "Oldest first"), .{x + width - 132.0, body.y, 132.0, 36.0}, !Model.loading && Model.view != "semantic") { Model.ToggleSort() }
             }
             body.y += 44.0; body.height -= 44.0
             if Model.album[0] != 0 && !Model.selecting {
@@ -584,7 +593,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         }
         if scrolling.opened { unused End(session) }
         if !Model.CatalogView() && cast(float32)Model.scroll + body.height + height * 2.0 >= feed_height { Model.More() }
-        if item_count == 0 { Label(session, 90, ifx Model.total == 0 then "Import a local folder to begin." else "No items match this view or search.", .{x + 20.0, body.y + 48.0, width - 40.0, 40.0}, 18) }
+        if item_count == 0 { Label(session, 90, ifx Model.view == "semantic" && Model.search[0] == 0 then "Describe a photo above, then choose Find." else (ifx Model.total == 0 then "Import a local folder to begin." else "No items match this view or search."), .{x + 20.0, body.y + 48.0, width - 40.0, 40.0}, 18) }
     }
     footer := viewport.y + viewport.height - 42.0
     Label(session, 6, TextUntilNul(Model.message[:]), .{x, footer, width - (ifx Model.view == "hidden" && Model.vault_unlocked then 342.0 else 182.0), 28.0}, 12)
