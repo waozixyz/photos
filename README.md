@@ -52,7 +52,11 @@ Your source photo stays untouched. Copies keep capture dates, captions, tags,
 locations, albums, favorites, Hidden/Archive state, transparency and color profiles;
 they are backed up and exported like other originals. Raster transformations run
 in a headless Ziran processor using installed GdkPixbuf codecs. Animated images
-are refused to avoid losing frames. Freeform cropping, drawing, advanced filters
+are refused to avoid losing frames. Custom crop opens the oriented, uncropped
+preview: drag over it to choose the area to keep, then Use crop to preview the
+result. Full image resets the selection; Cancel keeps the previous crop.
+Rotating or flipping after choosing a crop keeps the selection on the same
+part of the image. Drawing, advanced filters
 and RAW/HEIC editing remain unfinished. Repeating an identical edit reuses the
 existing copy and preserves any later changes to its metadata or Trash state.
 
@@ -64,8 +68,10 @@ and can be cancelled; one video copy processes at a time per library. Copies ret
 audio, capture dates, captions, tags, locations, albums and privacy settings and
 are included in encrypted ThinkPad backup and export. The Ziran helper composes
 codec commands without a shell; FFmpeg/FFprobe must be installed. Video copies are
-re-encoded and may trim a one-pixel edge to keep even dimensions. HDR editing,
-freeform cropping and animated editing previews remain unfinished.
+re-encoded and may trim a one-pixel edge to keep even dimensions. HDR editing
+and animated editing previews remain unfinished. Custom crop lets you drag an
+area to keep after rotation; the selection rotates with later rotation changes.
+Video crop edges align to even pixels for H.264 and may shift by one pixel.
 Hidden must remain unlocked through completion to save a hidden video. Stopping
 the library service stops its codec process; originals stay intact.
 
@@ -150,7 +156,7 @@ The remaining replacement work includes:
 
 - Mobile clients, permission-aware background camera backup and device space recovery.
 - On-device face grouping, semantic search, maps, curated memories and automatically curated trip/people albums.
-- Advanced photo editing, encrypted video streaming, animated editing previews, freeform video crops, Live Photo pairing and broader HEIC/RAW previews.
+- Advanced photo editing, encrypted video streaming, animated editing previews, Live Photo pairing and broader HEIC/RAW previews.
 - Private sharing, collaboration, public links, comments and account recovery.
   Any sharing design needs to honor the owner's ThinkPad-only sync restriction.
 - System authentication, Hidden password recovery and a deliberate deletion/retention policy.
@@ -186,6 +192,7 @@ build/venv/bin/pip install -r requirements.txt
 ziran lock
 make build test window-test
 make video-window-test video-portable-test
+make crop-window-test crop-portable-test
 make playback-window-test playback-portable-test
 PHOTOS_DAOCHI=/path/to/daochi make sync-test
 ```

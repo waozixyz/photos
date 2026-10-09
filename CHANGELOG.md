@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.12
+
+- Drag a custom crop area in the photo or video editor, preview it and save a separate copy while preserving the original.
+- Keep the selected crop area attached to the image when rotating or flipping, and restore it when cancelling another crop.
+- Keep image transparency and video audio, dates, captions, locations and album memberships in cropped copies and encrypted backup.
+
 ## 0.1.11
 
 - Watch local videos inside Photos with synchronized audio, pause/resume, seeking, playback speed and volume controls.

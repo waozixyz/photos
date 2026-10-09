@@ -149,17 +149,18 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         second.import_folders([movie.parents[1]])
         movie_id=digest_file(movie)
         second.edit(movie_id,'location','1, 2')
-        edited_id=video.save(second,movie_id,[1000,3000,90,1])
+        edited_id=video.save(second,movie_id,[1000,3000,90,6,2500,2500,5000,5000])
         assert peer.sync()==0 and client.sync()==0
         restored_video=Path(client.materialize(edited_id))
         assert digest_file(restored_video)==edited_id
         assert restored_video.read_bytes()==second.original(second.photo(edited_id)).read_bytes()
         info=video.probe(restored_video)
-        assert (info['width'],info['height'])==(80,80) and info['audio']
+        assert (info['width'],info['height'])==(40,60) and info['audio']
         assert first.details(edited_id)['location']=='1.0, 2.0'
         assert first.photo(edited_id)['albums']==second.photo(edited_id)['albums']
         assert json.loads(first.photo(edited_id)['metadata'])['photosVideoEdit']['parent']==movie_id
-        print('Isolated Daochi v6: signed photo/album/Trash/editor/smart-search baseline plus edited video/audio, metadata and full original restore round trip passed')
+        assert json.loads(first.photo(edited_id)['metadata'])['photosVideoEdit']['adjustments']==[1000,3000,90,6,2500,2500,5000,5000]
+        print('Isolated Daochi v6: signed photo/album/Trash/editor/smart-search baseline plus custom-cropped video/audio, metadata and full original restore round trip passed')
     finally:
         process.terminate()
         process.wait(timeout=10)

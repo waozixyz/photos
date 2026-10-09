@@ -1,5 +1,6 @@
 Transport :: #import "transport";
 Playback :: #import "playback";
+Crop :: #import "crop";
 playback_id: [65]u8;
 playback_path: [4097]u8;
 playback_started: bool;
@@ -51,6 +52,15 @@ video_job: [33]u8;
 video_poll: s64;
 edit_preview: [4097]u8;
 edit_session: [33]u8;
+edit_width: s32;
+edit_height: s32;
+image_crop: [4]s32 = .{0, 0, 10000, 10000};
+video_crop: [4]s32 = .{0, 0, 10000, 10000};
+crop_candidate: [4]s32 = .{0, 0, 10000, 10000};
+crop_previous: s32;
+crop_dragging: bool;
+crop_anchor_x: s32;
+crop_anchor_y: s32;
 memory_date: [11]u8;
 vault_token: [65]u8;
 vault_first: [1025]u8;
@@ -220,7 +230,10 @@ Tick :: () {
         Decode(json, 0, "error", message[:]); if message[0] != 0 { if appending { more_due = ticks + 300; appending = false }; return }
         total = Number(json, 0, "total"); matches = Number(json, 0, "count"); pending = Number(json, 0, "pending")
         Decode(json, 0, "status", message[:])
-        if FieldAt(json, 0, "edit_preview") >= 0 { Decode(json, 0, "edit_preview", edit_preview[:]); Decode(json, 0, "edit_session", edit_session[:]) }
+        if FieldAt(json, 0, "edit_preview") >= 0 {
+            Decode(json, 0, "edit_preview", edit_preview[:]); Decode(json, 0, "edit_session", edit_session[:])
+            edit_width = Number(json, 0, "edit_width"); edit_height = Number(json, 0, "edit_height")
+        }
         if FieldAt(json, 0, "video_duration") >= 0 {
             video_duration = Number(json, 0, "video_duration")
             if video_adjustments[1] == 0 { video_adjustments[1] = video_duration }
@@ -400,6 +413,7 @@ CancelEditor :: () { editor = ""; focused = false; Wipe(edit_value[:]); Wipe(vau
 ImageValue :: () -> string {
     out: Vec(u8); BuilderPrint(*out, "[")
     for i: 0..6 { if i > 0 { BuilderPrint(*out, ",") }; BuilderPrint(*out, "%", image_adjustments[i]) }
+    if image_adjustments[6] == 4 { for i: 0..3 { BuilderPrint(*out, ",%", image_crop[i]) } }
     BuilderPrint(*out, "]"); return BuilderFinish(out)
 }
 ImageRequest :: (action: string = "image_preview") {
@@ -409,17 +423,25 @@ ImageRequest :: (action: string = "image_preview") {
 BeginImageEdit :: () {
     if loading || selected < 0 || selected >= count { return }
     editor = "image"; focused = false; search_focused = false; edit_preview[0] = 0; edit_session[0] = 0
-    image_adjustments = .{0, 0, 0, 100, 100, 100, 0}; ImageRequest()
+    image_adjustments = .{0, 0, 0, 100, 100, 100, 0}; image_crop = .{0, 0, 10000, 10000}; ImageRequest()
 }
 ImageChange :: (index: s32, delta: s32) {
     if loading { return }
-    if index == 0 { image_adjustments[index] = (image_adjustments[index] + 90) % 360 }
+    if image_adjustments[6] == 4 {
+        if index == 0 { image_crop = Crop.CropRotate(image_crop) }
+        if index == 1 { image_crop[0] = 10000 - image_crop[0] - image_crop[2] }
+        if index == 2 { image_crop[1] = 10000 - image_crop[1] - image_crop[3] }
+    }
+    if index == 0 {
+        turn: s32 = ifx image_adjustments[1] != image_adjustments[2] then 270 else 90
+        image_adjustments[index] = (image_adjustments[index] + turn) % 360
+    }
     else if index == 1 || index == 2 { image_adjustments[index] = 1 - image_adjustments[index] }
-    else if index == 6 { image_adjustments[index] = (image_adjustments[index] + 1) % 4 }
+    else if index == 6 { image_adjustments[index] = ifx image_adjustments[index] == 4 then 0 else (image_adjustments[index] + 1) % 4 }
     else { image_adjustments[index] += delta; if image_adjustments[index] < 0 { image_adjustments[index] = 0 }; if image_adjustments[index] > 200 { image_adjustments[index] = 200 } }
     ImageRequest()
 }
-ImageReset :: () { if loading { return }; image_adjustments = .{0, 0, 0, 100, 100, 100, 0}; ImageRequest() }
+ImageReset :: () { if loading { return }; image_adjustments = .{0, 0, 0, 100, 100, 100, 0}; image_crop = .{0, 0, 10000, 10000}; ImageRequest() }
 ImageChanged :: () -> bool { return image_adjustments[0] != 0 || image_adjustments[1] != 0 || image_adjustments[2] != 0 || image_adjustments[3] != 100 || image_adjustments[4] != 100 || image_adjustments[5] != 100 || image_adjustments[6] != 0 }
 VideoMilliseconds :: (text: string) -> s32 {
     whole: s64; fraction: s32; digits: s32; decimal: bool; started: bool; ended: bool; seen: bool
@@ -435,7 +457,9 @@ VideoMilliseconds :: (text: string) -> s32 {
     result := whole * 1000 + fraction; return ifx result <= 604800000 then cast(s32)result else -1
 }
 VideoValue :: () -> string {
-    out: Vec(u8); BuilderPrint(*out, "[%,%,%,%]", video_adjustments[0], video_adjustments[1], video_adjustments[2], video_adjustments[3]); return BuilderFinish(out)
+    out: Vec(u8); BuilderPrint(*out, "[%,%,%,%", video_adjustments[0], video_adjustments[1], video_adjustments[2], video_adjustments[3])
+    if video_adjustments[3] == 6 { for i: 0..3 { BuilderPrint(*out, ",%", video_crop[i]) } }
+    BuilderPrint(*out, "]"); return BuilderFinish(out)
 }
 VideoRequest :: (action: string = "video_preview") {
     if loading { return }; value := VideoValue(); Apply(action, value); Release(value)
@@ -443,12 +467,15 @@ VideoRequest :: (action: string = "video_preview") {
 BeginVideoEdit :: () {
     if loading || video_job[0] != 0 || selected < 0 || selected >= count { return }
     editor = "video"; focused = false; search_focused = false; edit_preview[0] = 0; edit_session[0] = 0
-    video_duration = 0; video_adjustments = .{0,0,0,0}; Apply("video_begin")
+    video_duration = 0; video_adjustments = .{0,0,0,0}; video_crop = .{0, 0, 10000, 10000}; Apply("video_begin")
 }
 VideoChange :: (index: s32) {
     if loading { return }
-    if index == 2 { video_adjustments[2] = (video_adjustments[2] + 90) % 360 }
-    if index == 3 { video_adjustments[3] = (video_adjustments[3] + 1) % 6 }
+    if index == 2 {
+        if video_adjustments[3] == 6 { video_crop = Crop.CropRotate(video_crop) }
+        video_adjustments[2] = (video_adjustments[2] + 90) % 360
+    }
+    if index == 3 { video_adjustments[3] = ifx video_adjustments[3] == 6 then 0 else (video_adjustments[3] + 1) % 6 }
     VideoRequest()
 }
 VideoTrim :: () {
@@ -463,6 +490,28 @@ VideoTrim :: () {
     value := BuilderFinish(out); BeginEdit("video_trim", "Trim video", value, "Start, end in seconds (up to three decimals); minimum length is one second"); Release(value)
 }
 VideoChanged :: () -> bool { return video_adjustments[0] != 0 || video_adjustments[1] != video_duration || video_adjustments[2] != 0 || video_adjustments[3] != 0 }
+BeginCrop :: (video: bool) {
+    if loading { return }
+    crop_dragging = false; focused = false; search_focused = false
+    if video {
+        crop_previous = video_adjustments[3]; crop_candidate = video_crop; video_adjustments[3] = 0
+        editor = "video_crop"; VideoRequest()
+    } else {
+        crop_previous = image_adjustments[6]; crop_candidate = image_crop; image_adjustments[6] = 0
+        editor = "image_crop"; ImageRequest()
+    }
+}
+FinishCrop :: (apply: bool) {
+    if loading || (apply && !Crop.CropValid(crop_candidate[:])) { return }
+    crop_dragging = false
+    if editor == "video_crop" {
+        video_adjustments[3] = ifx apply then 6 else crop_previous
+        if apply { video_crop = crop_candidate }; editor = "video"; VideoRequest()
+    } else {
+        image_adjustments[6] = ifx apply then 4 else crop_previous
+        if apply { image_crop = crop_candidate }; editor = "image"; ImageRequest()
+    }
+}
 Find :: () { ClearSelection(); CancelEditor(); offset = 0; scroll = 0; selected = -1; Request() }
 ToggleSort :: () { if loading { return }; sort = ifx sort == "newest" then "oldest" else "newest"; Find() }
 AlbumFilter :: () { album_mode = ifx album_mode == "active" then "archived" else (ifx album_mode == "archived" then "empty" else "active"); Find() }

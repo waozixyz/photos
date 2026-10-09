@@ -129,8 +129,8 @@ with tempfile.TemporaryDirectory() as folder:
             click(1033,722) # 1.5x.
             click(309,770) # Mute.
             if not portable:
-                state = wait(lambda:snapshot() if snapshot().get('playback_speed')==150 else None,'Speed did not change')
-                assert state['playback_volume']==0, state
+                state = wait(lambda:snapshot() if snapshot().get('playback_speed')==150 and snapshot().get('playback_volume')==0 else None,
+                             'Speed or mute did not change')
             click(1060,178) # Expand.
             time.sleep(.3)
             expanded = shoot('playback-expanded.png')

@@ -23,11 +23,22 @@ def options(value):
         result = json.loads(value) if isinstance(value, str) else value
     except ValueError:
         raise LibraryError('Choose valid image adjustments') from None
-    if not isinstance(result, list) or len(result) != 7 or any(type(v) is not int for v in result):
+    if not isinstance(result, list) or len(result) not in (7, 11) or any(type(v) is not int for v in result):
         raise LibraryError('Choose valid image adjustments')
-    if result[0] not in (0, 90, 180, 270) or any(v not in (0, 1) for v in result[1:3]) or any(not 0 <= v <= 200 for v in result[3:6]) or result[6] not in (0, 1, 2, 3):
+    if result[0] not in (0, 90, 180, 270) or any(v not in (0, 1) for v in result[1:3]) or any(not 0 <= v <= 200 for v in result[3:6]) or result[6] not in range(5):
         raise LibraryError('Image adjustments are outside their supported range')
+    if result[6] == 4:
+        if len(result) != 11 or not crop_valid(result[7:]):
+            raise LibraryError('Choose a crop rectangle inside the photo')
+    elif len(result) != 7:
+        raise LibraryError('Custom crop coordinates require the custom crop tool')
     return result
+
+
+def crop_valid(values):
+    return (len(values) == 4 and all(type(v) is int for v in values) and
+            0 <= values[0] < 10000 and 0 <= values[1] < 10000 and
+            0 < values[2] <= 10000 - values[0] and 0 < values[3] <= 10000 - values[1])
 
 
 def render(library, photo_id, adjustments, preview=False):

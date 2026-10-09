@@ -71,6 +71,43 @@ class EditingTest(unittest.TestCase):
         finally:
             other.db.close()
 
+    def test_custom_crop_selects_oriented_pixels_and_retains_alpha_metadata_and_original(self):
+        path = self.source.with_name('gradient.png')
+        source = Image.new('RGBA', (12, 8))
+        for y in range(8):
+            for x in range(12):
+                source.putpixel((x, y), (x * 20, y * 30, (x + y) * 10, 80 + x * 10))
+        source.save(path)
+        original = path.read_bytes()
+        self.library.import_folders([path.parents[1]])
+        parent_id = digest_file(path)
+        self.library.edit(parent_id, 'caption', 'Custom crop caption')
+        for rotation in (0, 90, 180, 270):
+            values = [rotation, 1, 1, 100, 100, 100, 4, 2500, 2500, 5000, 5000]
+            copy_id = editing.save(self.library, parent_id, values)
+            expected = source.rotate(-rotation, expand=True).transpose(Image.Transpose.FLIP_LEFT_RIGHT).transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+            w, h = expected.size
+            expected = expected.crop((w // 4, h // 4, w // 4 + w // 2, h // 4 + h // 2))
+            copy = self.library.photo(copy_id)
+            with Image.open(self.library.original(copy)) as result:
+                self.assertEqual(result.size, expected.size)
+                self.assertEqual(result.tobytes(), expected.tobytes())
+            self.assertEqual(copy['caption'], 'Custom crop caption')
+            self.assertEqual(json.loads(copy['metadata'])['photosEdit']['adjustments'], values)
+            exported = Path(self.library.export(copy_id, self.root / 'crop-export'))
+            self.assertEqual(exported.read_bytes(), self.library.original(copy).read_bytes())
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(self.library.original(self.library.photo(parent_id)).read_bytes(), original)
+
+    def test_invalid_custom_crop_does_not_create_a_copy_or_preview(self):
+        for rectangle in ([0, 0, 0, 10000], [-1, 0, 5000, 5000], [7000, 0, 4000, 10000],
+                          [0, 9999, 10000, 2], [0, 0, True, 10000]):
+            with self.assertRaises(LibraryError):
+                editing.save(self.library, self.photo_id, [0, 0, 0, 100, 100, 100, 4, *rectangle])
+        with self.assertRaises(LibraryError):
+            editing.options([0, 0, 0, 100, 100, 100, 4])
+        self.assertEqual(self.library.query()['total'], 1)
+
     def test_preview_rpc_is_bounded_cancellable_and_invalid_edits_keep_library(self):
         token = ''
         for brightness in range(100, 151, 10):

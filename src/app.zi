@@ -1,6 +1,7 @@
 using UI :: #import "kryon/Widgets";
 using Model :: #import "model";
 Playback :: #import "playback";
+Crop :: #import "crop";
 #if #defined(POSIX_THREADS) {
     Window :: #import "desktop";
     HostTheme :: #import "kryon/SystemThemeHostLinux";
@@ -138,10 +139,11 @@ ImageEditor :: (session: Session, body: Rectangle) {
     Label(session, 250, "Edit photo", .{x, y, width, 32.0}, 24)
     step := (width - 24.0) / 4.0
     ready := !Model.loading
+    if Action(session, 364, "Custom crop", .{x + width - 150.0, y, 150.0, 36.0}, ready) { Model.BeginCrop(false) }
     if Action(session, 251, "Rotate right", .{x, y + 42.0, step, 36.0}, ready) { Model.ImageChange(0, 90) }
     if Action(session, 252, ifx Model.image_adjustments[1] == 0 then "Flip horizontal" else "Undo horizontal", .{x + step + 8.0, y + 42.0, step, 36.0}, ready) { Model.ImageChange(1, 1) }
     if Action(session, 253, ifx Model.image_adjustments[2] == 0 then "Flip vertical" else "Undo vertical", .{x + 2.0 * (step + 8.0), y + 42.0, step, 36.0}, ready) { Model.ImageChange(2, 1) }
-    crop_labels: [4]string = .{"Crop: original", "Crop: square", "Crop: 4:3", "Crop: 16:9"}
+    crop_labels: [5]string = .{"Crop: original", "Crop: square", "Crop: 4:3", "Crop: 16:9", "Crop: custom"}
     if Action(session, 254, crop_labels[Model.image_adjustments[6]], .{x + 3.0 * (step + 8.0), y + 42.0, step, 36.0}, ready) { Model.ImageChange(6, 1) }
     ImageAt(session, 5000000, TextUntilNul(Model.edit_preview[:]), "Preview of edited photo", .{x, y + 90.0, width, body.height - 288.0})
     captions: [3]string = .{"Brightness", "Contrast", "Saturation"}
@@ -165,18 +167,67 @@ VideoEditor :: (session: Session, body: Rectangle) {
     Label(session, 331, "Edit video", .{x, y, width, 32.0}, 24)
     if Action(session, 332, "Trim", .{x, y + 42.0, unit, 36.0}, ready) { Model.VideoTrim() }
     if Action(session, 333, "Rotate right", .{x + unit + 12.0, y + 42.0, unit, 36.0}, ready) { Model.VideoChange(2) }
-    crops: [6]string = .{"Crop: original", "Crop: square", "Crop: 4:3", "Crop: 16:9", "Crop: 9:16", "Crop: 3:4"}
+    if Action(session, 365, "Custom crop", .{x + width - 150.0, y, 150.0, 36.0}, ready) { Model.BeginCrop(true) }
+    crops: [7]string = .{"Crop: original", "Crop: square", "Crop: 4:3", "Crop: 16:9", "Crop: 9:16", "Crop: 3:4", "Crop: custom"}
     if Action(session, 334, crops[Model.video_adjustments[3]], .{x + 2.0 * (unit + 12.0), y + 42.0, unit, 36.0}, ready) { Model.VideoChange(3) }
     ImageAt(session, 5100000, TextUntilNul(Model.edit_preview[:]), "Edited video frame at trim start", .{x, y + 90.0, width, body.height - 254.0})
     text: Vec(u8); BuilderPrint(*text, "% to % seconds · % seconds · rotation % degrees", cast(float64)Model.video_adjustments[0]/1000.0, cast(float64)Model.video_adjustments[1]/1000.0, cast(float64)(Model.video_adjustments[1]-Model.video_adjustments[0])/1000.0, Model.video_adjustments[2])
     value := BuilderFinish(text); Label(session, 335, value, .{x, y + body.height - 152.0, width, 26.0}, 14); Model.Release(value)
-    Label(session, 336, "Frame preview at trim start. Crops are centered.", .{x, y + body.height - 118.0, width, 26.0}, 14)
+    Label(session, 336, "Frame preview at trim start; use Custom crop to choose an area.", .{x, y + body.height - 118.0, width, 26.0}, 14)
     Label(session, 337, "Save a separate MP4 copy with audio; your original stays intact.", .{x, y + body.height - 86.0, width, 26.0}, 14)
-    if Action(session, 338, "Reset", .{x, y + body.height - 48.0, unit, 38.0}, ready) { Model.video_adjustments = .{0, Model.video_duration, 0, 0}; Model.VideoRequest() }
+    if Action(session, 338, "Reset", .{x, y + body.height - 48.0, unit, 38.0}, ready) { Model.video_adjustments = .{0, Model.video_duration, 0, 0}; Model.video_crop = .{0, 0, 10000, 10000}; Model.VideoRequest() }
     if Action(session, 339, "Save copy", .{x + unit + 12.0, y + body.height - 48.0, unit, 38.0}, ready && Model.VideoChanged()) { Model.VideoRequest("video_save") }
     if Action(session, 340, "Cancel", .{x + 2.0 * (unit + 12.0), y + body.height - 48.0, unit, 38.0}, !Model.loading) {
         if Model.video_job[0] != 0 { Model.Apply("video_cancel") } else { Model.Apply("image_close") }
     }
+}
+
+CropShade :: (session: Session, key: u64, bounds: Rectangle) {
+    if bounds.width <= 0.0 || bounds.height <= 0.0 { return }
+    box: BoxProps; box.key = key; box.bounds = bounds; box.fill = Color.{0, 0, 0, 150}; Box(session, box)
+}
+CropEditor :: (session: Session, body: Rectangle) {
+    x := body.x; y := body.y; width := body.width
+    Label(session, 366, "Custom crop", .{x, y, width, 34.0}, 24)
+    Label(session, 367, "Drag across the preview to choose the area to keep.", .{x, y + 44.0, width, 30.0}, 15)
+    canvas := Rectangle.{x, y + 90.0, width, body.height - 164.0}
+    if Model.edit_width > 0 && Model.edit_height > 0 && canvas.height > 0.0 {
+        scale := canvas.width / cast(float32)Model.edit_width
+        if canvas.height / cast(float32)Model.edit_height < scale { scale = canvas.height / cast(float32)Model.edit_height }
+        shown := Rectangle.{canvas.x + (canvas.width - cast(float32)Model.edit_width * scale) / 2.0,
+            canvas.y + (canvas.height - cast(float32)Model.edit_height * scale) / 2.0,
+            cast(float32)Model.edit_width * scale, cast(float32)Model.edit_height * scale}
+        ImageAt(session, 5200000, TextUntilNul(Model.edit_preview[:]), "Choose a custom crop", shown)
+        pointer := Input.PointerSample(session)
+        if !Model.loading {
+            px := Crop.CropCoordinate(pointer.x, shown.x, shown.width); py := Crop.CropCoordinate(pointer.y, shown.y, shown.height)
+            if pointer.pressed && Input.PointInBounds(pointer.x, pointer.y, shown) {
+                Model.crop_dragging = true; Model.crop_anchor_x = px; Model.crop_anchor_y = py
+            }
+            if Model.crop_dragging && (pointer.down || pointer.released) {
+                left := ifx px < Model.crop_anchor_x then px else Model.crop_anchor_x
+                top := ifx py < Model.crop_anchor_y then py else Model.crop_anchor_y
+                cw := px - Model.crop_anchor_x; ch := py - Model.crop_anchor_y
+                if cw < 0 { cw = -cw }; if ch < 0 { ch = -ch }
+                if cw > 0 && ch > 0 { Model.crop_candidate = .{left, top, cw, ch} }
+            }
+            if pointer.released || !pointer.down { Model.crop_dragging = false }
+        }
+        left := shown.x + shown.width * cast(float32)Model.crop_candidate[0] / 10000.0
+        top := shown.y + shown.height * cast(float32)Model.crop_candidate[1] / 10000.0
+        cw := shown.width * cast(float32)Model.crop_candidate[2] / 10000.0
+        ch := shown.height * cast(float32)Model.crop_candidate[3] / 10000.0
+        CropShade(session, 368, .{shown.x, shown.y, shown.width, top - shown.y})
+        CropShade(session, 369, .{shown.x, top + ch, shown.width, shown.y + shown.height - top - ch})
+        CropShade(session, 370, .{shown.x, top, left - shown.x, ch})
+        CropShade(session, 371, .{left + cw, top, shown.x + shown.width - left - cw, ch})
+        border: BoxProps; border.key = 372; border.bounds = .{left, top, cw, ch}; border.border = Color.{255, 255, 255, 255}; Box(session, border)
+        Record(373, "Crop area", shown, !Model.loading)
+    }
+    step := (width - 24.0) / 3.0; by := y + body.height - 56.0
+    if Action(session, 374, "Use crop", .{x, by, step, 38.0}, !Model.loading && Crop.CropValid(Model.crop_candidate[:])) { Model.FinishCrop(true) }
+    if Action(session, 375, "Full image", .{x + step + 12.0, by, step, 38.0}, !Model.loading) { Model.crop_candidate = .{0, 0, 10000, 10000} }
+    if Action(session, 376, "Cancel", .{x + 2.0 * (step + 12.0), by, step, 38.0}, !Model.loading) { Model.FinishCrop(false) }
 }
 
 PlaybackTime :: (value: s64) -> string {
@@ -228,6 +279,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if key == Input.KeyRight { Model.PlaybackSeek(Playback.Position() + 5000) }
         if Model.playback_expanded { PlaybackViewer(session, .{viewport.x + 12.0, viewport.y + 12.0, viewport.width - 24.0, viewport.height - 24.0}); return 0 }
     }
+    if (Model.editor == "image_crop" || Model.editor == "video_crop") && key == Input.KeyEscape { Model.FinishCrop(false) }
     if !Model.focused && !Model.search_focused && Model.editor == "" {
         if key == Input.KeyEscape { if Model.selected >= 0 { Model.selected = -1 } else { Model.ClearSelection() } }
         if Model.selected >= 0 && !Model.loading {
@@ -256,7 +308,9 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, 44, "Sync", .{x + width - 78.0, y, 78.0, 39.0}) { Model.Request("sync") }
     }
     body := Rectangle.{x, y + 52.0, width, viewport.height - 216.0}
-    if Model.editor == "playback" {
+    if Model.editor == "image_crop" || Model.editor == "video_crop" {
+        CropEditor(session, body)
+    } else if Model.editor == "playback" {
         PlaybackViewer(session, body)
     } else if Model.editor == "video" {
         VideoEditor(session, body)

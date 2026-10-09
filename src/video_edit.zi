@@ -4,6 +4,7 @@
 #import "std/text"
 #import "std/text_buffer"
 #import "std/c_string"
+#import "crop"
 c :: #system_library "libc";
 Pointer :: struct { value: *u8 }
 Exec :: (path: *u8, args: *Pointer) -> s32 #foreign c "execvp";
@@ -24,18 +25,22 @@ Seconds :: (value: s32) -> string {
 main :: (argc: s32, argv: **u8) -> s32 {
     parent := Parent()
     if ParentDeath(1, 9, 0, 0, 0) != 0 || Parent() != parent { return 3 }
-    if argc != 8 { print("Expected source, output, start/end milliseconds, rotation, crop and preview mode\n"); return 2 }
+    if argc != 8 && argc != 12 { print("Expected source, output, video adjustments and preview mode\n"); return 2 }
     source := TextFromCString(argv[1]); destination := TextFromCString(argv[2])
     if source.count == 0 || source[0] != 47 || destination.count == 0 || destination[0] != 47 || source == destination { return 2 }
     start := Integer(TextFromCString(argv[3])); end := Integer(TextFromCString(argv[4]))
-    rotation := Integer(TextFromCString(argv[5])); crop := Integer(TextFromCString(argv[6])); preview := Integer(TextFromCString(argv[7]))
-    if start < 0 || end < 0 || end - start < 1000 || (rotation != 0 && rotation != 90 && rotation != 180 && rotation != 270) || crop < 0 || crop > 5 || preview < 0 || preview > 1 { return 2 }
+    rotation := Integer(TextFromCString(argv[5])); crop := Integer(TextFromCString(argv[6])); preview := Integer(TextFromCString(argv[argc - 1]))
+    custom: [4]s32
+    if argc == 12 { for i: 0..3 { custom[i] = Integer(TextFromCString(argv[i + 7])) } }
+    if start < 0 || end < 0 || end - start < 1000 || (rotation != 0 && rotation != 90 && rotation != 180 && rotation != 270) || crop < 0 || crop > 6 || preview < 0 || preview > 1 ||
+        (crop == 6 && (argc != 12 || !CropValid(custom[:]))) || (crop != 6 && argc != 8) { return 2 }
     filter: Vec(u8)
     if rotation == 90 { BuilderPrint(*filter, "transpose=clock,") }
     if rotation == 180 { BuilderPrint(*filter, "hflip,vflip,") }
     if rotation == 270 { BuilderPrint(*filter, "transpose=cclock,") }
     ratios: [6]string = .{"1", "1", "4/3", "16/9", "9/16", "3/4"}
-    if crop > 0 { BuilderPrint(*filter, "crop=trunc(min(iw\\,ih*(%))/2)*2:trunc(min(ih\\,iw/(%))/2)*2,", ratios[crop], ratios[crop]) }
+    if crop > 0 && crop < 6 { BuilderPrint(*filter, "crop=trunc(min(iw\\,ih*(%))/2)*2:trunc(min(ih\\,iw/(%))/2)*2,", ratios[crop], ratios[crop]) }
+    if crop == 6 { BuilderPrint(*filter, "crop=trunc(iw*%/10000/2)*2:trunc(ih*%/10000/2)*2:trunc(iw*%/10000/2)*2:trunc(ih*%/10000/2)*2,", custom[2], custom[3], custom[0], custom[1]) }
     // H.264 4:2:0 needs even dimensions. A maximum one-pixel edge is trimmed.
     BuilderPrint(*filter, "crop=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1")
     if preview == 1 { BuilderPrint(*filter, ",scale=1280:1280:force_original_aspect_ratio=decrease") }

@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from PIL import Image
 
 from . import editing
 from .library import Library, LibraryError, digest_file, packed
@@ -120,11 +121,16 @@ def options(value, duration):
         value = json.loads(value) if isinstance(value, str) else value
     except ValueError:
         raise LibraryError('Choose valid video adjustments') from None
-    if not isinstance(value, list) or len(value) != 4 or any(type(v) is not int for v in value):
+    if not isinstance(value, list) or len(value) not in (4, 8) or any(type(v) is not int for v in value):
         raise LibraryError('Choose valid video adjustments')
-    start, end, rotation, crop = value
-    if not 0 <= start < end <= duration or end - start < 1000 or rotation not in (0, 90, 180, 270) or crop not in range(6):
+    start, end, rotation, crop = value[:4]
+    if not 0 <= start < end <= duration or end - start < 1000 or rotation not in (0, 90, 180, 270) or crop not in range(7):
         raise LibraryError('Choose a trim of at least one second within the video and valid rotation/crop')
+    if crop == 6:
+        if len(value) != 8 or not editing.crop_valid(value[4:]):
+            raise LibraryError('Choose a crop rectangle inside the video')
+    elif len(value) != 4:
+        raise LibraryError('Custom crop coordinates require the custom crop tool')
     return value
 
 
@@ -191,7 +197,9 @@ def preview(library, photo_id, value, token=''):
         for old in sorted(folder.glob('*.png'), key=lambda p: p.stat().st_mtime, reverse=True)[2:]:
             old.unlink()
         folder.touch()
-        return dict(edit_preview=str(path), edit_session=token, video_duration=info['duration_ms'])
+        with Image.open(path) as frame:
+            width, height = frame.size
+        return dict(edit_preview=str(path), edit_session=token, video_duration=info['duration_ms'], edit_width=width, edit_height=height)
     finally:
         output.unlink(missing_ok=True)
 

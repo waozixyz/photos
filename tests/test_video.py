@@ -127,6 +127,30 @@ class VideoTest(unittest.TestCase):
         finally:
             restored.db.close()
 
+    def test_custom_video_crop_after_rotation_keeps_audio_metadata_and_original(self):
+        self.library.edit(self.photo_id, 'caption', 'Cropped video')
+        self.library.edit(self.photo_id, 'location', '-25.3, -57.6')
+        values = [1000, 3000, 90, 6, 2500, 2500, 5000, 5000]
+        preview = video.preview(self.library, self.photo_id, values)
+        self.assertGreater(preview['edit_width'], 0)
+        self.assertGreater(preview['edit_height'], 0)
+        copy_id = video.save(self.library, self.photo_id, values)
+        copy = self.library.photo(copy_id)
+        info = video.probe(self.library.original(copy))
+        self.assertEqual((info['width'], info['height']), (40, 60))
+        self.assertTrue(info['audio'])
+        self.assertLess(abs(info['duration_ms'] - 2000), 150)
+        self.assertEqual(copy['caption'], 'Cropped video')
+        self.assertEqual(self.library.details(copy_id)['location'], '-25.3, -57.6')
+        self.assertEqual(json.loads(copy['metadata'])['photosVideoEdit']['adjustments'], values)
+        self.assertEqual(self.source.read_bytes(), self.original)
+        self.assertEqual(self.library.original(self.library.photo(self.photo_id)).read_bytes(), self.original)
+        for rectangle in ([0, 0, 0, 10000], [-1, 0, 5000, 5000], [5000, 0, 5001, 10000],
+                          [0, 0, 10000, False]):
+            with self.assertRaises(LibraryError):
+                video.save(self.library, self.photo_id, [0, 4000, 0, 6, *rectangle])
+        self.assertEqual(self.library.query()['total'], 2)
+
     def test_bounded_frame_previews_and_cancel_retain_original(self):
         begin = process(dict(action='video_begin',id=self.photo_id),self.config)
         self.assertEqual(begin['video_duration'],4000)

@@ -1,0 +1,26 @@
+// Crop coordinates describe the displayed, oriented image in ten-thousandths.
+// Pixel selection and UI pointer selection use the same bounded rectangle.
+CropPixels :: struct { x: s32; y: s32; width: s32; height: s32 }
+CropValid :: (values: []s32) -> bool {
+    return values.count == 4 && values[0] >= 0 && values[1] >= 0 &&
+        values[2] > 0 && values[3] > 0 && values[0] <= 10000 && values[1] <= 10000 &&
+        values[2] <= 10000 - values[0] && values[3] <= 10000 - values[1]
+}
+CropToPixels :: (width: s32, height: s32, values: []s32) -> CropPixels {
+    result: CropPixels
+    if width < 1 || height < 1 || !CropValid(values) { return result }
+    result.x = cast(s32)(cast(s64)width * values[0] / 10000)
+    result.y = cast(s32)(cast(s64)height * values[1] / 10000)
+    result.width = cast(s32)(cast(s64)width * values[2] / 10000)
+    result.height = cast(s32)(cast(s64)height * values[3] / 10000)
+    if result.width < 1 { result.width = 1 }; if result.height < 1 { result.height = 1 }
+    return result
+}
+CropCoordinate :: (position: float32, origin: float32, size: float32) -> s32 {
+    if size <= 0.0 || position <= origin { return 0 }
+    if position >= origin + size { return 10000 }
+    return cast(s32)((position - origin) / size * 10000.0)
+}
+CropRotate :: (values: [4]s32) -> [4]s32 {
+    return .{10000 - values[1] - values[3], values[0], values[3], values[2]}
+}
