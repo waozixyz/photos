@@ -133,7 +133,10 @@ with tempfile.TemporaryDirectory() as temporary:
             time.sleep(.5)
         def locked():
             if not portable:
-                current = state(); assert current['app_locked'] and current['nodes'] == 0
+                def rendered():
+                    current = state()
+                    return current if current.get('app_locked') and current.get('nodes') == 0 else None
+                current = wait(rendered, 'Recovery response did not relock the rendered gallery')
                 assert not {'Photos','Albums','Hidden','Import','Export'}.intersection(c['label'] for c in current['controls'])
                 for secret in [proof,new_app,new_hidden]: assert secret not in json.dumps(current)
         try:
