@@ -30,7 +30,9 @@ def port():
 
 
 def emulator_port():
-    for number in range(5554, 5586, 2):
+    # Standard emulator ports are automatically scanned by every ADB server.
+    # Explicit ports outside that range keep this guest private to our server.
+    for number in range(20000, 20128, 2):
         peers = [socket.socket(), socket.socket()]
         try:
             for peer, value in zip(peers, (number, number + 1)):
@@ -114,6 +116,8 @@ def main():
     adb = sdk / "platform-tools/adb"
     OUTPUT.mkdir(parents=True, exist_ok=True)
     RECEIPT.mkdir(parents=True, exist_ok=True)
+    for name in ("probe-logcat.txt", "logcat.txt", "transport-diagnostic.json"):
+        (OUTPUT / name).write_text("")
     report = dict(passed=False, deployment=False, private_display=True, synthetic_media=True)
     lock_only = os.environ.get("PHOTOS_ANDROID_STAGE") == "lock"
     if os.environ.get("PHOTOS_ANDROID_STAGE", "all") not in {"all", "lock"}:
@@ -121,11 +125,12 @@ def main():
     with tempfile.TemporaryDirectory(prefix=".runtime-", dir=OUTPUT) as temporary:
         root = Path(temporary)
         server_port, console_port = port(), emulator_port()
-        serial = "127.0.0.1:" + str(console_port + 1)
+        serial = "emulator-" + str(console_port)
         env = dict(os.environ, ANDROID_USER_HOME=str(root / "android"),
                    ANDROID_EMULATOR_HOME=str(root / "android"), ANDROID_AVD_HOME=str(root / "avd"),
                    ANDROID_SDK_ROOT=str(sdk), ANDROID_HOME=str(sdk),
                    ANDROID_ADB_SERVER_PORT=str(server_port), ADB_SERVER_SOCKET="tcp:127.0.0.1:" + str(server_port),
+                   ADB_LOCAL_TRANSPORT_MAX_PORT="0", ADB_MDNS_AUTO_CONNECT="",
                    YUE_DESKTOP_RECOVERY="0", QT_QPA_PLATFORM="offscreen")
         (root / "android").mkdir()
         (root / "avd").mkdir()
@@ -142,7 +147,7 @@ def main():
                        capture_output=True, text=True, check=True, timeout=90)
         with (root / "avd/photos_gallery.avd/config.ini").open("a") as configuration:
             configuration.write("\nhw.lcd.width=480\nhw.lcd.height=960\nhw.lcd.density=160\n")
-        display = server = emulator = None
+        display = server = emulator = diagnostic = None
         with (OUTPUT / "emulator.log").open("w") as log:
             def command(*args, check=True, binary=False, data=None, timeout=30):
                 if server is None or server.poll() is not None:
@@ -152,7 +157,10 @@ def main():
 
             def device(*args, **kwargs):
                 if args and args[0] == "shell":
-                    args = ("shell", shlex.join(args[1:]))
+                    # Fixed commands do not use terminal input. Only provider
+                    # writes receive the synthetic bytes supplied by the test.
+                    options = ("-T",) if kwargs.get("data") is not None else ("-n", "-T")
+                    args = ("shell", *options, shlex.join(args[1:]))
                 result = command("-s", serial, *args, **kwargs)
                 if kwargs.get("check", True) and not kwargs.get("binary", False):
                     if "Error while accessing provider" in result.stderr or "[ERROR]" in result.stdout:
@@ -161,13 +169,26 @@ def main():
 
             def stage(name):
                 print("Checking " + name + " gallery access", flush=True)
-                result = device("shell", "am", "instrument", "-w", "-e", "stage", name,
-                                PACKAGE + ".test/xyz.waozi.photos.PhotosGalleryProbe", timeout=120)
+                try:
+                    result = device("shell", "am", "instrument", "-w", "-e", "stage", name,
+                                    PACKAGE + ".test/xyz.waozi.photos.PhotosGalleryProbe", timeout=120)
+                except subprocess.TimeoutExpired as error:
+                    partial = error.stdout or b""
+                    if isinstance(partial, bytes):
+                        partial = partial.decode(errors="replace")
+                    (OUTPUT / (name + "-instrumentation.log")).write_text(partial + "\n" + str(error) + "\n")
+                    raise
                 (OUTPUT / (name + "-instrumentation.log")).write_text(result.stdout + result.stderr)
                 if "INSTRUMENTATION_CODE: -1" not in result.stdout or "INSTRUMENTATION_RESULT: error=" in result.stdout:
-                    picture = device("exec-out", "run-as", PACKAGE, "cat", "files/probe-failure.png", binary=True, check=False).stdout
-                    if picture.startswith(b"\x89PNG"):
-                        (OUTPUT / "probe-failure.png").write_bytes(picture)
+                    # A failed secure-window check can leave screenshot/ADB
+                    # diagnostics unavailable. Preserve the primary failure.
+                    try:
+                        picture = device("exec-out", "run-as", PACKAGE, "cat", "files/probe-failure.png",
+                                         binary=True, check=False, timeout=5).stdout
+                        if picture.startswith(b"\x89PNG"):
+                            (OUTPUT / "probe-failure.png").write_bytes(picture)
+                    except (subprocess.SubprocessError, OSError) as diagnostic:
+                        (OUTPUT / (name + "-diagnostic.log")).write_text(str(diagnostic) + "\n")
                     raise RuntimeError(name + " checks failed: " + result.stdout)
                 report[name] = json.loads(device("exec-out", "run-as", PACKAGE, "cat", "files/" + name + "-checks.json").stdout)
                 names = ["locked"] if name == "lock" else [name] if name != "full" else ["gallery", "albums", "viewer", "viewer-zoom", "share", "videos", "refreshed"]
@@ -196,31 +217,70 @@ def main():
                 env["DISPLAY"] = ":" + number
                 server = subprocess.Popen([str(adb), "-L", "tcp:" + str(server_port), "nodaemon", "server"], env=env, stdout=log, stderr=log)
                 time.sleep(.5)
-                emulator = subprocess.Popen([str(sdk / "emulator/emulator"), "-avd", "photos_gallery", "-port", str(console_port),
+                emulator = subprocess.Popen([str(sdk / "emulator/emulator"), "-avd", "photos_gallery",
+                                             "-ports", str(console_port) + "," + str(console_port + 1),
+                                             "-show-kernel",
                                              "-no-window", "-no-snapshot", "-no-audio", "-no-boot-anim", "-no-metrics", "-gpu", "software",
-                                             "-cores", "2", "-memory", "2048", "-accel", "on", "-feature", "-Vulkan"],
+                                             "-cores", "4", "-memory", "4096", "-accel", "on", "-feature", "-Vulkan"],
                                             env=env, stdout=log, stderr=log)
                 deadline = time.monotonic() + 180
                 while time.monotonic() < deadline:
                     if emulator.poll() is not None:
                         raise RuntimeError("Disposable emulator stopped")
-                    command("connect", serial, check=False)
-                    if device("shell", "getprop", "sys.boot_completed", check=False).stdout.strip() == "1":
+                    try:
+                        completed = device("shell", "getprop", "sys.boot_completed", check=False,
+                                           timeout=min(10, max(1, deadline - time.monotonic())))
+                    except subprocess.TimeoutExpired:
+                        print("Owned emulator transport is still initializing", flush=True)
+                        continue
+                    if completed.stdout.strip() == "1":
                         break
                     time.sleep(1)
                 else:
                     raise RuntimeError("Disposable emulator did not boot")
                 if device("shell", "getprop", "ro.kernel.qemu").stdout.strip() != "1" or device("shell", "getprop", "ro.boot.qemu.avd_name").stdout.strip() != "photos_gallery":
                     raise RuntimeError("Refusing an emulator not owned by this test")
+                diagnostic_log = (OUTPUT / "probe-logcat.txt").open("w")
+                diagnostic = subprocess.Popen([str(adb), "-P", str(server_port), "-s", serial,
+                    "logcat", "-v", "threadtime", "PhotosProbe:I", "PhotosLock:D",
+                    "PhotosActivity:I", "AndroidRuntime:E", "MediaProvider:I",
+                    "ModernMediaScanner:W", "ActivityManager:E", "*:S"], env=env,
+                    stdout=diagnostic_log, stderr=diagnostic_log)
+                diagnostic_log.close()
                 device("shell", "wm", "dismiss-keyguard")
-                deadline = time.monotonic() + 45
+                # A fresh Android image reports boot completion before the
+                # provider finishes its initial database recovery and scan.
+                # A bounded readiness query may time out during that setup;
+                # retry within the same allowance as the initial cold boot.
+                deadline = time.monotonic() + 180
+                ready_text = "MediaStore is still initializing"
                 while time.monotonic() < deadline:
-                    ready = device("shell", "content", "query", "--uri", "content://media/external/file", "--projection", "_id", check=False)
+                    try:
+                        ready = device("shell", "content", "query", "--uri", "content://media/external/file",
+                                       "--projection", "_id", check=False,
+                                       timeout=min(30, max(1, deadline - time.monotonic())))
+                        ready_text = ready.stdout + ready.stderr
+                    except subprocess.TimeoutExpired as error:
+                        ready_text = "MediaStore readiness query timed out during cold-boot setup"
+                        print(ready_text, flush=True)
+                        diagnostic_path = OUTPUT / "transport-diagnostic.json"
+                        if not diagnostic_path.read_text():
+                            # Compare the noninteractive raw command service
+                            # while this server and guest are still supervised.
+                            transport = dict(shell_stdout=(error.stdout or b"").decode(errors="replace"),
+                                             shell_stderr=(error.stderr or b"").decode(errors="replace"))
+                            try:
+                                raw = device("exec-out", "getprop", "sys.boot_completed", timeout=5)
+                                transport.update(exec_status=raw.returncode, exec_stdout=raw.stdout)
+                            except (subprocess.SubprocessError, OSError) as failure:
+                                transport["exec_error"] = str(failure)
+                            diagnostic_path.write_text(json.dumps(transport, indent=2) + "\n")
+                        continue
                     if "No result found" in ready.stdout or "Row:" in ready.stdout:
                         break
                     time.sleep(1)
                 else:
-                    raise RuntimeError("Synthetic MediaStore provider did not become ready: " + ready.stdout + ready.stderr)
+                    raise RuntimeError("Synthetic MediaStore provider did not become ready: " + ready_text)
                 print("Owned emulator ready; seeding synthetic provider media", flush=True)
                 seeds = {}
                 for i in range(1 if lock_only else 35):
@@ -244,8 +304,11 @@ def main():
                                  "--bind", "relative_path:s:Pictures/PhotosFixture", "--bind", "is_pending:i:1")
                     uri = inserted_uri("content://media/external_primary/images/media")
                     device("shell", "content", "write", "--uri", uri, binary=True, data=image.read_bytes())
-                    device("shell", "content", "update", "--uri", uri, "--bind", "is_pending:i:0", "--bind", "datetaken:l:" + str(1577836800000 + i * 86400000))
+                    # Publication scans the real file. Capture time comes from
+                    # its EXIF; DATE_TAKEN is a read-only provider column.
+                    device("shell", "content", "update", "--uri", uri, "--bind", "is_pending:i:0")
                     seeds[uri] = hashlib.sha256(image.read_bytes()).hexdigest()
+                    print("Published synthetic image " + str(i + 1), flush=True)
                 # MediaStore derives capture time from EXIF during its scanner
                 # pass. DATE_TAKEN is read-only, so wait for that publication
                 # instead of treating a CLI update as the metadata fixture.
@@ -259,14 +322,16 @@ def main():
                 else:
                     raise RuntimeError("Synthetic EXIF capture date was not indexed: " + dates)
                 video = root / "seed.mp4"
-                subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=320x240:d=1",
-                                "-c:v", "libx264", "-pix_fmt", "yuv420p", str(video)], env=env, check=True, timeout=30)
+                subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-filter_threads", "1",
+                                "-f", "lavfi", "-i", "color=c=blue:s=320x240:d=1",
+                                "-c:v", "libx264", "-threads", "1", "-pix_fmt", "yuv420p", str(video)],
+                               env=env, check=True, timeout=30)
                 device("shell", "content", "insert", "--uri", "content://media/external_primary/video/media",
                              "--bind", "_display_name:s:video.mp4", "--bind", "mime_type:s:video/mp4",
                              "--bind", "relative_path:s:Movies/PhotosFixtureVideo", "--bind", "is_pending:i:1")
                 uri = inserted_uri("content://media/external_primary/video/media")
                 device("shell", "content", "write", "--uri", uri, binary=True, data=video.read_bytes())
-                device("shell", "content", "update", "--uri", uri, "--bind", "is_pending:i:0", "--bind", "datetaken:l:1500000000000")
+                device("shell", "content", "update", "--uri", uri, "--bind", "is_pending:i:0")
                 seeds[uri] = hashlib.sha256(video.read_bytes()).hexdigest()
                 for relative in ("debug/app-debug.apk", "androidTest/debug/app-debug-androidTest.apk"):
                     device("install", str(ROOT / "droid/app/build/outputs/apk" / relative), timeout=90)
@@ -325,10 +390,11 @@ def main():
                         pass
                 raise
             finally:
+                stop(diagnostic)
                 stop(emulator)
                 stop(server)
                 stop(display)
-                report["owned_processes_stopped"] = all(p is None or p.poll() is not None for p in (emulator, server, display))
+                report["owned_processes_stopped"] = all(p is None or p.poll() is not None for p in (emulator, server, display, diagnostic))
                 (RECEIPT / "emulator.json").write_text(json.dumps(report, indent=2) + "\n")
     print("Android native gallery, folders, viewer, permissions, privacy and original preservation passed")
 

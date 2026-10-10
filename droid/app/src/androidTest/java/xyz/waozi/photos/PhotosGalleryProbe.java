@@ -33,6 +33,7 @@ public final class PhotosGalleryProbe extends Instrumentation {
     private void require(boolean passed, String name) throws Exception {
         if (!passed) throw new AssertionError(name);
         checks.put(name, true);
+        android.util.Log.i("PhotosProbe", stage + ": " + name);
     }
 
     private JSONObject state() throws Exception {
@@ -59,9 +60,29 @@ public final class PhotosGalleryProbe extends Instrumentation {
         throw new AssertionError("resumed gallery did not reach its expected provider total");
     }
 
+    private JSONObject viewerAt(String expected) throws Exception {
+        // Provider publication precedes the native frame's polling and view
+        // transition. Send the next gesture only after Photos observes it.
+        long deadline = SystemClock.uptimeMillis() + 15000;
+        while (SystemClock.uptimeMillis() < deadline) {
+            JSONObject value = state();
+            if (value.optInt("loading") == 0 && value.optString("selected").equals(expected)
+                    && value.getJSONArray("photos").length() == 1
+                    && new String(activity.nativeViewerName, StandardCharsets.UTF_8)
+                        .equals(value.getJSONArray("photos").getJSONObject(0).getString("name"))) {
+                return value;
+            }
+            SystemClock.sleep(100);
+        }
+        throw new AssertionError("native viewer did not reach selected original " + expected);
+    }
+
     private JSONObject action(String action, String id, int page) throws Exception {
         JSONObject request = new JSONObject().put("action", action).put("id", id).put("view", id).put("page", page);
         activity.galleryAction(request.toString());
+        // Security actions are posted to the activity thread. Observe their
+        // completion before accepting an older, already-settled gallery state.
+        runOnMainSync(() -> {});
         SystemClock.sleep(250);
         return settled();
     }
@@ -103,6 +124,7 @@ public final class PhotosGalleryProbe extends Instrumentation {
             event.recycle();
             SystemClock.sleep(25);
         }
+        android.util.Log.i("PhotosProbe", "swipe injection elapsed_ms=" + (SystemClock.uptimeMillis() - down));
         SystemClock.sleep(500);
     }
 
@@ -524,13 +546,13 @@ public final class PhotosGalleryProbe extends Instrumentation {
                 screenshot("gallery");
                 String touched = photos.getJSONObject(1).getString("id");
                 tap(180, 220);
-                value = settled();
+                value = viewerAt(touched);
                 require(value.getLong("selected") == Long.parseLong(touched), "native_thumbnail_touch_opens_viewer");
                 swipe(380, 80, 500);
-                value = settled();
+                value = viewerAt(photos.getJSONObject(2).getString("id"));
                 require(value.getLong("selected") == Long.parseLong(photos.getJSONObject(2).getString("id")), "native_swipe_next");
                 swipe(80, 380, 500);
-                value = settled();
+                value = viewerAt(touched);
                 require(value.getLong("selected") == Long.parseLong(touched), "native_swipe_previous");
                 int fitPixel = previewPixel();
                 tap(240, 500, 30); tap(240, 500, 30);
