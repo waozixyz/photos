@@ -141,6 +141,12 @@ public final class PhotosGalleryProbe extends Instrumentation {
         while (SystemClock.uptimeMillis() < deadline) {
             AccessibilityNodeInfo node = choice(getUiAutomation().getRootInActiveWindow(), pattern, photo);
             if (node != null) {
+                // Android publishes accessibility nodes before the dialog's
+                // transition and touch listener are ready. Reacquire after
+                // the actual system UI settles, as for device credentials.
+                getUiAutomation().waitForIdle(500, 5000);
+                node = choice(getUiAutomation().getRootInActiveWindow(), pattern, photo);
+                if (node == null || !node.isEnabled()) continue;
                 android.graphics.Rect bounds = new android.graphics.Rect(); node.getBoundsInScreen(bounds);
                 tap(bounds.centerX(), bounds.centerY()); return;
             }
