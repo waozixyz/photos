@@ -1,0 +1,175 @@
+// Bounded, client-encrypted camera originals. The platform supplies a granted
+// read-only descriptor; plaintext never enters a staging file or a JNI result.
+#scope_module
+using Files :: #import "std/file_linux";
+#import "std/byte_text_linux"
+#import "std/c_string"
+#import "std/text_buffer"
+Crypto :: #import "backup_crypto";
+Native :: #import "daochi_client/crypto_native";
+#scope_export
+Current :: #type (*void) -> bool #c_call;
+#scope_module
+c :: #system_library "c";
+OpenRaw :: (path: *u8, flags: s32) -> s32 #foreign c "open";
+RemoveDirectory :: (path: *u8) -> s32 #foreign c "rmdir";
+MakeDirectory :: (path: *u8, mode: s32) -> s32 #foreign c "mkdir";
+Allocate :: (count: usize) -> *void #foreign c "malloc";
+Release :: (bytes: *void) #foreign c "free";
+Chunk :: 8388608;
+ReleaseText :: (value: string) {
+    if value.count == 0 { return }
+    descriptor := cast(*TextDescriptor)*value
+    Release(cast(*void)descriptor.data)
+}
+Hex :: (bytes: []u8, output: []u8) -> bool {
+    if output.count<bytes.count*2+1 { return false }
+    digits: string="0123456789abcdef"
+    for i: 0..bytes.count-1 { output[i*2]=digits[bytes[i]>>4]; output[i*2+1]=digits[bytes[i]&15] }
+    output[bytes.count*2]=0; return true
+}
+Path :: (root: string, name: string) -> string {
+    out: Vec(u8); BuilderPrint(*out,"%/%",root,name); return BuilderFinish(out)
+}
+ChunkPath :: (root: string, index: s32) -> string {
+    out: Vec(u8); BuilderPrint(*out,"%/%.blob",root,index); return BuilderFinish(out)
+}
+ReadOnly :: (path: string, directory: bool = false) -> FileHandle {
+    name: [4096]u8; output: FileHandle
+    if !CopyCString(path,name[:]) { return output }
+    output.fd=OpenRaw(*name[0],0xA0000 | (ifx directory then 65536 else 0))
+    output.valid=output.fd>=0; return output
+}
+ReadBlock :: (source: FileHandle, buffer: []u8, offset: s64) -> bool {
+    at: s64
+    while at<buffer.count {
+        count:=ReadAt(source,buffer[at:],offset+at)
+        if count<=0 { return false }; at+=count
+    }
+    return true
+}
+WriteFile :: (path: string, bytes: []u8) -> bool {
+    output:=OpenExclusivePrivate(path); if !output.valid { return false }
+    defer { unused CloseFile(output) }
+    at: s64
+    while at<bytes.count {
+        count:=Write(output,bytes[at:]); if count<=0 { return false }; at+=count
+    }
+    return SyncFile(output)
+}
+EqualFile :: (path: string, bytes: []u8, scratch: []u8) -> bool {
+    input:=ReadOnly(path); if !input.valid { return false }; defer { unused CloseFile(input) }
+    if bytes.count>scratch.count || FileSize(input)!=bytes.count || !ReadBlock(input,scratch[:bytes.count],0) { return false }
+    for i: 0..bytes.count-1 { if bytes[i]!=scratch[i] { return false } }
+    return true
+}
+Allowed :: (context: *void, current: Current) -> bool { return current==null || current(context) }
+HashOriginal :: (source: FileHandle, size: s64, buffer: []u8, state: []u8, digest: []u8,
+    context: *void, current: Current) -> bool {
+    if !Native.DigestStart(state) { return false }
+    offset: s64
+    while offset<size {
+        if !Allowed(context,current) { return false }
+        count:=size-offset; if count>buffer.count { count=buffer.count }
+        if !ReadBlock(source,buffer[:count],offset) || !Native.DigestUpdate(state,buffer[:count]) { return false }
+        offset+=count
+    }
+    extra: [1]u8
+    return ReadAt(source,extra[:],size)==0 && Native.DigestFinish(state,digest)
+}
+Publish :: (temporary: string, final: string, bytes: []u8, existing: bool, scratch: []u8) -> bool {
+    pending_name := Path(temporary,"manifest.json")
+    defer { ReleaseText(pending_name) }
+    if !WriteFile(pending_name,bytes) { return false }
+    pending:=ReadOnly(temporary,true); if !pending.valid { return false }
+    synced:=SyncFile(pending); unused CloseFile(pending); if !synced { return false }
+    if existing {
+        final_name := Path(final,"manifest.json")
+        defer { ReleaseText(final_name) }
+        return EqualFile(final_name,bytes,scratch)
+    }
+    return RenameNoReplace(temporary,final)
+}
+#scope_export
+// The result is a private local manifest, not a remote backup confirmation.
+// Empty, truncated, growing and changed sources are checked in both passes.
+// A nonempty returned manifest owns its bytes; the native caller releases them.
+Stage :: (fd: s32, size: s64, root: string, account: []u8, key: []u8,
+    context: *void, current: Current) -> string {
+    if fd<0 || size<0 || size>cast(s64)Chunk*16384 || root.count<1 || root.count>3800 || root[0]!=47 ||
+        account.count!=32 || key.count!=32 || Files.PathIsLink(root) || !Allowed(context,current) { return "" }
+    init: [32]u8
+    if !Crypto.Digest(account,init[:]) { return "" }
+    directory:=ReadOnly(root,true); if !directory.valid { return "" }; defer { unused CloseFile(directory) }
+    source: FileHandle=.{fd,true}
+    plainPointer:=cast(*u8)Allocate(Chunk+40); sealedPointer:=cast(*u8)Allocate(Chunk+40)
+    stateSize:=Native.DigestStateBytes(); statePointer:=Allocate(stateSize)
+    if plainPointer==null || sealedPointer==null || statePointer==null {
+        if plainPointer!=null { Release(cast(*void)plainPointer) }; if sealedPointer!=null { Release(cast(*void)sealedPointer) }
+        if statePointer!=null { Release(statePointer) }; return ""
+    }
+    plain:=BytesFromPointer(plainPointer,Chunk+40); sealed:=BytesFromPointer(sealedPointer,Chunk+40)
+    state:=BytesFromPointer(cast(*u8)statePointer,cast(u64)stateSize)
+    defer { Crypto.Clear(plain); Crypto.Clear(sealed); Crypto.Clear(state); Release(cast(*void)plainPointer); Release(cast(*void)sealedPointer); Release(statePointer) }
+    digest: [32]u8; second: [32]u8; id: [65]u8; accountText: [65]u8
+    if !HashOriginal(source,size,plain,state,digest[:],context,current) || !Hex(digest[:],id[:]) || !Hex(account,accountText[:]) { return "" }
+    random: [32]u8; token: [65]u8; if !Native.RandomBytes(random[:]) { return "" }; unused Hex(random[:],token[:])
+    temporaryBuilder: Vec(u8); BuilderPrint(*temporaryBuilder,"%/.stage-%",root,TextFromCString(*token[0]))
+    temporary:=BuilderFinish(temporaryBuilder); temporaryName: [4096]u8
+    defer { ReleaseText(temporary) }
+    if !CopyCString(temporary,temporaryName[:]) || MakeDirectory(*temporaryName[0],448)!=0 { return "" }
+    chunks: s32; published: bool
+    defer {
+        if !published {
+            cleanup_index: s32
+            while cleanup_index<chunks {
+                name := ChunkPath(temporary,cleanup_index)
+                unused RemoveFile(name)
+                ReleaseText(name)
+                cleanup_index+=1
+            }
+            name := Path(temporary,"manifest.json")
+            unused RemoveFile(name)
+            ReleaseText(name)
+            unused RemoveDirectory(*temporaryName[0])
+        }
+    }
+    final:=Path(root,TextFromCString(*id[0]))
+    defer { ReleaseText(final) }
+    existing:=Files.PathExists(final)
+    if Files.PathIsLink(final) { return "" }
+    manifest: Vec(u8); BuilderPrint(*manifest,"{\"id\":\"%\",\"size\":%,\"manifest\":{\"chunk_bytes\":%,\"chunks\":[",TextFromCString(*id[0]),size,Chunk)
+    if !Native.DigestStart(state) { return "" }
+    offset: s64
+    while offset<size {
+        if !Allowed(context,current) { return "" }
+        count:=size-offset; if count>Chunk { count=Chunk }
+        if !ReadBlock(source,plain[:count],offset) || !Native.DigestUpdate(state,plain[:count]) { return "" }
+        aadBuilder: Vec(u8)
+        BuilderPrint(*aadBuilder,"{\"account_id\":\"%\",\"app_id\":\"photos\",\"id\":\"%\",\"part\":\"chunk:%\",\"schema\":\"photos.media.v1\"}",
+            TextFromCString(*accountText[0]),TextFromCString(*id[0]),chunks)
+        length:=Crypto.Seal(plain[:count],VecSlice(aadBuilder,0,aadBuilder.count),key,sealed,true)
+        if length!=count+40 { return "" }
+        blobDigest: [32]u8; blobText: [65]u8
+        if !Crypto.Digest(sealed[:length],blobDigest[:]) || !Hex(blobDigest[:],blobText[:]) { return "" }
+        if chunks>0 { BuilderPrint(*manifest,",") }; BuilderPrint(*manifest,"\"%\"",TextFromCString(*blobText[0]))
+        path:=ChunkPath(temporary,chunks); chunks+=1
+        defer { ReleaseText(path) }
+        if !WriteFile(path,sealed[:length]) { return "" }
+        if existing {
+            existing_path := ChunkPath(final,chunks-1)
+            defer { ReleaseText(existing_path) }
+            if !EqualFile(existing_path,sealed[:length],plain) { return "" }
+        }
+        Crypto.Clear(plain); offset+=count
+    }
+    extra: [1]u8
+    if ReadAt(source,extra[:],size)!=0 || !Native.DigestFinish(state,second[:]) { return "" }
+    compare_index: s32
+    while compare_index<32 { if digest[compare_index]!=second[compare_index] { return "" }; compare_index+=1 }
+    BuilderPrint(*manifest,"]}}")
+    if !Allowed(context,current) || !Publish(temporary,final,VecSlice(manifest,0,manifest.count),existing,plain) { return "" }
+    published=!existing
+    if !SyncFile(directory) { return "" }
+    return BuilderFinish(manifest)
+}

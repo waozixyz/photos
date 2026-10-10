@@ -77,6 +77,16 @@ selection-drag-test:
 	$(ZIRAN) bundle --project $(PACKAGE_FLAGS) --root tests --entry selection_drag_test:Answer -o build/selection-drag-test.zib tests/selection_drag_test.zi
 	test "$$($(ZIRAN) run build/selection-drag-test.zib)" = 42
 test: selection-drag-test
+.PHONY: backup-staging-test
+backup-staging-test:
+	LDLIBS='-l:libsodium.so.23' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root tests --target=c --entry backup_staging_probe:main --exe -o build/backup-staging-test tests/backup_staging_probe.zi
+test: backup-staging-test
+.PHONY: backup-staging-memory-test
+backup-staging-memory-test: backup-staging-test
+	$(CC) -std=c11 -O2 -Ibuild/backup-staging-test tests/backup_staging_memory_test.c \
+		$(filter-out build/backup-staging-test/ziran_exe_main.c build/backup-staging-test/backup_staging_probe.c,$(wildcard build/backup-staging-test/*.c)) \
+		-l:libsodium.so.23 -o build/backup-staging-test/memory-test
+test: backup-staging-memory-test
 .PHONY: swipe-window-test swipe-portable-test swipe-hosted-test
 swipe-window-test: build
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/swipe_window.py

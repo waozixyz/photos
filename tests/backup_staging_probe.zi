@@ -1,0 +1,30 @@
+Stage :: #import "backup_staging";
+Crypto :: #import "backup_crypto";
+using Files :: #import "std/file_linux";
+#import "std/byte_text_linux"
+#import "std/c_string"
+Probe :: struct { source: string; calls: s32; mode: s32 }
+Current :: (context: *void) -> bool {
+    probe:=cast(*Probe)context; probe.calls+=1
+    if probe.mode==1 && probe.calls>=4 { return false }
+    if probe.mode==2 && probe.calls==3 {
+        file:=OpenUpdate(probe.source); if !file.valid { return false }; defer { unused CloseFile(file) }
+        changed: [1]u8=.{255}; if WriteAt(file,changed[:],0)!=1 || !SyncFile(file) { return false }
+    }
+    return true
+}
+main :: (argc: s32, argv: **u8) -> s32 {
+    if argc!=4 && argc!=5 { return 1 }
+    secret: [64]u8; defer { Crypto.Clear(secret[:]) }
+    input: FileHandle=.{0,true}; if Read(input,secret[:])!=64 { return 1 }
+    source:=OpenRead(TextFromCString(argv[1])); if !source.valid { return 1 }; defer { unused CloseFile(source) }
+    text:=TextFromCString(argv[3]); size: s64
+    if text.count<1 || text.count>12 { return 1 }
+    for digit: text { if digit<48 || digit>57 { return 1 }; size=size*10+cast(s64)(digit-48) }
+    probe: Probe; probe.source=TextFromCString(argv[1])
+    if argc==5 {
+        mode:=TextFromCString(argv[4]); if mode=="cancel" { probe.mode=1 } else if mode=="change" { probe.mode=2 } else { return 1 }
+    }
+    result:=Stage.Stage(source.fd,size,TextFromCString(argv[2]),secret[:32],secret[32:],cast(*void)*probe,Current)
+    if result.count==0 { return 1 }; print("%",result); return 0
+}
