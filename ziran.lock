@@ -43,9 +43,9 @@
       "url": "https://github.com/raysan5/raylib.git"
     },
     {
-      "commit": "c6a9d9a7116eac632a7ea696e19f27c2367a6c8b",
+      "commit": "7e4e8396aec46a0039fdabef4c70c2d3636ace31",
       "dependencies": {"oqs": "p55635fc8976895a9"},
-      "id": "p7d882196d75a0662",
+      "id": "pd5da7a0b570d7e24",
       "name": "DaochiClient",
       "ref": "master",
       "url": "https://github.com/ziranlang/daochi-client.git"
@@ -79,7 +79,7 @@
     }
   ],
   "root": {
-    "dependencies": {"daochi_client": "p7d882196d75a0662", "kryon": "p0ccbb92c54bb4180", "kss": "p03de317562242e4f", "libsodium": "pddc9c82431af7bc6", "oqs": "p55635fc8976895a9", "sqlite": "p450e8db63484350c"},
+    "dependencies": {"daochi_client": "pd5da7a0b570d7e24", "kryon": "p0ccbb92c54bb4180", "kss": "p03de317562242e4f", "libsodium": "pddc9c82431af7bc6", "oqs": "p55635fc8976895a9", "sqlite": "p450e8db63484350c"},
     "name": "photos"
   },
   "toolchain": {
