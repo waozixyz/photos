@@ -221,7 +221,6 @@ initialized: bool;
 next_refresh: s64;
 keeping_alive: bool;
 next_keep_alive: s64;
-ticks: s64;
 cursor: s32;
 anchor: s32;
 focused: bool;
@@ -310,8 +309,8 @@ SendRequest :: (action: string, id: string, value: string) {
     app_lock_auth_pending = loading && (action == "app_lock_unlock" || action == "app_lock_enable" || action == "app_lock_disable" || action == "app_lock_pin" || action == "app_lock_password")
     app_lock_check_pending = loading && action == "app_lock_check"
     Release(request)
-    if !loading { Set(message[:], Transport.error); if appending { more_due = ticks + 300; appending = false } }
-    busy = loading && action != "query" && action != "playback_check" && action != "text_check" && !app_lock_check_pending && !slide_request && !qr_request && !collage_request; next_refresh = ticks + 300
+    if !loading { Set(message[:], Transport.error); if appending { more_due = Clock.Milliseconds() + 5000; appending = false } }
+    busy = loading && action != "query" && action != "playback_check" && action != "text_check" && !app_lock_check_pending && !slide_request && !qr_request && !collage_request; next_refresh = Clock.Milliseconds() + 5000
     // Lock only after the authenticated request has been serialized. A passive
     // check may have queued it; clearing private UI state must not lose it.
     if loading && (action == "app_lock_enable" || action == "app_lock_pin" || action == "app_lock_password") { app_lock_begin_pending = true }
@@ -410,7 +409,6 @@ CheckAppBackground :: (focused: bool, now: s64) -> bool {
 }
 Tick :: (window_focused: bool) {
     if app_lock_begin_pending { app_lock_begin_pending = false; app_lock_enabled = true; EnterAppLock() }
-    ticks += 1;
     now := Clock.Milliseconds()
     unused CheckAppBackground(window_focused,now)
     if app_lock_revoke_pending && !loading && now >= app_lock_poll {
@@ -420,7 +418,7 @@ Tick :: (window_focused: bool) {
     if slide_active && (now < 0 || (slide_id[0] != 0 && now >= slide_valid_until)) {
         StopSlides(); Set(message[:],"Slideshow access ended; reopen the gallery to retry")
     }
-    if editor == "text" && TextDetection.active && ticks > text_valid_until { CancelEditor(); Set(message[:], "Text access ended; reopen the photo to retry") }
+    if editor == "text" && TextDetection.active && (now < 0 || now >= text_valid_until) { CancelEditor(); Set(message[:], "Text access ended; reopen the photo to retry") }
     if editor == "qr" && QRDetection.active && (now < 0 || now >= qr_valid_until) { CancelEditor(); Set(message[:], "QR access ended; reopen the photo to retry") }
     if editor == "collage" && Collage.active && (now < 0 || now >= collage_valid_until) { RevokeCollage(); Set(message[:], "Collage access ended; select the photos again") }
     if playback_id[0] != 0 {
@@ -445,7 +443,7 @@ Tick :: (window_focused: bool) {
         loading = false; busy = false
         app_lock_check_pending = false
         app_auth_response := app_lock_auth_pending; app_lock_auth_pending = false
-        if Transport.error != "" { if guest_active { ClearGuestDisplay() } else if app_lock_enabled { EnterAppLock() }; Set(message[:], Transport.error); if slide_active { StopSlides() }; if editor == "collage" { RevokeCollage() }; if editor == "text" || editor == "qr" { CancelEditor() }; if playback_id[0] != 0 { StopPlayback() }; if appending { more_due = ticks + 300; appending = false }; return }
+        if Transport.error != "" { if guest_active { ClearGuestDisplay() } else if app_lock_enabled { EnterAppLock() }; Set(message[:], Transport.error); if slide_active { StopSlides() }; if editor == "collage" { RevokeCollage() }; if editor == "text" || editor == "qr" { CancelEditor() }; if playback_id[0] != 0 { StopPlayback() }; if appending { more_due = Clock.Milliseconds() + 5000; appending = false }; return }
         json := Transport.Value()
         ReadHeader(json)
         if Lookup(json,0,"app_lock_method") >= 0 { app_lock_method = Number(json,0,"app_lock_method"); if app_locked && !RecoveryResetEditor() { editor_hint = AppLockHint() } }
@@ -534,7 +532,7 @@ Tick :: (window_focused: bool) {
             if editor != "text" || selected < 0 || selected >= count { return }
             if message[0] != 0 || TextUntilNul(fresh_id[:]) != TextUntilNul(photos[selected].id[:]) { TextDetection.Clear(); editor = ""; return }
             if Lookup(json, 0, "text_words") >= 0 { TextDetection.LoadLanguages(json); TextDetection.Load(json); Decode(json, 0, "status", message[:]) }
-            text_poll = ticks + 30; text_valid_until = ticks + 150; return
+            now = Clock.Milliseconds(); text_poll = now + 500; text_valid_until = now + 2500; return
         }
         if qr_request {
             qr_request = false
@@ -557,10 +555,10 @@ Tick :: (window_focused: bool) {
                 if !Playback.Open(TextUntilNul(path[:])) { Set(message[:], Playback.Message()); StopPlayback(); return }
                 playback_started = true; Set(playback_path[:], TextUntilNul(path[:])); playback_speed = 100; playback_volume = 100
             }
-            Playback.Lease(2500); playback_poll = ticks + 30
+            Playback.Lease(2500); playback_poll = Clock.Milliseconds() + 500
             return
         }
-        if Lookup(json, 0, "video_job") >= 0 { Decode(json, 0, "video_job", video_job[:]); video_poll = ticks + 30 }
+        if Lookup(json, 0, "video_job") >= 0 { Decode(json, 0, "video_job", video_job[:]); video_poll = Clock.Milliseconds() + 500 }
         if Lookup(json, 0, "saved_copy") >= 0 {
             saved: [65]u8; Decode(json, 0, "saved_copy", saved[:])
             if saved[0] != 0 && (editor == "video" || editor == "video_trim") { editor = ""; edit_preview[0] = 0; edit_session[0] = 0 }
@@ -569,7 +567,7 @@ Tick :: (window_focused: bool) {
         Decode(json, 0, "error", message[:]); if message[0] != 0 {
             if editor == "recovery_confirm" { editor = "recovery_password"; editor_title = "Recovery password" }
             if !app_lock_enabled && StartsWithFoldASCII(editor,"app_lock_") { CancelEditor() }
-            if appending { more_due = ticks + 300; appending = false }; return
+            if appending { more_due = Clock.Milliseconds() + 5000; appending = false }; return
         }
         if view == "map" { Map.Load(json) }
         total = Number(json, 0, "total"); matches = Number(json, 0, "count"); pending = Number(json, 0, "pending")
@@ -681,7 +679,7 @@ Tick :: (window_focused: bool) {
         now = Clock.Milliseconds()
         if editor == "guest_exit" { return }
         if guest_valid_until > 0 && now >= guest_valid_until { ClearGuestDisplay(); guest_valid_until = 0; Set(message[:],"Guest view is unavailable; authenticate to leave") }
-        if !loading && playback_id[0] != 0 && ticks >= playback_poll { playback_poll = ticks+30; Request("playback_check",TextUntilNul(playback_id[:])); return }
+        if !loading && playback_id[0] != 0 && now >= playback_poll { playback_poll = now+500; Request("playback_check",TextUntilNul(playback_id[:])); return }
         if !loading && now >= guest_poll { guest_poll = now+500; Request(); return }
         return
     }
@@ -696,12 +694,12 @@ Tick :: (window_focused: bool) {
         if !loading && slide_id[0] != 0 && now >= slide_poll { slide_poll = now+500; Request("slide_check",TextUntilNul(slide_id[:])); return }
         return
     }
-    if !loading && playback_id[0] != 0 && ticks >= playback_poll { playback_poll = ticks + 30; Request("playback_check", TextUntilNul(playback_id[:])); return }
-    if !loading && editor == "text" && TextDetection.active && selected >= 0 && selected < count && ticks >= text_poll { text_poll = ticks + 30; Request("text_check", TextUntilNul(photos[selected].id[:])); return }
+    if !loading && playback_id[0] != 0 && now >= playback_poll { playback_poll = now + 500; Request("playback_check", TextUntilNul(playback_id[:])); return }
+    if !loading && editor == "text" && TextDetection.active && selected >= 0 && selected < count && now >= text_poll { text_poll = now + 500; Request("text_check", TextUntilNul(photos[selected].id[:])); return }
     if !loading && editor == "qr" && QRDetection.active && selected >= 0 && selected < count && now >= qr_poll { qr_poll = now+500; Request("qr_check",TextUntilNul(photos[selected].id[:])); return }
     if !loading && editor == "collage" && Collage.active && now >= collage_poll { collage_poll = now+500; CollageRequest("collage_check"); return }
-    if !loading && video_job[0] != 0 && ticks >= video_poll { video_poll = ticks + 60; Request("video_status"); return }
-    if !loading && ticks > next_refresh && ((scroll == 0 && selected < 0) || (view == "hidden" && vault_unlocked)) { if selected < 0 && view != "people" { offset = ifx date_jumped then feed_base else 0 }; Request() }
+    if !loading && video_job[0] != 0 && now >= video_poll { video_poll = now + 1000; Request("video_status"); return }
+    if !loading && now >= next_refresh && ((scroll == 0 && selected < 0) || (view == "hidden" && vault_unlocked)) { if selected < 0 && view != "people" { offset = ifx date_jumped then feed_base else 0 }; Request() }
     // Keep service-owned editor state while this view is running. The broker
     // answers this bounded heartbeat directly, without loading the library.
     if !loading && now >= next_keep_alive {
@@ -1203,7 +1201,7 @@ Edit :: (out: []u8, start: s32, end: s32, replacement: string) {
 
 // Append another page near the end of the date feed without changing its scroll.
 More :: () {
-    if loading || ticks < more_due || count + feed_base >= matches || CatalogView() || view == "sync" { return }
+    if loading || Clock.Milliseconds() < more_due || count + feed_base >= matches || CatalogView() || view == "sync" { return }
     offset = count + feed_base; appending = true; Request()
 }
 
