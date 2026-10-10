@@ -13,6 +13,12 @@ Never change this restriction or enable outward replication without an explicit
 owner instruction. No photo content or library metadata belongs in Git or Social.
 
 All sync data is encrypted on the client; account and content keys stay private.
+Use the canonical DaochiClient encryption, account/key validation and signed
+sync protocol primitives; do not create a separate Photos encryption system.
+Reusable protocol and crypto changes belong in DaochiClient or the owning
+upstream repository. Photos owns compatible backup framing, app storage and UI.
+Preserve existing account/content keys and compatible encrypted backups. Android
+Keystore may wrap the existing validated identity for local device protection.
 Installation and removal preserve the library and keys. Screenshots and GUI
 tests use synthetic photos on private Xvfb, scrubbing inherited display/session
 variables. Run make test and git diff --check before committing.
