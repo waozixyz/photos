@@ -81,7 +81,7 @@ with tempfile.TemporaryDirectory() as folder:
                 if button:break
                 assert process.poll() is None
                 time.sleep(.1)
-            assert button, (label,control,snapshot)
+            assert button, (label,control,snapshot,'recent requests',calls[-12:])
             xdo('mousemove','--window',window,int(button['x']+button['width']/2),int(button['y']+button['height']/2));xdo('click','1');time.sleep(.3)
         state('photos', 4)
         subprocess.run(['import','-window',window,str(output/'library.png')],check=True)

@@ -10,6 +10,7 @@ import sys
 import venv
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from photos.library import atomic, packed
+from photos.service_units import units
 from urllib.parse import urlsplit
 import re
 
@@ -240,20 +241,24 @@ def main():
         if descriptor.get('icon_path') == str(args.prefix/'share/icons/hicolor/scalable/apps/photos.svg'):
             descriptor['icon_path'] = str(icon)
         atomic(catalog_path, packed(catalog).encode())
-    if not args.no_service:
-        if args.ssh_host:
-            service = Path.home()/'.config/systemd/user/photos-tunnel.service'
-            atomic(service,('[Unit]\nDescription=Photos private SSH tunnel to ThinkPad Daochi\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=/usr/bin/ssh -F /dev/null -N -T -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -L 127.0.0.1:'+str(urlsplit(args.node).port)+':127.0.0.1:18080 '+args.ssh_host+'\nRestart=always\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n').encode())
-        service = Path.home()/'.config/systemd/user/photos.service'
-        atomic(service,('[Unit]\nDescription=Photos private local library service\n\n[Service]\nType=simple\nExecStart='+str(installed/'venv/bin/python')+' '+str(installed/'service.py')+'\nRestart=on-failure\nRestartSec=5\nUMask=0077\n\n[Install]\nWantedBy=default.target\n').encode())
-        service = Path.home()/'.config/systemd/user/photos-sync.service'
-        atomic(service,('[Unit]\nDescription=Photos local import and ThinkPad-only encrypted sync\nAfter=network-online.target photos-tunnel.service\n\n[Service]\nType=simple\nExecStart='+str(installed/'venv/bin/python')+' '+str(installed/'worker.py')+' --daemon\nRestart=on-failure\nRestartSec=15\nUMask=0077\nNice=10\n\n[Install]\nWantedBy=default.target\n').encode())
+    if not args.no_service and not args.defer_sync:
+        tunnel = (args.ssh_host, urlsplit(args.node).port) if args.ssh_host else None
+        unit_root = Path.home()/'.config/systemd/user'
+        has_tunnel = tunnel is not None or (unit_root/'photos-tunnel.service').is_file()
+        for name, content in units(installed, tunnel=tunnel, tunnel_present=has_tunnel).items():
+            atomic(unit_root/name, content.encode())
+        workers = ['photos.service', 'photos-sync.service']
+        if has_tunnel:
+            workers.append('photos-tunnel.service')
+        # Only the socket starts at login. Requests activate the library and
+        # its scoped workers; a clean idle exit releases their entire groups.
+        subprocess.run(['systemctl','--user','disable',*workers],check=True)
+        subprocess.run(['systemctl','--user','stop',*workers],check=True)
         subprocess.run(['systemctl','--user','daemon-reload'],check=True)
-        active = ['photos.service'] + (['photos-tunnel.service'] if args.ssh_host else [])
-        subprocess.run(['systemctl','--user','enable','photos.service','photos-sync.service',*(['photos-tunnel.service'] if args.ssh_host else [])],check=True)
-        if not args.defer_sync:
-            active.append('photos-sync.service')
-        subprocess.run(['systemctl','--user','restart',*active],check=True)
+        subprocess.run(['systemctl','--user','enable','photos.socket'],check=True)
+        subprocess.run(['systemctl','--user','restart','photos.socket'],check=True)
+    elif args.defer_sync and not args.no_service:
+        print('Service activation migration deferred; the running import and current services were preserved')
     print('Photos standalone app and private local service installed; library and keys retained')
     print('Publish build/photos-portable.zib with Harmony scripts/publish-app.py for the Apps Install action')
 

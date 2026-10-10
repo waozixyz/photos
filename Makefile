@@ -253,3 +253,9 @@ historic-portable-test: bundle
 gallery-text-test:
 	ZIRAN=$(ZIRAN) sh tests/gallery_text_test.sh
 test: gallery-text-test
+
+.PHONY: heartbeat-window-test heartbeat-portable-test
+heartbeat-window-test: build
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/heartbeat_window.py
+heartbeat-portable-test: bundle
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_HEARTBEAT_PORTABLE=1 $(PYTHON) tests/heartbeat_window.py

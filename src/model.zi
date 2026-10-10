@@ -219,6 +219,8 @@ queued_id: [65]u8;
 queued_value: [8193]u8;
 initialized: bool;
 next_refresh: s64;
+keeping_alive: bool;
+next_keep_alive: s64;
 ticks: s64;
 cursor: s32;
 anchor: s32;
@@ -250,7 +252,14 @@ Quoted :: (out: *Vec(u8), value: string) {
 }
 Property :: (out: *Vec(u8), key: string, value: string) { BuilderPrint(out, ",\"%\":", key); Quoted(out, value) }
 Request :: (action: string = "query", id: string = "", value: string = "") {
-    if loading { Set(queued_action[:], action); Set(queued_id[:], id); Set(queued_value[:], value); queued_request = true; return }
+    if loading || keeping_alive {
+        Set(queued_action[:], action); Set(queued_id[:], id); Set(queued_value[:], value)
+        queued_request = true
+        // Once a user submits work, retain the ordinary pending-request UI
+        // until its reserved transport is available.
+        if keeping_alive { loading = true }
+        return
+    }
     SendRequest(action, id, value)
 }
 SendRequest :: (action: string, id: string, value: string) {
@@ -424,7 +433,15 @@ Tick :: (window_focused: bool) {
         }
     }
     if !initialized { initialized = true; Request() }
-    if Transport.Poll() {
+    response := Transport.Poll()
+    if response && keeping_alive {
+        keeping_alive = false
+        loading = false
+        // A heartbeat reserves the transport, not the editing controls.
+        // Only its failure enters the ordinary request error path.
+        response = Transport.error != ""
+    }
+    if response {
         loading = false; busy = false
         app_lock_check_pending = false
         app_auth_response := app_lock_auth_pending; app_lock_auth_pending = false
@@ -650,6 +667,9 @@ Tick :: (window_focused: bool) {
         else { BuilderPrint(*text, "% photos & videos · % albums · % queued", total, album_count, pending) }
         value := BuilderFinish(text); Set(summary[:], value); Release(value)
     }
+    // Keep automatic refreshes from replacing an action queued while the
+    // heartbeat is in flight. Drawing and user input continue in Frame.
+    if keeping_alive { return }
     if !loading && queued_view >= 0 { target := queued_view; queued_view = -1; Navigate(View(target)); return }
     if !loading && queued_request {
         action: [65]u8; identity: [65]u8; value: [8193]u8
@@ -682,6 +702,12 @@ Tick :: (window_focused: bool) {
     if !loading && editor == "collage" && Collage.active && now >= collage_poll { collage_poll = now+500; CollageRequest("collage_check"); return }
     if !loading && video_job[0] != 0 && ticks >= video_poll { video_poll = ticks + 60; Request("video_status"); return }
     if !loading && ticks > next_refresh && ((scroll == 0 && selected < 0) || (view == "hidden" && vault_unlocked)) { if selected < 0 && view != "people" { offset = ifx date_jumped then feed_base else 0 }; Request() }
+    // Keep service-owned editor state while this view is running. The broker
+    // answers this bounded heartbeat directly, without loading the library.
+    if !loading && now >= next_keep_alive {
+        next_keep_alive = now+1000
+        keeping_alive = Transport.Start("{\"action\":\"keep_alive\"}")
+    }
 }
 Navigate :: (target: string) {
     StopSlides(); slide_picking = false; VecClear(slide_albums); slide_album_count = 0

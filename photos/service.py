@@ -45,12 +45,44 @@ def program():
     return path
 
 
+def inherited_listener(path):
+    """Accept exactly our user socket from the service manager, before threads."""
+    if os.environ.get('LISTEN_PID') != str(os.getpid()):
+        return None
+    if os.environ.get('LISTEN_FDS') != '1':
+        raise ValueError('Photos expects one private activation socket')
+    listener = socket.socket(fileno=os.dup(3))
+    try:
+        validate_listener(listener, path)
+        os.set_inheritable(3, False)
+        return listener
+    except Exception:
+        listener.close()
+        raise
+
+
+def validate_listener(listener, path):
+    try:
+        info = Path(path).lstat()
+    except OSError:
+        raise ValueError('Invalid private Photos activation socket') from None
+    if (listener.family != socket.AF_UNIX or listener.type != socket.SOCK_STREAM or
+            not listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN) or
+            listener.getsockname() != str(path) or not stat.S_ISSOCK(info.st_mode) or
+            info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600):
+        raise ValueError('Invalid private Photos activation socket')
+
+
 class Server:
     """Preserve the test/launcher lifecycle while Ziran owns all client I/O."""
 
-    def __init__(self, config, path=None):
+    def __init__(self, config, path=None, *, listener=None, idle_seconds=0):
         self.config = config
         self.path = Path(path or socket_path())
+        if type(idle_seconds) not in (int, float) or not 0 <= idle_seconds <= 60:
+            raise ValueError('Invalid Photos service idle deadline')
+        self.inherited = listener is not None
+        self.idle_exit = self.inherited and idle_seconds > 0
         if not self.path.is_absolute() or len(os.fsencode(self.path)) >= 108:
             raise ValueError('Invalid local Photos endpoint')
         # Never follow a substituted runtime-directory or lock-file link.
@@ -78,18 +110,38 @@ class Server:
                 raise ValueError('Invalid local Photos endpoint lock')
             os.fchmod(descriptor, 0o600)
             fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            if os.path.lexists(self.path):
+            if self.inherited:
+                validate_listener(listener, self.path)
+            elif os.path.lexists(self.path):
                 info = self.path.lstat()
                 if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
                     raise ValueError('Existing local Photos endpoint was preserved')
+                # The manager retains its listener while the adapter is idle.
+                # An unlocked .lock file no longer proves this socket is stale.
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                    probe.settimeout(.05)
+                    try:
+                        probe.connect(str(self.path))
+                    except ConnectionRefusedError:
+                        pass
+                    except OSError:
+                        raise ValueError('Existing local Photos endpoint was preserved') from None
+                    else:
+                        raise ValueError('Existing local Photos endpoint was preserved')
                 self.path.unlink()
             self.channel, child_channel = socket.socketpair()
             self.channel.settimeout(5)
             environment = {k: v for k, v in os.environ.items() if k not in
-                           {'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS', 'SESSION_MANAGER'}}
+                           {'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS', 'SESSION_MANAGER',
+                            'LISTEN_PID', 'LISTEN_PIDFDID', 'LISTEN_FDS', 'LISTEN_FDNAMES'}}
             try:
-                self.child = subprocess.Popen(['prlimit', '--core=0', '--', str(program()), str(self.path)], stdin=child_channel,
-                                              stdout=child_channel, env=environment, close_fds=True)
+                command = ['prlimit', '--core=0', '--', str(program()), str(self.path)]
+                descriptors = ()
+                if self.inherited:
+                    command += ['--inherited', str(listener.fileno()), str(int(idle_seconds*1000))]
+                    descriptors = (listener.fileno(),)
+                self.child = subprocess.Popen(command, stdin=child_channel, stdout=child_channel,
+                                              env=environment, close_fds=True, pass_fds=descriptors)
             finally:
                 child_channel.close()
             if receive(self.channel, 8) != b'\0'*8:
@@ -98,7 +150,8 @@ class Server:
             info = self.path.lstat()
             if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
                 raise RuntimeError('Native Photos endpoint permissions are invalid')
-            self.inode = (info.st_dev, info.st_ino)
+            if not self.inherited:
+                self.inode = (info.st_dev, info.st_ino)
         except Exception:
             self.server_close()
             raise
@@ -155,6 +208,8 @@ class Server:
                         break
         except (OSError, ValueError):
             if not self.stopping.is_set():
+                if self.idle_exit and self.child.wait(timeout=5) == 0:
+                    return
                 raise RuntimeError('Native Photos endpoint stopped; restart Photos to reconnect') from None
         finally:
             self.finished.set()
@@ -199,8 +254,14 @@ class Server:
 
 
 def main():
-    with Server(configuration()) as server:
-        server.serve_forever()
+    path = socket_path()
+    listener = inherited_listener(path)
+    try:
+        with Server(configuration(), path, listener=listener, idle_seconds=2 if listener else 0) as server:
+            server.serve_forever()
+    finally:
+        if listener is not None:
+            listener.close()
 
 
 if __name__ == '__main__':

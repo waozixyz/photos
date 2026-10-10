@@ -3,6 +3,7 @@
 // its private socketpair passes requests to the remaining library adapter.
 #import "std/byte_text_linux"
 #import "std/c_string"
+#import "std/text_buffer"
 Json :: #import "std/json_scan";
 Clock :: #import "std/timer_linux";
 c :: #system_library "c";
@@ -12,6 +13,7 @@ Bind :: (fd: s32, address: *void, length: u32) -> s32 #foreign c "bind";
 Listen :: (fd: s32, count: s32) -> s32 #foreign c "listen";
 Accept :: (fd: s32, address: *void, length: *u32, flags: s32) -> s32 #foreign c "accept4";
 Peer :: (fd: s32, level: s32, option: s32, value: *void, length: *u32) -> s32 #foreign c "getsockopt";
+SocketName :: (fd: s32, address: *void, length: *u32) -> s32 #foreign c "getsockname";
 Uid :: () -> u32 #foreign c "getuid";
 Flags :: (fd: s32, command: s32, value: s32) -> s32 #foreign c "fcntl";
 Close :: (fd: s32) -> s32 #foreign c "close";
@@ -55,7 +57,7 @@ Object :: (bytes: *u8, count: s32) -> bool {
 }
 Retry :: () -> bool { code := Errno().*; return code == 4 || code == 11 }
 Cleanup :: () { for index: 0..Capacity-1 { Drop(*clients[index]) } }
-Run :: (listener: s32) -> s32 {
+Run :: (listener: s32, idle_milliseconds: s32 = 0) -> s32 {
     for clientIndex1: 0..Capacity-1 { clients[clientIndex1].fd = -1 }
     txBody: *u8; txLength: s32; txAt: s32; txHeader: [8]u8
     rxBody: *u8; rxLength: s32; rxAt: s32; rxHeader: [8]u8; rxHeaderAt: s32
@@ -67,18 +69,24 @@ Run :: (listener: s32) -> s32 {
     ready: [8]u8
     if Send(1,*ready[0],8,16384) != 8 { return 3 }
     serial: u32
+    pending: s32
+    idle_since := Clock.MonotonicMilliseconds()
     while true {
         now := Clock.MonotonicMilliseconds(); if now < 0 { return 3 }
+        active := pending > 0 || txBody != null || rxHeaderAt != 0
         for clientIndex2: 0..Capacity-1 {
             if clients[clientIndex2].phase != 0 && now >= clients[clientIndex2].deadline { Drop(*clients[clientIndex2]) }
+            if clients[clientIndex2].phase != 0 { active = true }
         }
+        if active { idle_since = now }
+        else if idle_milliseconds > 0 && now-idle_since >= idle_milliseconds { return 0 }
         if txBody == null {
             for clientIndex3: 0..Capacity-1 {
                 client := *clients[clientIndex3]
                 if client.phase == 3 {
                     txBody = client.body; txLength = client.length; txAt = 0
                     Header(txHeader[:4],client.id); Header(txHeader[4:],cast(u32)txLength)
-                    client.body = null; client.phase = 4; break
+                    client.body = null; client.phase = 4; pending += 1; break
                 }
             }
         }
@@ -125,6 +133,15 @@ Run :: (listener: s32) -> s32 {
                     client.at += cast(s32)amount
                     if client.at == client.length {
                         if !Object(client.body,client.length) { Drop(client); continue }
+                        // A viewed app keeps its service alive without opening
+                        // the library or queuing work in the Python adapter.
+                        request := TextFromBytes(BytesFromPointer(client.body,cast(u64)client.length))
+                        if request == "{\"action\":\"keep_alive\"}" {
+                            client.body[0] = 123; client.body[1] = 125
+                            client.length = 2; client.at = 0; client.headerAt = 0
+                            Header(client.header[:],2); client.phase = 5
+                            continue
+                        }
                         client.phase = 3; client.deadline = now+60000
                     }
                 }
@@ -162,6 +179,8 @@ Run :: (listener: s32) -> s32 {
             } else {
                 rxAt += cast(s32)amount
                 if rxAt == rxLength {
+                    if pending <= 0 { return 3 }
+                    pending -= 1
                     id := Number(rxHeader[:4]); valid := Object(rxBody,rxLength)
                     for clientIndex7: 0..Capacity-1 {
                         client := *clients[clientIndex7]
@@ -179,10 +198,37 @@ Run :: (listener: s32) -> s32 {
     }
     return 0
 }
+Decimal :: (value: string) -> s32 {
+    if value.count < 1 || value.count > 7 { return -1 }
+    result: s32
+    for byte: value {
+        if byte < 48 || byte > 57 { return -1 }
+        result = result*10+cast(s32)byte-48
+    }
+    return result
+}
+InheritedListener :: (fd: s32, path: string) -> bool {
+    endpoint: Endpoint; size: u32 = 110
+    kind: s32; count: u32 = 4
+    if fd < 3 || SocketName(fd,cast(*void)*endpoint,*size) != 0 || endpoint.family != 1 ||
+        TextUntilNul(endpoint.path[:]) != path ||
+        Peer(fd,1,3,cast(*void)*kind,*count) != 0 || count != 4 || kind != 1 { return false }
+    count = 4
+    if Peer(fd,1,30,cast(*void)*kind,*count) != 0 || count != 4 || kind != 1 { return false }
+    flags := Flags(fd,3,0)
+    return flags >= 0 && Flags(fd,4,flags|2048) == 0
+}
 main :: (argc: s32, argv: **u8) -> s32 {
-    if argc != 2 { return 2 }
+    if argc != 2 && argc != 5 { return 2 }
     path := TextFromCString(argv[1]); endpoint: Endpoint; endpoint.family = 1
     if path.count == 0 || path[0] != 47 || !CopyCString(path,endpoint.path[:]) { return 2 }
+    if argc == 5 {
+        listener := Decimal(TextFromCString(argv[3])); idle := Decimal(TextFromCString(argv[4]))
+        if TextFromCString(argv[2]) != "--inherited" || idle < 0 || idle > 60000 || !InheritedListener(listener,path) { return 2 }
+        defer { unused Close(listener) }
+        flags := Flags(0,3,0); if flags < 0 || Flags(0,4,flags|2048) != 0 { return 3 }
+        return Run(listener,idle)
+    }
     // The parent holds the exclusive endpoint lock, prepares the private
     // directory and removes only its own stale socket before this bind.
     listener := Socket(1,524288|2048|1,0); if listener < 0 { return 3 }; defer { unused Close(listener) }
