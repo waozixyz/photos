@@ -33,6 +33,9 @@ import java.util.function.BooleanSupplier;
  * ThinkPad node acknowledges its encrypted record and holds every chunk. */
 final class BackupQueue {
     private static final Object STORAGE = new Object();
+    // The app and the OS job may share a process; neither stages or uploads
+    // while the other does.
+    private static final Object STAGE = new Object(), SEND = new Object();
     private static final ExecutorService IO = Executors.newSingleThreadExecutor();
     private static final ExecutorService NETWORK = Executors.newSingleThreadExecutor();
     static final int PERIODIC_JOB = 3381;
@@ -288,68 +291,83 @@ final class BackupQueue {
         } catch (Exception error) { return false; }
     }
 
-    synchronized void prepare(DeviceBackup backup, PhotosActivity activity) {
+    // The app stages with the activity as guard, which adds its device lock.
+    synchronized void prepare(DeviceBackup backup, Object guard) {
         if (closed || preparing || !backup.ready) return;
         preparing = true; prepareCanceled = false; prepareFailure = "";
         notifyChanged();
         IO.execute(() -> {
-            byte[] identity = null;
-            String phase = "identity";
-            try {
-                identity = backup.read();
-                phase = "staging_directory";
-                File root = privateDirectory("camera-backup/staged");
-                while (!closed && !prepareCanceled) {
-                    Original next = new Original();
-                    synchronized (STORAGE) {
-                        try (SQLiteDatabase db = open(); Cursor row = db.rawQuery(
-                            "SELECT volume,media_id,bucket,size,modified,generation,media_type FROM items "
-                            + "WHERE eligible=1 AND confirmed=0 AND staged_id='' ORDER BY media_id LIMIT 1", null)) {
-                            if (!row.moveToFirst()) break;
-                            next.volume = row.getString(0); next.id = row.getLong(1); next.bucket = row.getString(2);
-                            next.size = row.getLong(3); next.modified = row.getLong(4); next.generation = row.getLong(5); next.type = row.getInt(6);
-                        }
-                    }
-                    staging = next;
-                    phase = "source_permission";
-                    if (!stageCurrent()) throw new IllegalStateException();
-                    byte[] result;
-                    phase = "source_descriptor";
-                    try (ParcelFileDescriptor source = context.getContentResolver().openFileDescriptor(
-                        ContentUris.withAppendedId(MediaStore.Files.getContentUri(next.volume), next.id), "r")) {
-                        if (source == null) throw new IllegalStateException();
-                        phase = "native_staging";
-                        result = activity.nativeStageBackupOriginal(identity, source.getFd(), next.size, root.getPath().getBytes(StandardCharsets.UTF_8));
-                    }
-                    if (result == null || !stageCurrent()) throw new IllegalStateException();
-                    phase = "manifest";
-                    JSONObject manifest = new JSONObject(new String(result, StandardCharsets.UTF_8));
-                    String id = manifest.getString("id");
-                    if (!id.matches("[a-f0-9]{64}") || manifest.getLong("size") != next.size) throw new IllegalStateException();
-                    synchronized (STORAGE) {
-                        phase = "queue_publish";
-                        try (SQLiteDatabase db = open()) {
-                            if (!stageCurrent()) throw new IllegalStateException();
-                            ContentValues value = new ContentValues(); value.put("staged_id", id); value.put("staged_manifest", manifest.getJSONObject("manifest").toString());
-                            if (db.update("items", value, "volume=? AND media_id=? AND size=? AND modified=? AND generation=? AND eligible=1 AND confirmed=0",
-                                new String[]{next.volume, Long.toString(next.id), Long.toString(next.size), Long.toString(next.modified), Long.toString(next.generation)}) != 1) throw new IllegalStateException();
-                            snapshot(db);
-                        }
-                    }
-                    staging = null; notifyChanged();
-                }
-                if (!closed && !prepareCanceled) requestUpload();
-            } catch (Exception error) {
-                // Debug diagnostics contain only a fixed phase name, never keys,
-                // document paths, provider metadata or exception messages.
-                if (BuildConfig.DEBUG) prepareFailure = phase;
-                message = "Camera preparation paused; originals and queued items were preserved";
-            }
-            finally {
-                if (identity != null) Arrays.fill(identity, (byte)0);
-                staging = null; preparing = false; notifyChanged();
-            }
+            try { if (stageAll(guard, () -> false) && !closed && !prepareCanceled) requestUpload(); }
+            finally { preparing = false; notifyChanged(); }
         });
+    }
+
+    // Staging callback when the OS job stages with this queue as its guard.
+    boolean backupStageCurrent() { return stageCurrent(); }
+
+    // Encrypt every eligible, unprepared original. Called on a worker by the app
+    // or by the periodic job while Photos is closed; returns true when done.
+    boolean stageAll(Object guard, java.util.function.BooleanSupplier canceled) {
+        synchronized (STAGE) { return stageEach(guard, canceled); }
+    }
+
+    private boolean stageEach(Object guard, java.util.function.BooleanSupplier canceled) {
+        byte[] identity = null;
+        String phase = "identity";
+        try {
+            identity = DeviceBackup.readIdentity(context);
+            phase = "staging_directory";
+            File root = privateDirectory("camera-backup/staged");
+            while (!closed && !prepareCanceled && !canceled.getAsBoolean()) {
+                Original next = new Original();
+                synchronized (STORAGE) {
+                    try (SQLiteDatabase db = open(); Cursor row = db.rawQuery(
+                        "SELECT volume,media_id,bucket,size,modified,generation,media_type FROM items "
+                        + "WHERE eligible=1 AND confirmed=0 AND staged_id='' ORDER BY media_id LIMIT 1", null)) {
+                        if (!row.moveToFirst()) return true;
+                        next.volume = row.getString(0); next.id = row.getLong(1); next.bucket = row.getString(2);
+                        next.size = row.getLong(3); next.modified = row.getLong(4); next.generation = row.getLong(5); next.type = row.getInt(6);
+                    }
+                }
+                staging = next;
+                phase = "source_permission";
+                if (!stageCurrent()) throw new IllegalStateException();
+                byte[] result;
+                phase = "source_descriptor";
+                try (ParcelFileDescriptor source = context.getContentResolver().openFileDescriptor(
+                    ContentUris.withAppendedId(MediaStore.Files.getContentUri(next.volume), next.id), "r")) {
+                    if (source == null) throw new IllegalStateException();
+                    phase = "native_staging";
+                    result = PhotosActivity.nativeStageBackupOriginal(guard, identity, source.getFd(), next.size, root.getPath().getBytes(StandardCharsets.UTF_8));
+                }
+                if (result == null || !stageCurrent()) throw new IllegalStateException();
+                phase = "manifest";
+                JSONObject manifest = new JSONObject(new String(result, StandardCharsets.UTF_8));
+                String id = manifest.getString("id");
+                if (!id.matches("[a-f0-9]{64}") || manifest.getLong("size") != next.size) throw new IllegalStateException();
+                synchronized (STORAGE) {
+                    phase = "queue_publish";
+                    try (SQLiteDatabase db = open()) {
+                        if (!stageCurrent()) throw new IllegalStateException();
+                        ContentValues value = new ContentValues(); value.put("staged_id", id); value.put("staged_manifest", manifest.getJSONObject("manifest").toString());
+                        if (db.update("items", value, "volume=? AND media_id=? AND size=? AND modified=? AND generation=? AND eligible=1 AND confirmed=0",
+                            new String[]{next.volume, Long.toString(next.id), Long.toString(next.size), Long.toString(next.modified), Long.toString(next.generation)}) != 1) throw new IllegalStateException();
+                        snapshot(db);
+                    }
+                }
+                staging = null; notifyChanged();
+            }
+            return false;
+        } catch (Exception error) {
+            // Debug diagnostics contain only a fixed phase name, never keys,
+            // document paths, provider metadata or exception messages.
+            if (BuildConfig.DEBUG) prepareFailure = phase;
+            message = "Camera preparation paused; originals and queued items were preserved";
+            return false;
+        } finally {
+            if (identity != null) Arrays.fill(identity, (byte)0);
+            staging = null;
+        }
     }
 
     private static final class Pending {
@@ -410,6 +428,10 @@ final class BackupQueue {
     // Called by the activity or the OS job on its own worker. Returns true when
     // every prepared item reached the pinned node or nothing was waiting.
     boolean upload(java.util.function.BooleanSupplier canceled) {
+        synchronized (SEND) { return uploadEach(canceled); }
+    }
+
+    private boolean uploadEach(java.util.function.BooleanSupplier canceled) {
         String phase = "queue";
         byte[] identity = null, device = null;
         try {

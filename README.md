@@ -421,8 +421,9 @@ reuse identical preparations while preserving an existing damaged destination.
 Prepared counts survive rescans and restarts. Preparation alone does not confirm
 remote backup or delete device originals.
 
-Upload to ThinkPad runs after preparation, from Settings and with each periodic
-discovery job. It sends prepared chunks only to `127.0.0.1:18080` on the phone.
+While Photos is closed, the periodic discovery job also prepares new photos in
+selected folders and uploads them. Upload to ThinkPad also runs after
+preparation and from Settings. It sends chunks only to `127.0.0.1:18080` on the phone.
 The ThinkPad forwards that port over USB to its Daochi node, for example with
 `adb reverse tcp:18080 tcp:18080`; there is no Wi-Fi, public node or cloud
 route. Native Ziran checks the node identity pinned in the recovery file and
@@ -435,9 +436,9 @@ the local encrypted copy is then released. Interrupted uploads retry without
 duplicates. `make android-upload-test` drives these exact requests against an
 isolated Daochi node and restores the originals on a separate desktop library.
 
-This is a development client, not a phone replacement yet. Preparing new
-camera photos while Photos is closed, mobile search/indexing, memories,
-editing, pinch gestures and device space recovery remain unfinished. Video playback currently
+This is a development client, not a phone replacement yet. Mobile
+search/indexing, memories, editing, pinch gestures and device space recovery
+remain unfinished. Video playback currently
 hands the selected content URI to a system player. `make android-gallery-test`
 builds the application and instrumentation APKs, then tests synthetic provider
 media on a disposable Android emulator with its own ADB server and private Xvfb

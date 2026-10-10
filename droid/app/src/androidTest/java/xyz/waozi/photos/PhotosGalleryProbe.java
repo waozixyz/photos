@@ -518,6 +518,46 @@ public final class PhotosGalleryProbe extends Instrumentation {
         screenshot("upload");
     }
 
+    private int confirmedCount() throws Exception {
+        try (android.database.sqlite.SQLiteDatabase db = android.database.sqlite.SQLiteDatabase.openDatabase(queueFile().getPath(), null, 0);
+             android.database.Cursor rows = db.rawQuery("SELECT COUNT(*) FROM items WHERE confirmed=1", null)) {
+            return rows.moveToFirst() ? rows.getInt(0) : -1;
+        }
+    }
+
+    // The harness published one new camera photo. Photos does not drive this:
+    // the OS periodic job discovers, encrypts and uploads it by itself.
+    private void backgroundChecks() throws Exception {
+        int before = confirmedCount();
+        require(before >= 2, "earlier_uploads_remain_confirmed");
+        shell("input keyevent KEYCODE_HOME");
+        long hidden = SystemClock.uptimeMillis() + 10000;
+        while (SystemClock.uptimeMillis() < hidden && PhotosActivity.visible) SystemClock.sleep(100);
+        require(!PhotosActivity.visible, "photos_is_off_screen_before_the_periodic_job");
+        String forced = shell("cmd jobscheduler run -f " + activity.getPackageName() + " " + BackupQueue.PERIODIC_JOB).trim();
+        long deadline = SystemClock.uptimeMillis() + 240000;
+        while (SystemClock.uptimeMillis() < deadline && confirmedCount() < before + 1) SystemClock.sleep(500);
+        require(confirmedCount() == before + 1, "periodic_job_encrypts_and_backs_up_new_camera_photo_" + forced.replace(' ', '_'));
+        String[] staged = new File(activity.getFilesDir(), "camera-backup/staged").list();
+        require(staged != null && staged.length == 0, "background_upload_releases_its_ciphertext_copy");
+        BackupQueue after = new BackupQueue(activity, () -> {}, false);
+        try {
+            require(after.scan(() -> false) && after.queued == 0 && after.prepared == 0 && after.confirmed == before + 1,
+                "background_backup_survives_rescan_without_duplicates");
+        } finally { after.close(); }
+        // Settings shows the backed-up count and the manual upload control.
+        getContext().startActivity(new Intent(getTargetContext(), PhotosActivity.class)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+        long shown = SystemClock.uptimeMillis() + 10000;
+        while (SystemClock.uptimeMillis() < shown && !PhotosActivity.visible) SystemClock.sleep(100);
+        require(PhotosActivity.visible, "photos_returns_to_the_foreground");
+        SystemClock.sleep(1000);
+        settled();
+        tap(409, 102);
+        for (int i = 0; i < 3; i++) { shell("input swipe 240 860 240 160 400"); SystemClock.sleep(600); }
+        screenshot("background");
+    }
+
     private static byte[] readBytes(java.io.InputStream input) throws Exception {
         java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
         byte[] bytes = new byte[8192]; int count;
@@ -558,6 +598,8 @@ public final class PhotosGalleryProbe extends Instrumentation {
                 selectedChecks();
             } else if (stage.equals("upload")) {
                 uploadChecks();
+            } else if (stage.equals("background")) {
+                backgroundChecks();
             } else if (!stage.equals("full")) {
                 require(value.getInt("access") == (stage.equals("partial") ? 4 : 0), "expected_access");
                 require(value.getJSONArray("photos").length() == 0 && value.getLong("selected") == -1, "ungranted_photos_excluded");

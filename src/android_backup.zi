@@ -62,9 +62,16 @@ ReadIdentity :: (env: *JniEnv, receiver: *void, file: *void, password: *void) ->
     if result!=null { env.functions.SetByteArrayRegion(env,result,0,size,cast(*u8)*identity) }
     return result
 }
+// Static entry: the guard (the activity in the app, the queue in the OS job)
+// answers backupStageCurrent() between chunks, so either can cancel staging.
+StageGuarded :: (env: *JniEnv, klass: *void, guard: *void, identity_bytes: *void, fd: s32, size: s64, path_bytes: *void) -> *void {
+    unused klass
+    if guard==null { return null }
+    return StageOriginal(env,guard,identity_bytes,fd,size,path_bytes)
+}
 ReadIdentityFn :: #type (*JniEnv,*void,*void,*void) -> *void #c_call;
 NativeMethod :: struct { name: *u8; signature: *u8; procedure: ReadIdentityFn }
-StageFn :: #type (*JniEnv,*void,*void,s32,s64,*void) -> *void #c_call;
+StageFn :: #type (*JniEnv,*void,*void,*void,s32,s64,*void) -> *void #c_call;
 StageMethod :: struct { name: *u8; signature: *u8; procedure: StageFn }
 Register :: (vm: *JniVm) -> s32 {
     env: *JniEnv
@@ -77,7 +84,7 @@ Register :: (vm: *JniVm) -> s32 {
     method.name=*method_name[0]; method.signature=*signature[0]; method.procedure=ReadIdentity
     if env.functions.RegisterNatives(env,klass,cast(*void)*method,1)!=0 { return -1 }
     stage: StageMethod
-    unused CopyCString("nativeStageBackupOriginal",method_name[:]); unused CopyCString("([BIJ[B)[B",signature[:])
-    stage.name=*method_name[0]; stage.signature=*signature[0]; stage.procedure=StageOriginal
+    unused CopyCString("nativeStageBackupOriginal",method_name[:]); unused CopyCString("(Ljava/lang/Object;[BIJ[B)[B",signature[:])
+    stage.name=*method_name[0]; stage.signature=*signature[0]; stage.procedure=StageGuarded
     return env.functions.RegisterNatives(env,klass,cast(*void)*stage,1)
 }

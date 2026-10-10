@@ -143,7 +143,7 @@ def start_node(folder, seed, binary):
     return process, origin, node_port, node
 
 
-def restore_uploaded_originals(origin, node_id, identity, seeds, folder):
+def restore_uploaded_originals(origin, node_id, identity, seeds, folder, expected):
     """A separate desktop library restores the phone's uploads from the node."""
     from photos.library import Library, packed
     from photos.sync import Client
@@ -160,7 +160,7 @@ def restore_uploaded_originals(origin, node_id, identity, seeds, folder):
         raise RuntimeError("Desktop restore left queued records")
     rows = library.db.execute("SELECT id,name,kind,manifest FROM photos").fetchall()
     known = set(seeds.values())
-    if len(rows) != 35 or any(row["id"] not in known for row in rows):
+    if len(rows) != expected or any(row["id"] not in known for row in rows):
         raise RuntimeError("Desktop restore does not match the phone's uploaded originals")
     previews = videos = 0
     for row in rows:
@@ -170,7 +170,7 @@ def restore_uploaded_originals(origin, node_id, identity, seeds, folder):
         if json.loads(row["manifest"]).get("preview") and Path(client.materialize(row["id"], preview_only=True)).stat().st_size:
             previews += 1
         videos += row["kind"] == "video"
-    if previews < 34 or videos != 1:
+    if previews < expected - 1 or videos != 1:
         raise RuntimeError("Uploaded previews or video kind are missing")
     return dict(originals=len(rows), restored_exact=True, previews=previews, videos=videos)
 
@@ -443,9 +443,21 @@ def main():
                         for permission in ("READ_MEDIA_IMAGES", "READ_MEDIA_VIDEO"):
                             device("shell", "pm", "grant", PACKAGE, "android.permission." + permission)
                         stage("upload")
+                        # A photo taken after the app's own upload is handled
+                        # only by Android's periodic job, with Photos idle.
+                        image = root / "camera.png"
+                        Image.new("RGB", (640, 480), (250, 40, 90)).save(image)
+                        device("shell", "content", "insert", "--uri", "content://media/external_primary/images/media",
+                               "--bind", "_display_name:s:camera-new.png", "--bind", "mime_type:s:image/png",
+                               "--bind", "relative_path:s:Pictures/PhotosFixture", "--bind", "is_pending:i:1")
+                        uri = inserted_uri("content://media/external_primary/images/media")
+                        device("shell", "content", "write", "--uri", uri, binary=True, data=image.read_bytes())
+                        device("shell", "content", "update", "--uri", uri, "--bind", "is_pending:i:0")
+                        seeds[uri] = hashlib.sha256(image.read_bytes()).hexdigest()
+                        stage("background")
                         device("reverse", "--remove", "tcp:18080", check=False)
                         report["android_pinned_upload"] = restore_uploaded_originals(
-                            origin, node["node_id"], identity, seeds, root / "desktop")
+                            origin, node["node_id"], identity, seeds, root / "desktop", 36)
                     finally:
                         device("reverse", "--remove-all", check=False)
                         stop(node_process)
@@ -458,7 +470,7 @@ def main():
                     if hashlib.sha256(pixels).hexdigest() != digest:
                         raise RuntimeError("Synthetic original changed during gallery use")
                     remaining += 1
-                if remaining != (2 if lock_only else 35):
+                if remaining != (2 if lock_only else 36):
                     raise RuntimeError("Unexpected synthetic original count")
                 report["unchanged_originals"] = remaining
                 trace = device("logcat", "-d", "-v", "threadtime").stdout

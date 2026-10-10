@@ -30,6 +30,8 @@ public class PhotosActivity extends NativeActivity {
     }
 
     private static final String TAG = "PhotosActivity";
+    // Read by the periodic backup job: staging waits while the UI is shown.
+    static volatile boolean visible;
 
     // [system bars, IME, cutouts] mirrored in native.
     private final int[] cachedInsets = new int[9];
@@ -49,7 +51,7 @@ public class PhotosActivity extends NativeActivity {
     public byte[] galleryState() { return gallery == null ? new byte[]{123, 125} : gallery.state(); }
     public void galleryAction(String request) { if (gallery != null) gallery.action(request); }
     native byte[] nativeReadBackupIdentity(byte[] recovery, byte[] password);
-    native byte[] nativeStageBackupOriginal(byte[] identity, int descriptor, long size, byte[] directory);
+    static native byte[] nativeStageBackupOriginal(Object guard, byte[] identity, int descriptor, long size, byte[] directory);
     public boolean backupStageCurrent() { return gallery != null && gallery.backupStageCurrent(); }
     static native int nativeBackupCandidate(int access, int type, boolean selected, boolean pending, boolean trashed, long size, long id);
     static native int nativeRetainBackupConfirmation(boolean confirmed, long oldSize, long size, long oldModified, long modified, long oldGeneration, long generation);
@@ -348,6 +350,7 @@ public class PhotosActivity extends NativeActivity {
 
     @Override
     protected void onPause() {
+        visible = false;
         activityPaused = true;
         syncLifecycleState();
         if (gallery != null) gallery.pause();
@@ -357,6 +360,7 @@ public class PhotosActivity extends NativeActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        visible = true;
         if (gallery != null) gallery.resume();
         activityPaused = false;
         configureSystemBars();

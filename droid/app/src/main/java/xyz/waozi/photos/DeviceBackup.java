@@ -48,7 +48,7 @@ final class DeviceBackup {
         configured = file.getBaseFile().exists() || new File(file.getBaseFile() + ".bak").exists();
         if (configured) {
             byte[] identity = null;
-            try { identity = read(); ready = true; message = "Backup keys ready; camera upload is not enabled yet"; }
+            try { identity = read(); ready = true; message = "Backup keys ready; photos back up only to your pinned ThinkPad"; }
             catch (Exception error) { message = "Existing backup keys are unavailable; they were preserved"; }
             finally { if (identity != null) Arrays.fill(identity, (byte)0); }
         }
@@ -103,7 +103,7 @@ final class DeviceBackup {
                     if (closed || !allowed.getAsBoolean()) throw new IllegalStateException();
                     file.finishWrite(out); out = null;
                     configured = true; ready = true; recoverySelected = false; selected = null;
-                    message = "Backup keys ready; camera upload is not enabled yet";
+                    message = "Backup keys ready; photos back up only to your pinned ThinkPad";
                 } finally { if (out != null) file.failWrite(out); }
             } catch (Exception error) { message = "Could not restore backup keys; existing keys were preserved"; }
             finally {
