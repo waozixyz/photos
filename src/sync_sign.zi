@@ -1,0 +1,147 @@
+// Canonical Daochi account and device request signing over caller-held keys.
+// Desktop pipe helpers and the Android upload adapter share these functions;
+// account/device keys and their persistent storage remain with the caller.
+#scope_module
+Auth :: #import "daochi_client/auth";
+Client :: #import "daochi_client/client";
+Protocol :: #import "daochi_client/sync";
+Transaction :: #import "daochi_client/transaction";
+Keys :: #import "daochi_client/keys";
+Crypto :: #import "daochi_client/crypto";
+Native :: #import "daochi_client/crypto_native";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+
+Hex :: (input: []u8, output: []u8) -> bool {
+    return input.count > 0 && output.count > 0 &&
+        Crypto.BytesToHex(*input[0], input.count, *output[0], output.count) != 0
+}
+
+Digest :: (message: string, output: []u8) -> bool {
+    descriptor := cast(*TextDescriptor)*message
+    hash: [32]u8
+    return Native.Digest(BytesFromPointer(descriptor.data, cast(u64)message.count), hash[:]) &&
+        Hex(hash[:], output)
+}
+
+Nonce :: (context: *void, output: []u8) -> bool {
+    unused context
+    bytes: [32]u8
+    return Native.RandomBytes(bytes[:]) && Hex(bytes[:], output)
+}
+
+SignDevice :: (context: *void, message: string, output: []u8) -> bool {
+    if context == null || output.count < 129 { return false }
+    descriptor := cast(*TextDescriptor)*message
+    signature: [64]u8
+    return Native.SignDevice(BytesFromPointer(cast(*u8)context, 32),
+        BytesFromPointer(descriptor.data, cast(u64)message.count), signature[:]) && Hex(signature[:], output)
+}
+
+// Validated hex account material for Daochi's ML-DSA signer.
+Account :: (public_key: []u8, private_key: []u8, account: *Keys.AccountKeys) -> bool {
+    if public_key.count != PublicBytes || private_key.count != PrivateBytes { return false }
+    account_id: [32]u8
+    return Native.Digest(public_key, account_id[:]) &&
+        Keys.ValidateIdentity(account_id[:], public_key, private_key) &&
+        Hex(account_id[:], account.public_id[:]) && Hex(public_key, account.public_key_hex[:]) &&
+        Hex(private_key, account.private_key_hex[:])
+}
+
+ClearAccount :: (account: *Keys.AccountKeys) {
+    Native.Clear(BytesFromPointer(cast(*u8)account, size_of(Keys.AccountKeys)))
+}
+
+ClientId :: (client_id: string) -> bool {
+    if client_id.count < 1 || client_id.count > 128 { return false }
+    for byte: client_id { if byte < 33 || byte > 126 || byte == 34 || byte == 92 { return false } }
+    return true
+}
+
+#scope_export
+PublicBytes :: 1312
+PrivateBytes :: 2560
+LoginBodyBytes :: 6144
+SignatureBytes :: 4841
+HeaderBytes :: 8192
+
+// POST /api/v1/sync/login body and its X-Daochi-Signature for a challenge.
+Login :: (public_key: []u8, private_key: []u8, client_id: string, challenge: string,
+    body: []u8, signature: []u8) -> bool {
+    if body.count > 0 { body[0] = 0 }
+    if signature.count > 0 { signature[0] = 0 }
+    if !ClientId(client_id) || challenge.count < 1 || challenge.count > 4096 { return false }
+    account: Keys.AccountKeys
+    defer { ClearAccount(*account) }
+    if !Account(public_key, private_key, *account) { return false }
+    client: Client.Client
+    client.app_id = "photos"
+    client.identity.account_id = TextUntilNul(account.public_id[:])
+    client.identity.public_key = TextUntilNul(account.public_key_hex[:])
+    client.identity.client_id = client_id
+    client.identity.signing_context = cast(*void)*account
+    client.signer = Keys.SignAccountMessage
+    client.digest = Digest
+    return Auth.PrepareLogin(client.identity, challenge, Digest, Keys.SignAccountMessage, body, signature) ==
+        cast(Auth.AuthResult)Auth.AuthResult.AUTH_OK
+}
+
+// Account-signed POST /api/v1/account/devices body for this device seed.
+Registration :: (public_key: []u8, private_key: []u8, seed: []u8, client_id: string, now: s64,
+    body: []u8) -> bool {
+    if body.count > 0 { body[0] = 0 }
+    if !ClientId(client_id) || seed.count != 32 || now < 1 || now > 9007199254740691 { return false }
+    account: Keys.AccountKeys
+    defer { ClearAccount(*account) }
+    if !Account(public_key, private_key, *account) { return false }
+    public_device: [32]u8; device_id: [32]u8; device_id_text: [65]u8; device_public_text: [65]u8
+    if !Native.DevicePublic(seed, public_device[:]) || !Native.Digest(public_device[:], device_id[:]) ||
+        !Hex(device_id[:], device_id_text[:]) || !Hex(public_device[:], device_public_text[:]) { return false }
+    device: Protocol.Device
+    device.key_id = TextUntilNul(device_id_text[:])
+    device.public_key_hex = TextUntilNul(device_public_text[:])
+    session: Auth.Session
+    client: Client.Client
+    client.app_id = "photos"
+    client.identity.account_id = TextUntilNul(account.public_id[:])
+    client.identity.public_key = TextUntilNul(account.public_key_hex[:])
+    client.identity.client_id = client_id
+    client.identity.signing_context = cast(*void)*account
+    client.signer = Keys.SignAccountMessage
+    client.digest = Digest
+    return Protocol.PrepareDeviceRegistration(client, *session, device, now, null, Nonce, body) ==
+        cast(Auth.AuthResult)Auth.AuthResult.AUTH_OK
+}
+
+// X-Daochi-Tx for one request: method 1 GET, 2 POST, 3 PUT, 4 HEAD. The body
+// digest is the caller's exact request bytes, so large blobs are not copied.
+Header :: (public_key: []u8, private_key: []u8, seed: []u8, method: u8, path: string, digest: []u8,
+    expires: s64, output: []u8) -> bool {
+    if output.count > 0 { output[0] = 0 }
+    if method < 1 || method > 4 || path.count < 1 || path.count > 1024 || seed.count != 32 ||
+        digest.count != 32 || expires < 1 { return false }
+    account: Keys.AccountKeys
+    defer { ClearAccount(*account) }
+    if public_key.count != PublicBytes || private_key.count != PrivateBytes { return false }
+    // The account digest names the signer; ML-DSA itself rejects a mismatched key.
+    Crypto.Sha256Hex(*public_key[0], PublicBytes, *account.public_id[0])
+    if !Hex(public_key, account.public_key_hex[:]) || !Hex(private_key, account.private_key_hex[:]) { return false }
+    device_public: [32]u8; device_id: [65]u8; hash: [65]u8; nonce: [32]u8; tx_id: [32]u8
+    nonce_text: [65]u8; tx_text: [65]u8
+    if !Native.DevicePublic(seed, device_public[:]) || !Native.RandomBytes(nonce[:]) || !Native.RandomBytes(tx_id[:]) ||
+        !Hex(digest, hash[:]) || !Hex(nonce[:], nonce_text[:]) || !Hex(tx_id[:], tx_text[:]) { return false }
+    Crypto.Sha256Hex(*device_public[0], 32, *device_id[0])
+    transaction: Transaction.SyncTransaction
+    transaction.account_id = TextUntilNul(account.public_id[:]); transaction.app_id = "photos"
+    transaction.device_key_id = TextUntilNul(device_id[:]); transaction.tx_id = TextUntilNul(tx_text[:])
+    transaction.nonce = TextUntilNul(nonce_text[:]); transaction.body_sha256_hex = TextUntilNul(hash[:])
+    transaction.expires_at = expires
+    methods: [4]string = .{"GET", "POST", "PUT", "HEAD"}
+    client: Client.Client
+    client.app_id = "photos"; client.identity.account_id = transaction.account_id
+    client.identity.signing_context = cast(*void)*account; client.signer = Keys.SignAccountMessage
+    device: Protocol.Device
+    device.key_id = transaction.device_key_id; device.signing_context = cast(*void)*seed[0]; device.signer = SignDevice
+    return Protocol.SignTransactionHeader(client, device, transaction, methods[method-1], path, output) ==
+        cast(Auth.AuthResult)Auth.AuthResult.AUTH_OK
+}

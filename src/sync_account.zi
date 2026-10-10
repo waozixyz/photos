@@ -2,34 +2,12 @@
 // Account/device keys and their persistent storage remain with the caller.
 #scope_module
 Wire :: #import "sync_crypto";
-Auth :: #import "daochi_client/auth";
-Client :: #import "daochi_client/client";
-Protocol :: #import "daochi_client/sync";
-Keys :: #import "daochi_client/keys";
-Crypto :: #import "daochi_client/crypto";
+Sign :: #import "sync_sign";
 Native :: #import "daochi_client/crypto_native";
 #import "std/byte_text_linux"
 #import "std/text_buffer"
 c :: #system_library "c";
 Read :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign c "read";
-
-Hex :: (input: []u8, output: []u8) -> bool {
-    return input.count > 0 && output.count > 0 &&
-        Crypto.BytesToHex(*input[0], input.count, *output[0], output.count) != 0
-}
-
-Digest :: (message: string, output: []u8) -> bool {
-    descriptor := cast(*TextDescriptor)*message
-    hash: [32]u8
-    return Native.Digest(BytesFromPointer(descriptor.data, cast(u64)message.count), hash[:]) &&
-        Hex(hash[:], output)
-}
-
-Nonce :: (context: *void, output: []u8) -> bool {
-    unused context
-    bytes: [32]u8
-    return Native.RandomBytes(bytes[:]) && Hex(bytes[:], output)
-}
 
 Send :: (body: string, signature: string) -> bool {
     counts: [8]u8
@@ -59,51 +37,24 @@ Prepare :: (frame: []u8) -> s32 {
     seed: [32]u8
     client_id: [128]u8
     challenge: [4096]u8
-    account: Keys.AccountKeys
     defer {
         Native.Clear(private_key[:])
         Native.Clear(seed[:])
-        Native.Clear(BytesFromPointer(cast(*u8)*account, size_of(Keys.AccountKeys)))
     }
     if !Wire.ReadAll(*public_key[0], 1312) || !Wire.ReadAll(*private_key[0], 2560) ||
         !Wire.ReadAll(*seed[0], 32) || !Wire.ReadAll(*client_id[0], client_count) ||
         !Wire.ReadAll(*challenge[0], challenge_count) { return 2 }
     extra: u8
     if Read(0, *extra, 1) != 0 { return 2 }
-    account_id: [32]u8
-    if !Native.Digest(public_key[:], account_id[:]) ||
-        !Keys.ValidateIdentity(account_id[:], public_key[:], private_key[:]) ||
-        !Hex(account_id[:], account.public_id[:]) || !Hex(public_key[:], account.public_key_hex[:]) ||
-        !Hex(private_key[:], account.private_key_hex[:]) { return 2 }
-    client: Client.Client
-    client.app_id = "photos"
-    client.identity.account_id = TextUntilNul(account.public_id[:])
-    client.identity.public_key = TextUntilNul(account.public_key_hex[:])
-    client.identity.client_id = TextFromBytes(client_id[:client_count])
-    client.identity.signing_context = cast(*void)*account
-    client.signer = Keys.SignAccountMessage
-    client.digest = Digest
     body: [6144]u8
     signature: [4841]u8
-    result: Auth.AuthResult
+    client := TextFromBytes(client_id[:client_count])
+    prepared: bool
     if frame[1] == 1 {
-        result = Auth.PrepareLogin(client.identity, TextFromBytes(challenge[:challenge_count]),
-            Digest, Keys.SignAccountMessage, body[:], signature[:])
+        prepared = Sign.Login(public_key[:], private_key[:], client, TextFromBytes(challenge[:challenge_count]), body[:], signature[:])
     } else {
-        public_device: [32]u8
-        device_id: [32]u8
-        device_id_text: [65]u8
-        device_public_text: [65]u8
-        if !Native.DevicePublic(seed[:], public_device[:]) ||
-            !Native.Digest(public_device[:], device_id[:]) ||
-            !Hex(device_id[:], device_id_text[:]) || !Hex(public_device[:], device_public_text[:]) { return 2 }
-        device: Protocol.Device
-        device.key_id = TextUntilNul(device_id_text[:])
-        device.public_key_hex = TextUntilNul(device_public_text[:])
-        session: Auth.Session
-        result = Protocol.PrepareDeviceRegistration(client, *session, device,
-            cast(s64)now, null, Nonce, body[:])
+        prepared = Sign.Registration(public_key[:], private_key[:], seed[:], client, cast(s64)now, body[:])
     }
-    if result != cast(Auth.AuthResult)Auth.AuthResult.AUTH_OK { return 2 }
+    if !prepared { return 2 }
     return ifx Send(TextUntilNul(body[:]), TextUntilNul(signature[:])) then 0 else 2
 }

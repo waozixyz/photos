@@ -1,28 +1,13 @@
 // Private pipe adapter for Daochi's canonical v6 transaction builder/signers.
 // Existing account and device keys are supplied, never generated or stored.
 Wire :: #import "sync_crypto";
-Protocol :: #import "daochi_client/sync";
-Transaction :: #import "daochi_client/transaction";
-Client :: #import "daochi_client/client";
-Auth :: #import "daochi_client/auth";
-Keys :: #import "daochi_client/keys";
-Crypto :: #import "daochi_client/crypto";
+Sign :: #import "sync_sign";
 Native :: #import "daochi_client/crypto_native";
 AccountRequest :: #import "sync_account";
 #import "std/byte_text_linux"
 #import "std/text_buffer"
 c :: #system_library "c";
 Read :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign c "read";
-Hex :: (input: []u8, output: []u8) -> bool {
-    return output.count > 0 && Crypto.BytesToHex(*input[0],input.count,*output[0],output.count)!=0
-}
-SignDevice :: (context: *void, message: string, output: []u8) -> bool {
-    if context==null || output.count<129 { return false }
-    descriptor:=cast(*TextDescriptor)*message
-    signature: [64]u8
-    return Native.SignDevice(BytesFromPointer(cast(*u8)context,32),
-        BytesFromPointer(descriptor.data,cast(u64)message.count),signature[:]) && Hex(signature[:],output)
-}
 main :: () -> s32 {
     // version, method (GET/POST/PUT/HEAD), path length and Unix expiration.
     frame: [12]u8
@@ -39,32 +24,13 @@ main :: () -> s32 {
     for byte: frame[4:] { expires=(expires<<8)|cast(u64)byte }
     if count<1 || count>1024 || expires<1 || expires>cast(u64)9223372036854775807 { return 2 }
     public_key: [1312]u8; private_key: [2560]u8; seed: [32]u8; digest: [32]u8; path: [1024]u8
-    account: Keys.AccountKeys
-    defer { Native.Clear(private_key[:]); Native.Clear(seed[:]); Native.Clear(BytesFromPointer(cast(*u8)*account,size_of(Keys.AccountKeys))) }
+    defer { Native.Clear(private_key[:]); Native.Clear(seed[:]) }
     if !Wire.ReadAll(*public_key[0],1312) || !Wire.ReadAll(*private_key[0],2560) ||
         !Wire.ReadAll(*seed[0],32) || !Wire.ReadAll(*digest[0],32) || !Wire.ReadAll(*path[0],count) { return 2 }
     extra: u8
     if Read(0,*extra,1)!=0 { return 2 }
-    Crypto.Sha256Hex(*public_key[0],1312,*account.public_id[0])
-    if !Hex(public_key[:],account.public_key_hex[:]) || !Hex(private_key[:],account.private_key_hex[:]) { return 2 }
-    device_public: [32]u8; device_id: [65]u8; hash: [65]u8; nonce: [32]u8; tx_id: [32]u8
-    nonce_text: [65]u8; tx_text: [65]u8
-    if !Native.DevicePublic(seed[:],device_public[:]) || !Native.RandomBytes(nonce[:]) || !Native.RandomBytes(tx_id[:]) ||
-        !Hex(digest[:],hash[:]) || !Hex(nonce[:],nonce_text[:]) || !Hex(tx_id[:],tx_text[:]) { return 2 }
-    Crypto.Sha256Hex(*device_public[0],32,*device_id[0])
-    transaction: Transaction.SyncTransaction
-    transaction.account_id=TextUntilNul(account.public_id[:]); transaction.app_id="photos"
-    transaction.device_key_id=TextUntilNul(device_id[:]); transaction.tx_id=TextUntilNul(tx_text[:])
-    transaction.nonce=TextUntilNul(nonce_text[:]); transaction.body_sha256_hex=TextUntilNul(hash[:]); transaction.expires_at=cast(s64)expires
-    methods: [4]string=.{"GET","POST","PUT","HEAD"}
-    method:=methods[frame[1]-1]; target:=TextFromBytes(path[:count])
-    client: Client.Client
-    client.app_id="photos"; client.identity.account_id=transaction.account_id
-    client.identity.signing_context=cast(*void)*account; client.signer=Keys.SignAccountMessage
-    device: Protocol.Device
-    device.key_id=transaction.device_key_id; device.signing_context=cast(*void)*seed[0]; device.signer=SignDevice
     header: [8192]u8
-    if Protocol.SignTransactionHeader(client,device,transaction,method,target,header[:])!=cast(Auth.AuthResult)Auth.AuthResult.AUTH_OK { return 2 }
+    if !Sign.Header(public_key[:],private_key[:],seed[:],frame[1],TextFromBytes(path[:count]),digest[:],cast(s64)expires,header[:]) { return 2 }
     text:=TextUntilNul(header[:]); descriptor:=cast(*TextDescriptor)*text
     return ifx Wire.SendAll(descriptor.data,text.count) then 0 else 2
 }
