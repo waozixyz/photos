@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -106,6 +107,72 @@ def restore_staged_originals(device, database, identity, seeds, expected_count, 
         raise RuntimeError("Android staging never crossed an original chunk boundary")
     return dict(originals=len(rows), chunks=chunks, multi_chunk_originals=multiple,
                 released_ciphertext_compatible=True, remote_confirmations=0)
+
+
+def start_node(folder, seed, binary):
+    """A disposable Daochi node with the fixture's synthetic node identity."""
+    folder.mkdir(mode=0o700)
+    node_port = port()
+    origin = f"http://127.0.0.1:{node_port}"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("DAOCHI_") and k not in
+           {"DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "SESSION_MANAGER"}}
+    env.update(DAOCHI_ADDR=f"127.0.0.1:{node_port}", DAOCHI_BASE_URL=origin, DAOCHI_DB=str(folder / "node.sqlite"),
+               DAOCHI_ADMIN_TOKEN="fixture-admin", DAOCHI_KNOWN_NODES="", DAOCHI_LAN_DISCOVERY="0",
+               DAOCHI_NODE_SYNC_INTERVAL_SECONDS="0", DAOCHI_TOKEN_SECRET_HEX="42" * 32,
+               DAOCHI_NODE_IDENTITY_PRIVATE_KEY_HEX=seed.hex())
+    log = (folder / "node.log").open("w")
+    process = subprocess.Popen([str(Path(binary).resolve())], env=env, stdout=log, stderr=log)
+    log.close()
+    import urllib.request
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    for _ in range(200):
+        try:
+            node = json.load(opener.open(origin + "/api/v1/node", timeout=1))
+            break
+        except Exception:
+            if process.poll() is not None:
+                raise RuntimeError("Disposable Daochi node stopped")
+            time.sleep(.05)
+    else:
+        stop(process)
+        raise RuntimeError("Disposable Daochi node did not start")
+    registration = json.dumps(dict(app_id="photos", display_name="Photos", status="active",
+                                   collections=[dict(collection_prefix="private.photos.v1.records.*", visibility="private")]))
+    opener.open(urllib.request.Request(origin + "/api/v1/apps", method="POST", data=registration.encode(),
+                headers={"X-Daochi-Admin": "fixture-admin", "Content-Type": "application/json"})).close()
+    return process, origin, node_port, node
+
+
+def restore_uploaded_originals(origin, node_id, identity, seeds, folder):
+    """A separate desktop library restores the phone's uploads from the node."""
+    from photos.library import Library, packed
+    from photos.sync import Client
+
+    library = Library(folder)
+    private = library.root / "private"
+    private.mkdir(mode=0o700, exist_ok=True)
+    (private / "identity.json").write_bytes(packed(dict(
+        public=identity["identity"]["public"], private=identity["identity"]["private"],
+        content_key=identity["identity"]["content_key"])).encode())
+    os.chmod(private / "identity.json", 0o600)
+    client = Client(library, dict(node=origin, node_id=node_id))
+    if client.sync() != 0:
+        raise RuntimeError("Desktop restore left queued records")
+    rows = library.db.execute("SELECT id,name,kind,manifest FROM photos").fetchall()
+    known = set(seeds.values())
+    if len(rows) != 35 or any(row["id"] not in known for row in rows):
+        raise RuntimeError("Desktop restore does not match the phone's uploaded originals")
+    previews = videos = 0
+    for row in rows:
+        restored = Path(client.materialize(row["id"])).read_bytes()
+        if hashlib.sha256(restored).hexdigest() != row["id"]:
+            raise RuntimeError("Uploaded original did not restore byte-for-byte")
+        if json.loads(row["manifest"]).get("preview") and Path(client.materialize(row["id"], preview_only=True)).stat().st_size:
+            previews += 1
+        videos += row["kind"] == "video"
+    if previews < 34 or videos != 1:
+        raise RuntimeError("Uploaded previews or video kind are missing")
+    return dict(originals=len(rows), restored_exact=True, previews=previews, videos=videos)
 
 
 def main():
@@ -361,6 +428,27 @@ def main():
                 device("shell", "pm", "grant", PACKAGE, "android.permission.READ_MEDIA_VISUAL_USER_SELECTED")
                 stage("partial")
                 stage("selected")
+                if not lock_only:
+                    # Forward only this guest's loopback port to a disposable
+                    # node pinned by the recovered identity; nothing else.
+                    binary = os.environ.get("PHOTOS_DAOCHI") or shutil.which("daochi")
+                    if not binary or not Path(binary).is_file():
+                        raise RuntimeError("Set PHOTOS_DAOCHI for the pinned upload check")
+                    node_process, origin, node_port, node = start_node(root / "node",
+                        (ROOT / "build/android/node-seed.bin").read_bytes(), binary)
+                    try:
+                        if node["node_id"] != identity["node_id"]:
+                            raise RuntimeError("Disposable node does not match the recovered pin")
+                        device("reverse", "tcp:18080", "tcp:" + str(node_port))
+                        for permission in ("READ_MEDIA_IMAGES", "READ_MEDIA_VIDEO"):
+                            device("shell", "pm", "grant", PACKAGE, "android.permission." + permission)
+                        stage("upload")
+                        device("reverse", "--remove", "tcp:18080", check=False)
+                        report["android_pinned_upload"] = restore_uploaded_originals(
+                            origin, node["node_id"], identity, seeds, root / "desktop")
+                    finally:
+                        device("reverse", "--remove-all", check=False)
+                        stop(node_process)
                 remaining = 0
                 for uri, digest in seeds.items():
                     exists = device("shell", "content", "query", "--uri", uri, "--projection", "_id").stdout

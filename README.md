@@ -371,6 +371,79 @@ still uses Python.
 
 This version is a local photo library with sync, not complete Ente feature parity.
 
+The Android client is being implemented in the same checkout. `make android`
+builds a development APK for Android 9 or later, with ARMv7, ARM64 and x86_64
+support. Its Ziran/Kryon gallery reads Android's currently granted photos and
+videos, including selected-only access on Android 14 or later. Photos, device
+folders and videos have bounded pages; the viewer offers fit, zoom and
+previous/next navigation, swipe browsing, double-tap zoom and magnified panning.
+Android supplies private decoded previews and the
+system share chooser. Going into the background clears the visible selection,
+and returning queries MediaStore again. Changing permission or losing access to
+a visible original clears the gallery and discards stale previews. Originals are
+read only. The only network destination is the phone's own loopback address,
+for the ThinkPad upload described below; cleartext elsewhere is refused.
+
+Settings offers a device-authenticated app lock. Confirm the phone's screen
+lock or a strong biometric to enable, unlock or disable it. Leaving Photos
+locks it again and clears displayed media; canceled authentication grants no
+access. Hide content blocks screenshots and recent-app previews through Android.
+The bundled, licensed TrueType UI font reloads after an OS dialog replaces
+the graphics context and includes Japanese and Chinese filename glyphs. System
+fonts provide fallback for other scripts; names retain their exact Unicode bytes.
+
+ThinkPad backup setup accepts the encrypted recovery file saved in desktop
+Photos and its separate password. Native Ziran verifies the original account,
+signing keys and pinned node before Android seals the same content and signing
+keys with its keystore. Reopening retains those keys. Wrong passwords and
+altered files grant nothing, and an existing account is preserved. On its
+first upload the phone creates its own Daochi device key, also sealed by the
+keystore, and registers it under that account.
+
+Open a device folder in Albums and choose Queue this folder for backup. Folder
+choices and the permission-scoped queue survive closing Photos. New provider
+media is discovered while Photos is open and by a persistent Android periodic
+job, subject to the operating system's background scheduling. Native Ziran
+policy excludes unselected, ungranted, pending and trashed provider items. A
+changed provider version re-enters the queue; interrupted discovery leaves old
+candidates paused and retry does not duplicate them. Pause backup for this
+folder or Stop camera queue retains its pending records and original bytes.
+Settings shows queued, paused, waiting and backed-up counts and can rescan
+selected folders. Queued items are not backed up until the ThinkPad confirms
+them. No original is read or changed by discovery.
+
+Prepare selected photos in Settings reads the currently granted originals into
+bounded native buffers and saves authenticated encrypted chunks in private app
+storage. Their format restores through the desktop backup client. A second read
+verifies the whole original before atomic publication; changed versions, revoked
+access and canceled preparation publish no partial manifest. Retries verify and
+reuse identical preparations while preserving an existing damaged destination.
+Prepared counts survive rescans and restarts. Preparation alone does not confirm
+remote backup or delete device originals.
+
+Upload to ThinkPad runs after preparation, from Settings and with each periodic
+discovery job. It sends prepared chunks only to `127.0.0.1:18080` on the phone.
+The ThinkPad forwards that port over USB to its Daochi node, for example with
+`adb reverse tcp:18080 tcp:18080`; there is no Wi-Fi, public node or cloud
+route. Native Ziran checks the node identity pinned in the recovery file and
+refuses outward Photos replication before login. DaochiClient signs the login,
+device registration and every request, and seals each photo record in the
+desktop's format with a gallery preview. A phone record never replaces library
+metadata the desktop already holds for the same original. An item counts as
+backed up only after the node acknowledges its record and holds every chunk;
+the local encrypted copy is then released. Interrupted uploads retry without
+duplicates. `make android-upload-test` drives these exact requests against an
+isolated Daochi node and restores the originals on a separate desktop library.
+
+This is a development client, not a phone replacement yet. Preparing new
+camera photos while Photos is closed, mobile search/indexing, memories,
+editing, pinch gestures and device space recovery remain unfinished. Video playback currently
+hands the selected content URI to a system player. `make android-gallery-test`
+builds the application and instrumentation APKs, then tests synthetic provider
+media on a disposable Android emulator with its own ADB server and private Xvfb
+display. Physical Moto verification requires that development phone to reconnect;
+the owner's Pixel is excluded from development installs and probes.
+
 The local Photos endpoint is a headless Ziran service. It authenticates the
 connecting user's OS identity, accepts at most 16 simultaneous connections,
 and handles fragmented request frames without blocking other clients. Each
@@ -379,8 +452,9 @@ and stalled replies expire after 60 seconds. Its socket is private to this user;
 opening another instance preserves the active endpoint and unrelated files.
 Photo/chunk and album/metadata encryption, authenticated decryption, metadata
 nonce generation and resumable chunk nonce derivation now run in a headless
-Ziran helper over a private binary channel using DaochiClient's shared native
-crypto provider. It retains the existing
+Ziran helper over a private binary channel, using DaochiClient's shared native
+crypto provider. Android recovery and camera staging use those same primitives
+and Daochi's account validation. It retains the existing
 XChaCha20-Poly1305 backup format and content keys. An altered tag, account,
 address, key or nonce returns no plaintext. A missing or interrupted helper
 pauses that operation and preserves originals and keys. Ed25519 device seed
@@ -549,7 +623,7 @@ Memory Lane follows Ente's [eligibility rules](https://ente.photos/help/photos/f
 and automatic people albums follow its [auto-add behavior](https://ente.com/help/photos/features/albums-and-organization/auto-add-people).
 The remaining replacement work includes:
 
-- Mobile clients, permission-aware background camera backup and device space recovery.
+- Complete the development Android gallery and mobile clients, permission-aware background camera backup and device space recovery.
 - Detailed maps, curated memories, automatic trip albums and richer face review/assignment controls.
 - Advanced photo editing, encrypted video streaming, animated editing previews, broader Motion Photo formats, HDR display and broader codec/camera coverage.
 - Private sharing, collaboration, public links, comments and recovery phrases.

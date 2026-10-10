@@ -1,3 +1,9 @@
+#if #defined(ANDROID_BUILD) {
+    using UI :: #import "kryon/Widgets";
+    Mobile :: #import "mobile_app";
+    #program_export
+    Frame :: (session: Session, viewport: Rectangle) -> s32 { return Mobile.Frame(session,viewport) }
+} else {
 Collage :: #import "collage";
 using UI :: #import "kryon/Widgets";
 using Model :: #import "model";
@@ -1134,4 +1140,6 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, 295, "Lock Hidden", .{x + width - 142.0, footer - 2.0, 142.0, 34.0}, !Model.loading) { Model.StopPlayback(); Model.Apply("vault_lock"); Model.vault_unlocked = false; Model.Wipe(Model.vault_token[:]); Model.selected = -1; Model.CancelEditor() }
     }
     return 0
+}
+
 }

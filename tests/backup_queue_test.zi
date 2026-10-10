@@ -1,0 +1,28 @@
+Queue :: #import "backup_queue";
+#program_export
+Answer :: () -> s32 {
+    if !(Queue.Candidate(3,1,true,false,false,10,1)) { return 1 }
+    if !(Queue.Candidate(3,3,true,false,false,10,1)) { return 2 }
+    if !(Queue.Candidate(4,1,true,false,false,10,1)) { return 3 }
+    if !(Queue.Candidate(4,3,true,false,false,10,1)) { return 4 }
+    if !(Queue.Candidate(1,1,true,false,false,0,0)) { return 5 }
+    if Queue.Candidate(1,3,true,false,false,10,1) { return 6 }
+    if Queue.Candidate(2,1,true,false,false,10,1) { return 7 }
+    if Queue.Candidate(0,1,true,false,false,10,1) { return 8 }
+    if Queue.Candidate(8,1,true,false,false,10,1) { return 9 }
+    if Queue.Candidate(3,2,true,false,false,10,1) { return 10 }
+    if Queue.Candidate(3,1,false,false,false,10,1) { return 11 }
+    if Queue.Candidate(3,1,true,true,false,10,1) { return 12 }
+    if Queue.Candidate(3,1,true,false,true,10,1) { return 13 }
+    if Queue.Candidate(3,1,true,false,false,-1,1) { return 14 }
+    if Queue.Candidate(3,1,true,false,false,10,-1) { return 15 }
+    if !(Queue.RetainConfirmation(true,10,10,20,20,30,30)) { return 16 }
+    if Queue.RetainConfirmation(false,10,10,20,20,30,30) { return 17 }
+    if Queue.RetainConfirmation(true,10,11,20,20,30,30) { return 18 }
+    if Queue.RetainConfirmation(true,10,10,20,21,30,30) { return 19 }
+    if Queue.RetainConfirmation(true,10,10,20,20,30,31) { return 20 }
+    if Queue.RetainConfirmation(true,-1,-1,20,20,30,30) { return 21 }
+    return 42
+}
+#program_export
+main :: () -> s32 { return ifx Answer()==42 then 0 else Answer() }

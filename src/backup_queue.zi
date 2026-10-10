@@ -1,0 +1,16 @@
+// Camera backup decisions shared by the native app and Android's provider
+// adapter. A granted row is only a candidate, never proof of a remote backup.
+Candidate :: (access: s32, media: s32, selected: bool, pending: bool,
+    trashed: bool, bytes: s64, id: s64) -> bool {
+    if access<1 || access>7 || !selected || pending || trashed || bytes<0 || id<0 { return false }
+    if media==1 { return (access & 5)!=0 }
+    if media==3 { return (access & 6)!=0 }
+    return false
+}
+
+// Completed stamps refer to the exact provider version. A changed original
+// must rejoin the queue, even when the provider reuses its numeric row ID.
+RetainConfirmation :: (confirmed: bool, old_size: s64, size: s64,
+    old_modified: s64, modified: s64, old_generation: s64, generation: s64) -> bool {
+    return confirmed && size>=0 && old_size==size && old_modified==modified && old_generation==generation
+}

@@ -12,22 +12,29 @@ import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.os.Build;
 import android.os.ParcelFileDescriptor;
+import android.graphics.Bitmap;
+import android.util.Size;
 import android.provider.MediaStore;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import org.json.JSONArray;
 import org.json.JSONObject;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.BooleanSupplier;
 
 /** Platform provider, durable storage and job adapter. Eligibility is Ziran.
- * No original is read, changed or considered backed up by this scanner. */
+ * No original is changed. An item counts as backed up only after the pinned
+ * ThinkPad node acknowledges its encrypted record and holds every chunk. */
 final class BackupQueue {
     private static final Object STORAGE = new Object();
     private static final ExecutorService IO = Executors.newSingleThreadExecutor();
+    private static final ExecutorService NETWORK = Executors.newSingleThreadExecutor();
     static final int PERIODIC_JOB = 3381;
     private final Context context;
     private final Runnable changed;
@@ -36,7 +43,8 @@ final class BackupQueue {
     private volatile Set<String> selected = new HashSet<>();
     volatile boolean scanning;
     volatile int queued, paused, confirmed, prepared;
-    volatile boolean preparing;
+    volatile boolean preparing, uploading;
+    volatile String uploadFailure = "";
     volatile String prepareFailure = "";
     private volatile boolean prepareCanceled;
     private volatile Original staging;
@@ -99,6 +107,7 @@ final class BackupQueue {
         }
         if (!columns.contains("staged_id")) db.execSQL("ALTER TABLE items ADD COLUMN staged_id TEXT NOT NULL DEFAULT ''");
         if (!columns.contains("staged_manifest")) db.execSQL("ALTER TABLE items ADD COLUMN staged_manifest TEXT NOT NULL DEFAULT ''");
+        db.execSQL("CREATE TABLE IF NOT EXISTS node(key TEXT PRIMARY KEY, value INTEGER NOT NULL)");
         return db;
     }
 
@@ -250,7 +259,7 @@ final class BackupQueue {
         }
         selected = folders; queued = ready; paused = waiting; confirmed = done; prepared = staged;
         message = folders.isEmpty() ? "Choose device folders to queue for ThinkPad backup"
-            : ready + " queued; " + waiting + " paused; " + staged + " encrypted on device. Not uploaded to ThinkPad yet.";
+            : ready + " queued; " + waiting + " paused; " + staged + " encrypted, waiting for ThinkPad; " + done + " backed up to ThinkPad.";
     }
 
     private static final class Original {
@@ -329,6 +338,7 @@ final class BackupQueue {
                     }
                     staging = null; notifyChanged();
                 }
+                if (!closed && !prepareCanceled) requestUpload();
             } catch (Exception error) {
                 // Debug diagnostics contain only a fixed phase name, never keys,
                 // document paths, provider metadata or exception messages.
@@ -340,6 +350,167 @@ final class BackupQueue {
                 staging = null; preparing = false; notifyChanged();
             }
         });
+    }
+
+    private static final class Pending {
+        String volume, name, mime, staged;
+        long id, size, taken, width, height;
+        boolean video;
+    }
+
+    synchronized void requestUpload() {
+        if (closed || uploading) return;
+        uploading = true; uploadFailure = "";
+        notifyChanged();
+        NETWORK.execute(() -> {
+            try { upload(() -> closed); }
+            finally { uploading = false; notifyChanged(); }
+        });
+    }
+
+    private List<Pending> pending() {
+        List<Pending> items = new ArrayList<>();
+        synchronized (STORAGE) {
+            try (SQLiteDatabase db = open(); Cursor rows = db.rawQuery(
+                "SELECT volume,media_id,name,mime,size,taken,width,height,media_type,staged_id FROM items "
+                + "WHERE eligible=1 AND confirmed=0 AND staged_id<>'' ORDER BY media_id", null)) {
+                while (rows.moveToNext()) {
+                    Pending item = new Pending();
+                    item.volume = rows.getString(0); item.id = rows.getLong(1); item.name = rows.getString(2); item.mime = rows.getString(3);
+                    item.size = rows.getLong(4); item.taken = rows.getLong(5); item.width = rows.getLong(6); item.height = rows.getLong(7);
+                    item.video = rows.getInt(8) == 3; item.staged = rows.getString(9);
+                    items.add(item);
+                }
+            }
+        }
+        return items;
+    }
+
+    private long since() {
+        synchronized (STORAGE) {
+            try (SQLiteDatabase db = open(); Cursor row = db.rawQuery("SELECT value FROM node WHERE key='server_version'", null)) {
+                return row.moveToFirst() ? Math.max(0, row.getLong(0)) : 0;
+            }
+        }
+    }
+
+    // Gallery preview in the desktop format; a missing preview never blocks backup.
+    private byte[] preview(Pending item) {
+        if (Build.VERSION.SDK_INT < 29 || access(context) == 0) return null;
+        try {
+            Bitmap bitmap = context.getContentResolver().loadThumbnail(
+                ContentUris.withAppendedId(MediaStore.Files.getContentUri(item.volume), item.id), new Size(640, 640), null);
+            java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
+            boolean written = bitmap.compress(Bitmap.CompressFormat.JPEG, 85, output);
+            bitmap.recycle();
+            return written && output.size() > 0 && output.size() <= 4194304 ? output.toByteArray() : null;
+        } catch (Exception error) { return null; }
+    }
+
+    // Called by the activity or the OS job on its own worker. Returns true when
+    // every prepared item reached the pinned node or nothing was waiting.
+    boolean upload(java.util.function.BooleanSupplier canceled) {
+        String phase = "queue";
+        byte[] identity = null, device = null;
+        try {
+            List<Pending> items = pending();
+            if (items.isEmpty()) return true;
+            phase = "identity";
+            identity = DeviceBackup.readIdentity(context);
+            device = DeviceBackup.device(context);
+            File root = privateDirectory("camera-backup/staged");
+            phase = "node";
+            try (PinnedNode node = new PinnedNode(identity, device)) {
+                node.open();
+                long since = since();
+                for (Pending item : items) {
+                    if (canceled.getAsBoolean() || closed) return false;
+                    if (!item.staged.matches("[0-9a-f]{64}")) continue;
+                    phase = "manifest";
+                    File folder = new File(root, item.staged);
+                    byte[] staged;
+                    try (java.io.InputStream input = new java.io.FileInputStream(new File(folder, "manifest.json"))) {
+                        java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
+                        byte[] buffer = new byte[65536]; int count;
+                        while ((count = input.read(buffer)) > 0) {
+                            if (output.size() + count > 2097152) throw new IllegalStateException();
+                            output.write(buffer, 0, count);
+                        }
+                        staged = output.toByteArray();
+                    }
+                    JSONObject manifest = new JSONObject(new String(staged, StandardCharsets.UTF_8));
+                    if (!manifest.getString("id").equals(item.staged) || manifest.getLong("size") != item.size) throw new IllegalStateException();
+                    phase = "chunks";
+                    JSONArray chunks = manifest.getJSONObject("manifest").getJSONArray("chunks");
+                    for (int index = 0; index < chunks.length(); index++) {
+                        if (canceled.getAsBoolean() || closed) return false;
+                        File chunk = new File(folder, index + ".blob");
+                        if (!chunk.isFile() || !node.blob(chunks.getString(index), null, chunk)) throw new IllegalStateException();
+                    }
+                    phase = "preview";
+                    String previewId = "", previewBlob = "";
+                    byte[] jpeg = preview(item);
+                    if (jpeg != null) {
+                        byte[] sealed = PhotosActivity.nativeBackupPreview(identity, jpeg);
+                        if (sealed != null && sealed.length > 128) {
+                            String id = new String(sealed, 0, 64, StandardCharsets.US_ASCII), blob = new String(sealed, 64, 64, StandardCharsets.US_ASCII);
+                            if (node.blob(blob, Arrays.copyOfRange(sealed, 128, sealed.length), null)) { previewId = id; previewBlob = blob; }
+                        }
+                    }
+                    phase = "record";
+                    long version = -1;
+                    for (int attempt = 0; attempt < 2 && version < 0; attempt++) {
+                        byte[] request = PhotosActivity.nativeBackupRequest(identity, node.clientBytes(), since,
+                            item.name.getBytes(StandardCharsets.UTF_8), item.mime.getBytes(StandardCharsets.UTF_8), item.video,
+                            item.taken, item.width, item.height, staged, previewId.getBytes(StandardCharsets.US_ASCII),
+                            previewBlob.getBytes(StandardCharsets.US_ASCII));
+                        if (request == null) throw new IllegalStateException();
+                        PinnedNode.Reply reply = node.signed("POST", "/api/v1/sync", request, null, PinnedNode.digest(request), 8388608);
+                        // A rebuilt node restarts its counter; resend from zero once.
+                        if (reply.status == 409 && since > 0) { since = 0; continue; }
+                        if (reply.status != 200) throw new IllegalStateException();
+                        version = PhotosActivity.nativeBackupConfirmed(reply.body, since);
+                    }
+                    if (version < 0) throw new IllegalStateException();
+                    since = version;
+                    phase = "confirm";
+                    synchronized (STORAGE) {
+                        try (SQLiteDatabase db = open()) {
+                            db.beginTransaction();
+                            try {
+                                ContentValues cursor = new ContentValues(); cursor.put("key", "server_version"); cursor.put("value", version);
+                                db.insertWithOnConflict("node", null, cursor, SQLiteDatabase.CONFLICT_REPLACE);
+                                db.execSQL("UPDATE items SET confirmed=1 WHERE volume=? AND media_id=? AND staged_id=? AND confirmed=0",
+                                    new Object[]{item.volume, item.id, item.staged});
+                                db.setTransactionSuccessful();
+                            } finally { db.endTransaction(); }
+                            // The ThinkPad holds this ciphertext now; free the local copy
+                            // once no other queued version still needs it.
+                            boolean needed;
+                            try (Cursor row = db.rawQuery("SELECT COUNT(*) FROM items WHERE staged_id=? AND confirmed=0", new String[]{item.staged})) {
+                                needed = !row.moveToFirst() || row.getInt(0) > 0;
+                            }
+                            if (!needed) {
+                                File[] files = folder.listFiles();
+                                if (files != null) for (File file : files) file.delete();
+                                folder.delete();
+                            }
+                            snapshot(db);
+                        }
+                    }
+                    notifyChanged();
+                }
+            }
+            return true;
+        } catch (Exception error) {
+            // Diagnostics name only a fixed phase, never keys, paths or replies.
+            if (BuildConfig.DEBUG) uploadFailure = error instanceof PinnedNode.Refused ? ((PinnedNode.Refused)error).phase : phase;
+            message = "ThinkPad upload paused; encrypted copies and originals were preserved";
+            return false;
+        } finally {
+            if (identity != null) Arrays.fill(identity, (byte)0);
+            if (device != null) Arrays.fill(device, (byte)0);
+        }
     }
 
     private static String text(Cursor row, String name) { int at = row.getColumnIndexOrThrow(name); return row.isNull(at) ? "" : row.getString(at); }

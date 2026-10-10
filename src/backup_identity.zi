@@ -1,0 +1,81 @@
+// Read the existing desktop recovery file on mobile without changing account
+// identity, content keys or node pin. The platform stores only a verified result.
+#scope_module
+Keys :: #import "daochi_client/keys";
+Native :: #import "daochi_client/crypto_native";
+Crypto :: #import "backup_crypto";
+Policy :: #import "node_policy";
+UTF8 :: #import "std/utf8";
+#import "std/json_scan"
+#import "std/byte_text_linux"
+c :: #system_library "c";
+Allocate :: (bytes: usize) -> *void #foreign c "malloc";
+Release :: (bytes: *void) #foreign c "free";
+Hex :: (json: string, at: s32, output: []u8) -> bool {
+    text: [5121]u8
+    defer { Crypto.Clear(text[:]) }
+    if output.count<1 || output.count>2560 || ReadStringText(json,at,text[:])!=output.count*2 { return false }
+    for i: 0..output.count-1 {
+        value: s32
+        for j: 0..1 {
+            byte:=text[i*2+j]; digit: s32 = -1
+            if byte>=48 && byte<=57 { digit=cast(s32)byte-48 }
+            else if byte>=97 && byte<=102 { digit=cast(s32)byte-87 }
+            if digit<0 { Crypto.Clear(text[:]); return false }; value=value*16+digit
+        }
+        output[i]=cast(u8)value
+    }
+    Crypto.Clear(text[:]); return true
+}
+Fields :: (json: string, at: s32, names: []string, positions: []s32) -> bool {
+    if !Policy.Fields(json,at,names,positions) { return false }
+    for field: positions { if field<0 { return false } }
+    cursor:=Space(json,at+1); count: s32
+    while cursor>=0 && cursor<cast(s32)json.count && json[cursor]!=125 {
+        key:=ReadString(json,cursor); if !key.valid { return false }
+        cursor=Space(json,key.after); if cursor>=cast(s32)json.count || json[cursor]!=58 { return false }
+        cursor=Space(json,ValueEnd(json,Space(json,cursor+1),0)); count+=1
+        if cursor<0 || cursor>=cast(s32)json.count { return false }
+        if json[cursor]==125 { break }; if json[cursor]!=44 { return false }; cursor=Space(json,cursor+1)
+    }
+    return count==names.count
+}
+#scope_export
+Identity :: struct {
+    node: [32]u8; account: [32]u8; public: [1312]u8; private: [2560]u8; content: [32]u8
+}
+Clear :: (identity: *Identity) {
+    Crypto.Clear(identity.node[:]); Crypto.Clear(identity.account[:]); Crypto.Clear(identity.public[:]);
+    Crypto.Clear(identity.private[:]); Crypto.Clear(identity.content[:])
+}
+Recover :: (file: []u8, password: []u8, output: *Identity) -> bool {
+    Clear(output)
+    magic: [16]u8=.{80,72,79,84,79,83,45,82,69,67,79,86,69,82,89,1}
+    if file.count<73 || file.count>65608 || password.count<12 || password.count>1024 || !Native.Initialize() { return false }
+    for i: 0..15 { if file[i]!=magic[i] { return false } }
+    if !UTF8.Valid(TextFromBytes(password)) { return false }
+    characters: s32
+    for byte: password { if byte==0 { return false }; if (byte & 192)!=128 { characters+=1 } }
+    if characters<12 { return false }
+    key: [32]u8; defer { Crypto.Clear(key[:]) }
+    if !Native.DerivePassword(password,file[16:32],key[:],3,67108864) { return false }
+    count:=file.count-72
+    plain:=cast(*u8)Allocate(cast(usize)count)
+    if plain==null { return false }
+    bytes:=BytesFromPointer(plain,cast(u64)count)
+    defer { Crypto.Clear(bytes); Release(cast(*void)plain) }
+    aad: [18]u8=.{112,104,111,116,111,115,45,114,101,99,111,118,101,114,121,45,118,49}
+    if Native.Open(file[56:],aad[:],key[:],file[32:56],bytes)!=count { return false }
+    json:=TextFromBytes(bytes)
+    if !UTF8.Valid(json) || ValueEnd(json,0,0)!=cast(s32)json.count { return false }
+    names: [4]string=.{"version","node_id","account","identity"}; fields: [4]s32
+    if !Fields(json,0,names[:],fields[:]) { return false }
+    if json[fields[0]]!=49 || ValueEnd(json,fields[0],0)!=fields[0]+1 { return false }
+    staged: Identity; defer { Clear(*staged) }
+    if !Hex(json,fields[1],staged.node[:]) || !Hex(json,fields[2],staged.account[:]) { return false }
+    keys: [3]string=.{"public","private","content_key"}; positions: [3]s32
+    if !Fields(json,fields[3],keys[:],positions[:]) || !Hex(json,positions[0],staged.public[:]) ||
+        !Hex(json,positions[1],staged.private[:]) || !Hex(json,positions[2],staged.content[:]) { return false }
+    if !Keys.ValidateIdentity(staged.account[:],staged.public[:],staged.private[:]) { return false }
+    output.* = staged; return true
+}

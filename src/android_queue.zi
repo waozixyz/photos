@@ -1,0 +1,35 @@
+// Typed JNI calls for Android's storage adapter. The provider itself filters
+// selected-only grants; native policy still checks every candidate's state.
+#import "kryon/AndroidJni"
+#import "std/c_string"
+Queue :: #import "backup_queue";
+Candidate :: (env: *JniEnv, receiver: *void, access: s32, media: s32,
+    selected: u8, pending: u8, trashed: u8, bytes: s64, id: s64) -> s32 {
+    unused env; unused receiver
+    return ifx Queue.Candidate(access,media,selected!=0,pending!=0,trashed!=0,bytes,id) then 1 else 0
+}
+Retain :: (env: *JniEnv, receiver: *void, confirmed: u8, old_size: s64, size: s64,
+    old_modified: s64, modified: s64, old_generation: s64, generation: s64) -> s32 {
+    unused env; unused receiver
+    return ifx Queue.RetainConfirmation(confirmed!=0,old_size,size,old_modified,modified,old_generation,generation) then 1 else 0
+}
+CandidateFn :: #type (*JniEnv,*void,s32,s32,u8,u8,u8,s64,s64) -> s32 #c_call;
+RetainFn :: #type (*JniEnv,*void,u8,s64,s64,s64,s64,s64,s64) -> s32 #c_call;
+CandidateMethod :: struct { name: *u8; signature: *u8; procedure: CandidateFn }
+RetainMethod :: struct { name: *u8; signature: *u8; procedure: RetainFn }
+Register :: (vm: *JniVm) -> s32 {
+    env: *JniEnv
+    if vm.functions.GetEnv(vm,*env,JniVersion)!=0 || env==null { return -1 }
+    name: [96]u8; unused CopyCString("xyz/waozi/photos/PhotosActivity",name[:])
+    klass:=env.functions.FindClass(env,*name[0]); if klass==null { return -1 }
+    defer { env.functions.DeleteLocalRef(env,klass) }
+    method_name: [48]u8; signature: [48]u8
+    method: CandidateMethod
+    unused CopyCString("nativeBackupCandidate",method_name[:]); unused CopyCString("(IIZZZJJ)I",signature[:])
+    method.name=*method_name[0]; method.signature=*signature[0]; method.procedure=Candidate
+    if env.functions.RegisterNatives(env,klass,cast(*void)*method,1)!=0 { return -1 }
+    retain: RetainMethod
+    unused CopyCString("nativeRetainBackupConfirmation",method_name[:]); unused CopyCString("(ZJJJJJJ)I",signature[:])
+    retain.name=*method_name[0]; retain.signature=*signature[0]; retain.procedure=Retain
+    return env.functions.RegisterNatives(env,klass,cast(*void)*retain,1)
+}

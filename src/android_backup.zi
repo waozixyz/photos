@@ -1,0 +1,83 @@
+// Private binary bridge for account recovery. The Android adapter seals this
+// verified identity with the OS keystore; neither keys nor passwords enter JSON.
+#import "kryon/AndroidJni"
+#import "std/c_string"
+#import "std/byte_text_linux"
+Identity :: #import "backup_identity";
+Crypto :: #import "backup_crypto";
+Staging :: #import "backup_staging";
+c :: #system_library "c";
+Release :: (bytes: *void) #foreign c "free";
+StageContext :: struct { env: *JniEnv; receiver: *void; current: *void }
+Current :: (context: *void) -> bool {
+    stage:=cast(*StageContext)context
+    result:=stage.env.functions.CallBooleanMethodA(stage.env,stage.receiver,stage.current,null)
+    return stage.env.functions.ExceptionCheck(stage.env)==0 && result!=0
+}
+StageOriginal :: (env: *JniEnv, receiver: *void, identity_bytes: *void, fd: s32, size: s64, path_bytes: *void) -> *void {
+    if identity_bytes==null || path_bytes==null || fd<0 || size<0 || env.functions.GetArrayLength(env,identity_bytes)!=3968 { return null }
+    count:=env.functions.GetArrayLength(env,path_bytes); if count<1 || count>3800 { return null }
+    identity: Identity.Identity; path: [3801]u8
+    defer { Identity.Clear(*identity); Crypto.Clear(path[:]) }
+    env.functions.GetByteArrayRegion(env,identity_bytes,0,3968,cast(*u8)*identity)
+    env.functions.GetByteArrayRegion(env,path_bytes,0,count,*path[0])
+    if env.functions.ExceptionCheck(env)!=0 { return null }
+    digest: [32]u8
+    if !Crypto.Digest(identity.public[:],digest[:]) { return null }
+    for i: 0..31 { if digest[i]!=identity.account[i] { return null } }
+    klass:=env.functions.GetObjectClass(env,receiver); if klass==null { return null }
+    defer { env.functions.DeleteLocalRef(env,klass) }
+    method_name: [32]u8; signature: [8]u8
+    unused CopyCString("backupStageCurrent",method_name[:]); unused CopyCString("()Z",signature[:])
+    method:=env.functions.GetMethodID(env,klass,*method_name[0],*signature[0]); if method==null { return null }
+    context: StageContext=.{env,receiver,method}
+    result:=Staging.Stage(fd,size,TextFromBytes(path[:count]),identity.account[:],identity.content[:],cast(*void)*context,Current)
+    defer {
+        if result.count > 0 {
+            manifest_pointer := cast(*TextDescriptor)*result
+            Release(cast(*void)manifest_pointer.data)
+        }
+    }
+    if result.count<1 || result.count>2097152 || env.functions.ExceptionCheck(env)!=0 { return null }
+    output:=env.functions.NewByteArray(env,cast(s32)result.count)
+    descriptor:=cast(*TextDescriptor)*result
+    if output!=null { env.functions.SetByteArrayRegion(env,output,0,cast(s32)result.count,descriptor.data) }
+    return output
+}
+ReadIdentity :: (env: *JniEnv, receiver: *void, file: *void, password: *void) -> *void {
+    unused receiver
+    if file==null || password==null { return null }
+    file_size:=env.functions.GetArrayLength(env,file); password_size:=env.functions.GetArrayLength(env,password)
+    if file_size<73 || file_size>65608 || password_size<12 || password_size>1024 { return null }
+    file_bytes: [65608]u8; secret: [1024]u8
+    defer { Crypto.Clear(file_bytes[:]); Crypto.Clear(secret[:]) }
+    env.functions.GetByteArrayRegion(env,file,0,file_size,*file_bytes[0])
+    env.functions.GetByteArrayRegion(env,password,0,password_size,*secret[0])
+    if env.functions.ExceptionCheck(env)!=0 { return null }
+    identity: Identity.Identity; defer { Identity.Clear(*identity) }
+    if !Identity.Recover(file_bytes[:file_size],secret[:password_size],*identity) { return null }
+    size:=cast(s32)size_of(Identity.Identity)
+    if size!=3968 { return null }
+    result:=env.functions.NewByteArray(env,size)
+    if result!=null { env.functions.SetByteArrayRegion(env,result,0,size,cast(*u8)*identity) }
+    return result
+}
+ReadIdentityFn :: #type (*JniEnv,*void,*void,*void) -> *void #c_call;
+NativeMethod :: struct { name: *u8; signature: *u8; procedure: ReadIdentityFn }
+StageFn :: #type (*JniEnv,*void,*void,s32,s64,*void) -> *void #c_call;
+StageMethod :: struct { name: *u8; signature: *u8; procedure: StageFn }
+Register :: (vm: *JniVm) -> s32 {
+    env: *JniEnv
+    if vm.functions.GetEnv(vm,*env,JniVersion)!=0 || env==null { return -1 }
+    name: [96]u8; unused CopyCString("xyz/waozi/photos/PhotosActivity",name[:])
+    klass:=env.functions.FindClass(env,*name[0]); if klass==null { return -1 }
+    defer { env.functions.DeleteLocalRef(env,klass) }
+    method: NativeMethod; signature: [32]u8; method_name: [32]u8
+    unused CopyCString("nativeReadBackupIdentity",method_name[:]); unused CopyCString("([B[B)[B",signature[:])
+    method.name=*method_name[0]; method.signature=*signature[0]; method.procedure=ReadIdentity
+    if env.functions.RegisterNatives(env,klass,cast(*void)*method,1)!=0 { return -1 }
+    stage: StageMethod
+    unused CopyCString("nativeStageBackupOriginal",method_name[:]); unused CopyCString("([BIJ[B)[B",signature[:])
+    stage.name=*method_name[0]; stage.signature=*signature[0]; stage.procedure=StageOriginal
+    return env.functions.RegisterNatives(env,klass,cast(*void)*stage,1)
+}

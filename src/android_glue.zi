@@ -1,0 +1,17 @@
+#import "kryon/AndroidDevice"
+#import "kryon/AndroidJni"
+Backup :: #import "android_backup";
+Queue :: #import "android_queue";
+Upload :: #import "android_upload";
+
+// Registers Kryon's canonical Android natives on this activity. Keep your
+// own JNI_OnLoad and call AndroidJniOnLoad yourself to add application
+// methods on top.
+#program_export
+JNI_OnLoad :: (vm: *JniVm, reserved: *void) -> s32 {
+    unused reserved
+    result:=AndroidJniOnLoad(vm, "xyz/waozi/photos/PhotosActivity")
+    if result!=JniVersion { return result }
+    if Backup.Register(vm)!=0 || Queue.Register(vm)!=0 || Upload.Register(vm)!=0 { return -1 }
+    return JniVersion
+}

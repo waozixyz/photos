@@ -1,0 +1,62 @@
+// Desktop probe for Android's upload request builder: binary stdin frames in,
+// exact request bytes out, so Python can open them with the desktop sync path.
+Upload :: #import "backup_upload";
+Identity :: #import "backup_identity";
+Wire :: #import "sync_crypto";
+#import "std/byte_text_linux"
+c :: #system_library "c";
+Allocate :: (bytes: usize) -> *void #foreign c "malloc";
+Field :: (output: []u8) -> s64 {
+    size: [4]u8
+    if !Wire.ReadAll(*size[0],4) { return -1 }
+    count := cast(s64)Wire.Number(size[:])
+    if count > output.count || (count > 0 && !Wire.ReadAll(*output[0],count)) { return -1 }
+    return count
+}
+Value :: (bytes: []u8) -> s64 { result: s64; for byte: bytes { result = (result << 8) | cast(s64)byte }; return result }
+main :: () -> s32 {
+    // mode 1 request, 2 preview, 3 confirmation, 4 node policy.
+    mode: [1]u8
+    identity: Identity.Identity
+    defer { Identity.Clear(*identity) }
+    if !Wire.ReadAll(*mode[0],1) || !Wire.ReadAll(cast(*u8)*identity,size_of(Identity.Identity)) { return 2 }
+    big := cast(*u8)Allocate(4194304); out := cast(*u8)Allocate(4194400)
+    if big == null || out == null { return 2 }
+    input := BytesFromPointer(big,4194304); output := BytesFromPointer(out,4194400)
+    if mode[0] == 1 {
+        client: [128]u8; name: [4096]u8; mime: [128]u8; preview: [64]u8; blob: [64]u8; numbers: [40]u8
+        client_count := Field(client[:]); name_count := Field(name[:]); mime_count := Field(mime[:])
+        staged_count := Field(input); preview_count := Field(preview[:]); blob_count := Field(blob[:])
+        if client_count < 0 || name_count < 0 || mime_count < 0 || staged_count < 0 || preview_count < 0 || blob_count < 0 ||
+            !Wire.ReadAll(*numbers[0],40) { return 2 }
+        media: Upload.Media
+        media.name = TextFromBytes(name[:name_count]); media.mime = TextFromBytes(mime[:mime_count])
+        media.video = Value(numbers[0:8]) == 3; media.taken_ms = Value(numbers[8:16])
+        media.width = Value(numbers[16:24]); media.height = Value(numbers[24:32])
+        length := Upload.Request(*identity, TextFromBytes(client[:client_count]), Value(numbers[32:40]), media,
+            TextFromBytes(input[:staged_count]), TextFromBytes(preview[:preview_count]), TextFromBytes(blob[:blob_count]), output)
+        if length < 0 { return 1 }
+        return ifx Wire.SendAll(out,length) then 0 else 2
+    }
+    count := Field(input)
+    if count < 0 { return 2 }
+    if mode[0] == 2 {
+        preview_id: [65]u8; blob_id: [65]u8
+        length := Upload.Preview(*identity, input[:count], preview_id[:], blob_id[:], output)
+        if length < 0 { return 1 }
+        return ifx Wire.SendAll(*preview_id[0],64) && Wire.SendAll(*blob_id[0],64) && Wire.SendAll(out,length) then 0 else 2
+    }
+    if mode[0] == 3 {
+        since: [8]u8
+        if !Wire.ReadAll(*since[0],8) { return 2 }
+        value: s64; for byte: since { value = (value << 8) | cast(s64)byte }
+        result := Upload.Confirmed(TextFromBytes(input[:count]), value)
+        reply: [8]u8; for i: 0..7 { reply[i] = cast(u8)(cast(u64)result >> cast(u64)((7-i)*8)) }
+        return ifx Wire.SendAll(*reply[0],8) then 0 else 2
+    }
+    if mode[0] == 4 {
+        reply: [1]u8; reply[0] = cast(u8)Upload.Node(*identity, TextFromBytes(input[:count]))
+        return ifx Wire.SendAll(*reply[0],1) then 0 else 2
+    }
+    return 2
+}

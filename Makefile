@@ -77,6 +77,29 @@ selection-drag-test:
 	$(ZIRAN) bundle --project $(PACKAGE_FLAGS) --root tests --entry selection_drag_test:Answer -o build/selection-drag-test.zib tests/selection_drag_test.zi
 	test "$$($(ZIRAN) run build/selection-drag-test.zib)" = 42
 test: selection-drag-test
+.PHONY: mobile-viewer-test
+mobile-viewer-test:
+	$(ZIRAN) build --project $(PACKAGE_FLAGS) --root tests --target=c --entry mobile_viewer_test:main --exe -o build/mobile-viewer-test tests/mobile_viewer_test.zi
+	build/mobile-viewer-test/mobile_viewer_test
+	$(ZIRAN) bundle --project $(PACKAGE_FLAGS) --root tests --entry mobile_viewer_test:Answer -o build/mobile-viewer-test.zib tests/mobile_viewer_test.zi
+	test "$$($(ZIRAN) run build/mobile-viewer-test.zib)" = 42
+test: mobile-viewer-test
+.PHONY: backup-crypto-test
+backup-crypto-test:
+	LDLIBS='-l:libsodium.so.23' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root tests --target=c --entry backup_crypto_test:main --exe -o build/backup-crypto-test tests/backup_crypto_test.zi
+	build/backup-crypto-test/backup_crypto_test
+test: backup-crypto-test
+.PHONY: backup-identity-test
+backup-identity-test: build/liboqs/lib/liboqs.a
+	LDLIBS='$(abspath build/liboqs/lib/liboqs.a) -l:libsodium.so.23 -lm' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root tests --target=c --entry backup_identity_probe:main --exe -o build/backup-identity-test tests/backup_identity_probe.zi
+test: backup-identity-test
+.PHONY: backup-queue-test
+backup-queue-test:
+	$(ZIRAN) build --project $(PACKAGE_FLAGS) --root tests --target=c --entry backup_queue_test:main --exe -o build/backup-queue-test tests/backup_queue_test.zi
+	build/backup-queue-test/backup_queue_test
+	$(ZIRAN) bundle --project $(PACKAGE_FLAGS) --root tests --entry backup_queue_test:Answer -o build/backup-queue-test.zib tests/backup_queue_test.zi
+	test "$$($(ZIRAN) run build/backup-queue-test.zib)" = 42
+test: backup-queue-test
 .PHONY: backup-staging-test
 backup-staging-test:
 	LDLIBS='-l:libsodium.so.23' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root tests --target=c --entry backup_staging_probe:main --exe -o build/backup-staging-test tests/backup_staging_probe.zi
@@ -87,6 +110,13 @@ backup-staging-memory-test: backup-staging-test
 		$(filter-out build/backup-staging-test/ziran_exe_main.c build/backup-staging-test/backup_staging_probe.c,$(wildcard build/backup-staging-test/*.c)) \
 		-l:libsodium.so.23 -o build/backup-staging-test/memory-test
 test: backup-staging-memory-test
+.PHONY: backup-upload-test android-upload-test
+backup-upload-test: build/liboqs/lib/liboqs.a
+	LDLIBS='$(abspath build/liboqs/lib/liboqs.a) -l:libsodium.so.23 -lm' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root tests --target=c --entry backup_upload_probe:main --exe -o build/backup-upload-test tests/backup_upload_probe.zi
+test: backup-upload-test
+# Real signed Android uploads against an isolated Daochi node (set PHOTOS_DAOCHI).
+android-upload-test: backup-upload-test backup-staging-test sync-http sync-transaction sync-page sync-crypto account-sign
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER $(PYTHON) tests/android_upload_node.py
 .PHONY: swipe-window-test swipe-portable-test swipe-hosted-test
 swipe-window-test: build
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/swipe_window.py
@@ -139,6 +169,25 @@ build bundle test: access-sessions
 PYTHON ?= build/venv/bin/python
 PREFIX ?= $(HOME)/.local
 PACKAGE_FLAGS := $(if $(wildcard ziran.local.toml),,--locked)
+.PHONY: android android-crypto android-test-build android-test-fixtures android-gallery-test
+android-crypto:
+	@set -e; sodium_source=$$($(ZIRAN) pkg path libsodium $(PACKAGE_FLAGS)); \
+	python3 scripts/android-crypto.py --source "$$sodium_source" --abis "$${KRYON_ANDROID_ABIS:-armeabi-v7a,arm64-v8a,x86_64}"
+android: android-crypto
+	@set -e; oqs_source=$$($(ZIRAN) pkg path liboqs $(PACKAGE_FLAGS)); \
+	PHOTOS_LIBOQS_SRC="$$oqs_source" $(ZIRAN) tool kryon build android $(PACKAGE_FLAGS)
+android-test-fixtures: account-sign recovery-crypto
+	$(PYTHON) scripts/android-fixtures.py
+android-test-build: android android-test-fixtures
+	@set -e; kryon_source=$$($(ZIRAN) pkg path kryon $(PACKAGE_FLAGS)); \
+	ziran_source=$$($(ZIRAN) pkg path ziran $(PACKAGE_FLAGS)); \
+	raylib_source=$$($(ZIRAN) pkg path raylib $(PACKAGE_FLAGS)); \
+	oqs_source=$$($(ZIRAN) pkg path liboqs $(PACKAGE_FLAGS)); \
+	ANDROID_HOME="$${ANDROID_HOME:-$$HOME/Android/Sdk}" KRYON_DIR="$$kryon_source" \
+	ZIRAN_DIR="$$ziran_source" RAYLIB_DIR="$$raylib_source/src" PHOTOS_LIBOQS_SRC="$$oqs_source" \
+	sh droid/gradlew -p droid assembleDebugAndroidTest
+android-gallery-test: android-test-build
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 $(PYTHON) tests/android_gallery.py
 .PHONY: build bundle image-editor video-editor vault-auth library-query photo-decoder test sync-test window-test video-window-test video-portable-test playback-window-test playback-portable-test portable-test hosted-test install
 .PHONY: semantic-engine semantic-models text-engine text-models qr-engine qr-window-test qr-portable-test
 qr-engine:

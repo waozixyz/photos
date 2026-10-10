@@ -1,0 +1,67 @@
+plugins {
+    id 'com.android.application'
+}
+
+// kryon build --profile android passes the checkouts through the environment;
+// a plain gradle invocation can pass the same values as properties.
+def envOrProp = { String envName, String propName ->
+    System.getenv(envName) ?: project.findProperty(propName)
+}
+def kryonDir = envOrProp('KRYON_DIR', 'kryon.dir')
+def ziranDir = envOrProp('ZIRAN_DIR', 'ziran.dir')
+def raylibDir = envOrProp('RAYLIB_DIR', 'raylib.dir')
+def oqsDir = envOrProp('PHOTOS_LIBOQS_SRC', 'photos.liboqs')
+if (kryonDir == null || ziranDir == null || raylibDir == null || oqsDir == null) {
+    throw new GradleException(
+        'Pass -Pkryon.dir=... -Pziran.dir=... -Praylib.dir=... ' +
+        '-Pphotos.liboqs=... or build through make android')
+}
+def androidAbis = (project.findProperty('app.abis') ?:
+    System.getenv('KRYON_ANDROID_ABIS') ?: 'armeabi-v7a,arm64-v8a,x86_64').split(',').toList()
+
+android {
+    namespace 'xyz.waozi.photos'
+    compileSdk 36
+    buildFeatures { buildConfig true }
+    sourceSets { androidTest.assets.srcDirs += new File(rootProject.projectDir.parentFile, 'build/android/fixtures') }
+    ndkVersion '28.2.13676358'
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    defaultConfig {
+        applicationId 'xyz.waozi.photos'
+        minSdk Integer.parseInt((project.findProperty('app.minSdk') ?: '28').toString())
+        targetSdk 36
+        def release = new File(rootProject.projectDir.parentFile, 'VERSION').text.trim()
+        def numbers = release.split('\\.').collect { Integer.parseInt(it) }
+        versionCode numbers[0] * 1000000 + numbers[1] * 1000 + numbers[2]
+        versionName release
+        testInstrumentationRunner 'xyz.waozi.photos.PhotosGalleryProbe'
+        ndk {
+            abiFilters += androidAbis
+        }
+        externalNativeBuild {
+            cmake {
+                arguments '-DKRYON_DIR=' + kryonDir,
+                    '-DZIRAN_DIR=' + ziranDir,
+                    '-DRAYLIB_DIR=' + raylibDir,
+                    '-DPHOTOS_LIBOQS_SRC=' + oqsDir
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+}

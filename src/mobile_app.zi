@@ -1,0 +1,227 @@
+// Native Android gallery. Kryon owns layout, scrolling and every UI action;
+// the OS adapter exposes the granted device media and decoded private previews.
+using UI :: #import "kryon/Widgets";
+using Media :: #import "mobile_media";
+Input :: #import "kryon/tree_input";
+ScrollDevice :: #import "kryon/ScrollDevice";
+JNI :: #import "kryon/AndroidJni";
+Device :: #import "kryon/AndroidDevice";
+Theme :: #import "kryon/SystemTheme";
+Palette :: #import "kryon/SystemThemeHost";
+Viewer :: #import "viewer";
+Gesture :: #import "mobile_viewer";
+Host :: #import "kryon/Raylib";
+Crypto :: #import "backup_crypto";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+scroll: s32; last_generation: s64 = -1; settings: bool;
+last_selected: s64 = -1; theme: s32 = -1;
+font_ready: bool;
+gesture: Gesture.State;
+password: [1025]u8; password_cursor: s32; password_anchor: s32; password_focused: bool;
+ClearPassword :: () {
+    for i: 0..1024 { password[i]=0 }
+    password_cursor=0; password_anchor=0; password_focused=false
+}
+Password :: (session: Session, bounds: Rectangle, key: s32) {
+    snapshot: [1025]u8; for i: 0..1024 { snapshot[i]=password[i] }
+    typed_bytes: [256]u8
+    defer { Crypto.Clear(snapshot[:]); Crypto.Clear(typed_bytes[:]) }
+    field: TextFieldProps; field.key=84; field.focus_id=84; field.bounds=bounds; field.label="Recovery password"
+    field.value=TextFromCString(*snapshot[0]); field.max_bytes=1024; field.secure=true; mask: [1025]u8; characters: s32
+    for byte: field.value { if (byte & 192)!=128 { mask[characters]=42; characters+=1 } }
+    field.display_value=TextFromCString(*mask[0]); field.cursor=password_cursor; field.anchor=password_anchor; field.focused=password_focused
+    typed:=TypedTextTake(session,typed_bytes[:])
+    if field.focused { field.input=TextFieldInputFor(key,KeyboardModifiers(session),typed) }
+    result:=TextField(session,field); password_cursor=result.cursor; password_anchor=result.anchor; password_focused=result.focused
+    if result.edit.changed {
+        length:=cast(s32)field.value.count; change:=result.edit; next:=length-(change.end-change.start)+cast(s32)change.replacement.count
+        if change.start>=0 && change.end>=change.start && change.end<=length && next<=1024 {
+            tail: [1025]u8; count:=length-change.end
+            for i: 0..count-1 { tail[i]=password[change.end+i] }
+            for i: 0..cast(s32)change.replacement.count-1 { password[change.start+i]=change.replacement[i] }
+            for i: 0..count-1 { password[change.start+change.replacement.count+i]=tail[i] }
+            for i: next..1024 { password[i]=0 }; for i: 0..1024 { tail[i]=0 }
+        }
+    }
+}
+Label :: (session: Session, key: u64, value: string, bounds: Rectangle, font: s32 = 15) {
+    props: TextProps; props.key=key; props.text=value; props.bounds=bounds; props.font=font; props.wrap=TextWrap.TextWrapNone; Text(session,props)
+}
+Action :: (session: Session, id: s32, value: string, bounds: Rectangle, enabled: bool = true) -> bool {
+    props: ButtonProps; props.key=cast(u64)id; props.id=id; props.label=value; props.bounds=bounds; props.disabled=!enabled; return Button(session,props)==1
+}
+Picture :: (session: Session, key: u64, photo: Photo, bounds: Rectangle, cover: bool) {
+    if photo.image[0]==0 { return }
+    props: ImageProps; props.key=key; props.asset_path=TextFromCString(*photo.image[0]); props.alt_text=TextFromCString(*photo.name[0]); props.bounds=bounds
+    props.fit=ifx cover then ImageFit.ImageFitCover else ImageFit.ImageFitContain; Image(session,props)
+}
+Frame :: (session: Session, viewport: Rectangle) -> s32 {
+    if Device.AndroidLifecyclePaused()!=0 || Device.AndroidLifecycleFocused()==0 {
+        Media.Clear(); Media.last_poll=-1.0
+        Gesture.Reset(*gesture); Viewer.Reset(); ClearPassword()
+        return 0
+    }
+    Media.Poll()
+    if !font_ready || !Host.SelectTypeface("ui") {
+        // Android can replace the graphics context after an OS dialog or
+        // background transition. The host then releases its font textures.
+        font_ready=Media.typeface[0]!=0 && Host.LoadTypefaceFile("ui",TextFromCString(*Media.typeface[0]),null,0)
+        if !font_ready { font_ready=Host.LoadSystemTypeface("ui") }
+        if font_ready { unused Host.SelectTypeface("ui") }
+    }
+    #if #defined(PHOTOS_VERIFY) {
+        proof: JNI.AndroidJniSession
+        if font_ready && JNI.AndroidJniAttachCurrent(*proof)!=0 {
+            check:=JNI.AndroidJniMethod(*proof,"onTypefaceChecked","(I)V")
+            if check!=null {
+                args: [1]JNI.JniValue; args[0].integer=Host.MeasureGlyphWidth("写真",24,"ui")
+                proof.env.functions.CallVoidMethodA(proof.env,proof.activity,check,*args[0])
+            }
+            JNI.AndroidJniDetachCurrent(*proof)
+        }
+    }
+    if Media.locked || Media.backup_pending || Media.backup_configured || !Media.recovery_selected { ClearPassword() }
+    dark:=Device.AndroidSystemDark()
+    if dark!=theme { unused Palette.SystemPaletteInstall(Theme.SystemPaletteFallback(dark!=0)); theme=dark }
+    if Media.selected!=last_selected { Viewer.Reset(); Gesture.Reset(*gesture); last_selected=Media.selected }
+    if settings || Media.loading || Media.selected<0 { Gesture.Reset(*gesture) }
+    if Media.generation!=last_generation { scroll=0; last_generation=Media.generation }
+    background: BoxProps; background.key=1; background.bounds=viewport; background.fill=StyleTokenColor("canvas"); Box(session,background)
+    x:=viewport.x+12.0; y:=viewport.y+12.0; width:=viewport.width-24.0
+    key:=KeyboardTake(session)
+    if password_focused && (key==4 || key==Input.KeyEscape) { password_focused=false; key=0 }
+    if key==4 || key==Input.KeyEscape {
+        if settings { settings=false; ClearPassword() }
+        else if Media.selected>=0 { Media.Request("back") }
+        else if Media.album[0]!=0 { Media.Request("back") }
+        else { JNI.AndroidJniFinishActivity() }
+    }
+    Label(session,2,"Photos",.{x,y,width-96.0,36.0},28)
+    if Media.locked {
+        Gesture.Reset(*gesture); Viewer.Reset()
+        Label(session,4,"Photos is locked",.{x,y+80.0,width,40.0},24)
+        Label(session,5,"Confirm your device screen lock to open Photos.",.{x,y+134.0,width,30.0},14)
+        Label(session,8,TextFromCString(*Media.security_status[0]),.{x,y+316.0,width,30.0},14)
+        if Action(session,6,"Unlock",.{x,y+192.0,width,48.0},!Media.auth_pending) { Media.Request("unlock") }
+        if !Media.device_secure && Action(session,7,"Device security settings",.{x,y+252.0,width,48.0}) { Media.Request("device_security") }
+        return 0
+    }
+    if Action(session,3,"Access",.{x+width-84.0,y,84.0,36.0}) { settings=true }
+    y+=46.0
+    tabs: [4]string=.{"Photos","Albums","Videos","Settings"}
+    for i: 0..3 {
+        if Action(session,10+cast(s32)i,tabs[i],.{x+cast(float32)i*(width/4.0),y,width/4.0-4.0,40.0}) {
+            settings=i==3; scroll=0
+            if i==0 { Media.Request("view","photos") }; if i==1 { Media.Request("view","albums") }; if i==2 { Media.Request("view","videos") }
+        }
+    }
+    y+=50.0
+    Label(session,20,TextFromCString(*Media.status[0]),.{x,y,width,26.0},14); y+=34.0
+    if settings || Media.permission_bits==0 {
+        pointer:=Input.PointerSample(session)
+        ScrollDevice.BeginScrollFrame(session,.{pointer.x,pointer.y},pointer.pressed,pointer.down,pointer.released,PointerWheelTake(session,viewport),ClockSeconds())
+        panel: ScrollProps; panel.key=70; panel.bounds=.{x,y,width,viewport.y+viewport.height-y-12.0}; panel.content_height=1236; panel.scroll_offset=scroll
+        scrolled:=Scroll(session,panel); scroll=scrolled.scroll_offset; y-=cast(float32)scroll
+        Label(session,21,"Photo access",.{x,y,width,34.0},24)
+        Label(session,22,"Choose which device photos Photos can read.",.{x,y+44.0,width,28.0},14)
+        if Action(session,23,"Choose photos and videos",.{x,y+86.0,width,44.0}) { Media.Request("access") }
+        if Action(session,24,"System settings",.{x,y+142.0,width,44.0}) { Media.Request("settings") }
+        if Action(session,25,"Refresh gallery",.{x,y+198.0,width,44.0},Media.permission_bits!=0) { settings=false; Media.Request("refresh") }
+        Label(session,26,"Your original files stay on this device.",.{x,y+262.0,width,26.0},14)
+        Label(session,71,"Privacy",.{x,y+310.0,width,34.0},24)
+        if Action(session,72,ifx Media.lock_enabled then "Turn off device lock" else "Enable device lock",.{x,y+356.0,width,44.0},!Media.auth_pending) { Media.Request(ifx Media.lock_enabled then "disable_lock" else "enable_lock") }
+        if Media.lock_enabled && Action(session,73,"Lock now",.{x,y+412.0,width,44.0},!Media.auth_pending) { settings=false; Media.Request("lock") }
+        if Action(session,74,ifx Media.hide_content then "Allow screenshots and recent-app previews" else "Hide content in screenshots and recent apps",.{x,y+468.0,width,44.0}) { Media.Request("hide_content") }
+        Label(session,75,"Device lock asks again when Photos returns from the background.",.{x,y+532.0,width,36.0},14)
+        Label(session,76,TextFromCString(*Media.security_status[0]),.{x,y+578.0,width,30.0},14)
+        Label(session,80,"ThinkPad backup",.{x,y+626.0,width,34.0},24)
+        Label(session,81,TextFromCString(*Media.backup_status[0]),.{x,y+668.0,width,28.0},14)
+        if !Media.backup_configured {
+            if Action(session,82,"Choose encrypted recovery file",.{x,y+710.0,width,44.0},!Media.backup_pending) { ClearPassword(); Media.Request("choose_recovery") }
+            if Media.recovery_selected && !Media.backup_pending {
+                Password(session,.{x,y+766.0,width,48.0},key)
+                if Action(session,85,"Restore backup keys",.{x,y+826.0,width,44.0},password[0]!=0) {
+                    Media.Restore(TextFromCString(*password[0])); ClearPassword()
+                }
+            }
+        }
+        Label(session,86,"Use the recovery file saved in desktop Photos.",.{x,y+888.0,width,30.0},14)
+        Label(session,87,TextFromCString(*Media.backup_queue_status[0]),.{x,y+928.0,width,30.0},14)
+        if Media.backup_ready {
+            if Action(session,88,"Scan selected folders",.{x,y+972.0,width,44.0},!Media.backup_scanning) { Media.Request("scan_backup") }
+            if Action(session,89,"Stop camera queue",.{x,y+1028.0,width,44.0},Media.backup_folder_count>0) { Media.Request("stop_backup_queue") }
+            if Action(session,91,"Prepare selected photos",.{x,y+1084.0,width,44.0},!Media.backup_preparing && Media.backup_queued>Media.backup_prepared) { Media.Request("prepare_backup") }
+            if Action(session,92,ifx Media.backup_uploading then "Uploading to ThinkPad" else "Upload to ThinkPad",.{x,y+1140.0,width,44.0},!Media.backup_uploading && Media.backup_prepared>0) { Media.Request("upload_backup") }
+        }
+        if scrolled.opened { End(session) }
+        return 0
+    }
+    if Media.selected>=0 && Media.count>0 {
+        photo: Photo=Media.photos[0]
+        if Action(session,30,"Back",.{x,y,84.0,40.0}) { Media.Request("back") }
+        if photo.video && Action(session,31,"Play video",.{x+96.0,y,width-96.0,40.0}) { Media.Request("play") }
+        if !photo.video && Action(session,31,"Share",.{x+96.0,y,width-96.0,40.0}) { Media.Request("share") }
+        image_bounds:=Rectangle.{x,y+50.0,width,viewport.y+viewport.height-y-234.0}
+        touch:=Input.PointerSample(session)
+        move:=Gesture.Update(*gesture,!Media.loading,Input.PointInBounds(touch.x,touch.y,image_bounds),touch.x,touch.y,
+            touch.pressed,touch.down,touch.released,Clock.Milliseconds(),image_bounds.width,Viewer.zoom)
+        if move.navigation!=0 { Media.Request(ifx move.navigation>0 then "next" else "previous") }
+        if move.double_tap { if Viewer.zoom>1.01 { Viewer.Fit() } else { Viewer.ChangeZoom(2.0) } }
+        Viewer.Draw(session,40,TextFromCString(*Media.photos[0].image[0]),TextFromCString(*Media.photos[0].name[0]),image_bounds)
+        controls:=viewport.y+viewport.height-172.0
+        if Action(session,32,"Previous",.{x,controls,width/4.0-3.0,40.0},!Media.loading) { Media.Request("previous") }
+        if Action(session,33,"Fit",.{x+width/4.0,controls,width/4.0-3.0,40.0}) { Viewer.Fit() }
+        if Action(session,34,"Zoom +",.{x+width/2.0,controls,width/4.0-3.0,40.0}) { Viewer.ChangeZoom(1.5) }
+        if Action(session,35,"Next",.{x+3.0*width/4.0,controls,width/4.0-3.0,40.0},!Media.loading) { Media.Request("next") }
+        Label(session,41,TextFromCString(*photo.name[0]),.{x,viewport.y+viewport.height-114.0,width,28.0},16)
+        Label(session,42,TextFromCString(*photo.date[0]),.{x,viewport.y+viewport.height-82.0,width,24.0},14)
+        Label(session,43,TextFromCString(*photo.folder[0]),.{x,viewport.y+viewport.height-52.0,width,24.0},14)
+        return 0
+    }
+    body:=Rectangle.{x,y,width,viewport.y+viewport.height-y-68.0}
+    if Media.album[0]!=0 {
+        if Action(session,63,"Back to albums",.{x,y,width,36.0}) { Media.Request("back") }
+        body.y+=44.0; body.height-=44.0; y+=44.0
+        if Media.backup_ready {
+            if Action(session,90,ifx Media.backup_folder_selected then "Pause backup for this folder" else "Queue this folder for backup",.{x,y,width,40.0},!Media.backup_scanning) { Media.Request("backup_folder") }
+            body.y+=48.0; body.height-=48.0; y+=48.0
+        }
+    }
+    isAlbums:=TextFromCString(*Media.view[0])=="albums"
+    columns:=cast(s32)(width/112.0); if columns<2 { columns=2 }; if columns>6 { columns=6 }
+    cell:=(width-cast(float32)(columns-1)*8.0)/cast(float32)columns
+    height: float32=ifx isAlbums then 76.0 else cell+50.0
+    count:=ifx isAlbums then Media.album_count else Media.count
+    if count==0 && !Media.loading {
+        Label(session,64,"No accessible photos in this view.",.{x,y+24.0,width,30.0},16)
+    }
+    rows:=ifx isAlbums then count else (count+columns-1)/columns
+    pointer:=Input.PointerSample(session)
+    ScrollDevice.BeginScrollFrame(session,.{pointer.x,pointer.y},pointer.pressed,pointer.down,pointer.released,PointerWheelTake(session,body),ClockSeconds())
+    props: ScrollProps; props.key=50; props.bounds=body; props.content_height=cast(s32)(cast(float32)rows*height); props.scroll_offset=scroll
+    scrolling:=Scroll(session,props); scroll=scrolling.scroll_offset
+    for i: 0..count-1 {
+        bx:=x+(ifx isAlbums then 0.0 else cast(float32)(i%columns)*(cell+8.0))
+        by:=y+cast(float32)(ifx isAlbums then i else i/columns)*height-cast(float32)scroll
+        if by+height<body.y || by>body.y+body.height { continue }
+        if isAlbums {
+            group: Album=Media.albums[i]
+            if Action(session,1000+i,TextFromCString(*group.name[0]),.{bx,by,width,58.0}) { Media.Request("album",TextFromCString(*group.id[0])) }
+        } else {
+            photo: Photo=Media.photos[i]
+            Picture(session,cast(u64)(2000+i),photo,.{bx,by,cell,cell},true)
+            open: ButtonProps; open.key=cast(u64)(3000+i); open.id=3000+i; open.label=TextFromCString(*photo.name[0]); open.bounds=.{bx,by,cell,cell}; open.invisible=true
+            if Button(session,open)==1 { Media.Request("open",TextFromCString(*photo.id[0])) }
+            if Action(session,1000+i,ifx photo.video then "Video" else TextFromCString(*photo.date[0]),.{bx,by+cell+4.0,cell,36.0}) { Media.Request("open",TextFromCString(*photo.id[0])) }
+        }
+    }
+    if scrolling.opened { End(session) }
+    footer:=viewport.y+viewport.height-56.0
+    if Action(session,60,"Previous",.{x,footer,width/3.0-4.0,40.0},!Media.loading && Media.page>0) { Media.Request("page","",Media.page-1) }
+    if Action(session,61,"Refresh",.{x+width/3.0,footer,width/3.0-4.0,40.0},!Media.loading) { Media.Request("refresh") }
+    if Action(session,62,"More",.{x+2.0*width/3.0,footer,width/3.0-4.0,40.0},!Media.loading && Media.more) { Media.Request("page","",Media.page+1) }
+    return 0
+}
+Clock :: #import "kryon/ClockLinux";
+ClockSeconds :: () -> float64 { return cast(float64)Clock.Milliseconds()/1000.0 }

@@ -1,0 +1,16 @@
+Identity :: #import "backup_identity";
+Wire :: #import "sync_crypto";
+Crypto :: #import "backup_crypto";
+#import "std/byte_text_linux"
+#program_export
+main :: () -> s32 {
+    header: [6]u8; password: [1024]u8; file: [65608]u8
+    defer { Crypto.Clear(password[:]); Crypto.Clear(file[:]) }
+    if !Wire.ReadAll(*header[0],6) { return 2 }
+    secret:=cast(s32)Wire.Number(header[:2]); size:=cast(s32)Wire.Number(header[2:])
+    if secret<12 || secret>1024 || size<73 || size>65608 || !Wire.ReadAll(*password[0],secret) ||
+        !Wire.ReadAll(*file[0],size) { return 2 }
+    identity: Identity.Identity; defer { Identity.Clear(*identity) }
+    if !Identity.Recover(file[:size],password[:secret],*identity) { return 1 }
+    return ifx Wire.SendAll(*identity.node[0],32) && Wire.SendAll(*identity.account[0],32) then 0 else 2
+}

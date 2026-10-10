@@ -1,0 +1,39 @@
+Crypto :: #import "backup_crypto";
+Answer :: () -> s32 {
+    key: [32]u8; for i: 0..31 { key[i]=cast(u8)i }
+    plain: [5]u8=.{0,255,42,128,64}; aad: [3]u8=.{1,2,3}
+    sealed: [45]u8; retry: [45]u8; output: [5]u8
+    if Crypto.Seal(plain[:],aad[:],key[:],sealed[:],true)!=45 { return 1 }
+    if Crypto.Open(sealed[:],aad[:],key[:],output[:])!=5 { return 2 }
+    for i: 0..4 { if output[i]!=plain[i] { return 3 } }
+    if Crypto.Seal(plain[:],aad[:],key[:],retry[:],true)!=45 { return 4 }
+    for i: 0..44 { if sealed[i]!=retry[i] { return 5 } }
+    plain[0]=1
+    if Crypto.Seal(plain[:],aad[:],key[:],retry[:],true)!=45 { return 6 }
+    same: bool=true; for i: 0..23 { if sealed[i]!=retry[i] { same=false } }
+    if same { return 7 }; plain[0]=0
+    aad[0]=4
+    if Crypto.Open(sealed[:],aad[:],key[:],output[:])!= -1 { return 8 }
+    for byte: output { if byte!=0 { return 9 } }; aad[0]=1
+    sealed[44]^=1
+    if Crypto.Open(sealed[:],aad[:],key[:],output[:])!= -1 { return 10 }
+    for byte: output { if byte!=0 { return 11 } }; sealed[44]^=1
+    if Crypto.Seal(plain[:],aad[:],key[:],sealed[:],false)!=45 ||
+        Crypto.Seal(plain[:],aad[:],key[:],retry[:],false)!=45 { return 12 }
+    same=true; for i: 0..23 { if sealed[i]!=retry[i] { same=false } }
+    if same { return 13 }
+    if Crypto.Open(sealed[:],aad[:],key[:],output[:])!=5 { return 14 }
+    key[0]=255
+    if Crypto.Open(sealed[:],aad[:],key[:],output[:])!= -1 { return 15 }
+    for byte: output { if byte!=0 { return 16 } }
+    if Crypto.Open(sealed[:39],aad[:],key[:],output[:])!= -1 { return 17 }
+    if Crypto.Seal(plain[:],aad[:],key[:31],retry[:],true)!= -1 { return 18 }
+    empty: [40]u8
+    if Crypto.Seal(plain[:0],aad[:0],key[:],empty[:],true)!=40 ||
+        Crypto.Open(empty[:],aad[:0],key[:],output[:0])!=0 { return 19 }
+    Crypto.Clear(key[:]); Crypto.Clear(output[:]); return 42
+}
+#if !#defined(ANDROID_BUILD) {
+    #program_export
+    main :: () -> s32 { return ifx Answer()==42 then 0 else 1 }
+}

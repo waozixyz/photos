@@ -1,0 +1,228 @@
+// Typed JNI calls for Android camera uploads. Java owns loopback HTTP, staged
+// files and scheduling; Ziran and DaochiClient own keys, signatures, record
+// sealing, node pinning and acknowledgment policy. No call logs or persists keys.
+#import "kryon/AndroidJni"
+#import "std/c_string"
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+Identity :: #import "backup_identity";
+Crypto :: #import "backup_crypto";
+Upload :: #import "backup_upload";
+Sign :: #import "sync_sign";
+Native :: #import "daochi_client/crypto_native";
+c :: #system_library "c";
+Allocate :: (bytes: usize) -> *void #foreign c "malloc";
+Release :: (bytes: *void) #foreign c "free";
+
+// Copy a Java byte[] into output; -1 when null, larger than output or failed.
+Bytes :: (env: *JniEnv, array: *void, output: []u8) -> s64 {
+    if array == null { return -1 }
+    count := cast(s64)env.functions.GetArrayLength(env, array)
+    if count < 0 || count > output.count { return -1 }
+    if count > 0 { env.functions.GetByteArrayRegion(env, array, 0, cast(s32)count, *output[0]) }
+    return ifx env.functions.ExceptionCheck(env) == 0 then count else -1
+}
+Result :: (env: *JniEnv, bytes: []u8) -> *void {
+    if bytes.count < 1 || bytes.count > 134217728 { return null }
+    output := env.functions.NewByteArray(env, cast(s32)bytes.count)
+    if output != null { env.functions.SetByteArrayRegion(env, output, 0, cast(s32)bytes.count, *bytes[0]) }
+    return output
+}
+// The validated 3968-byte identity Java unwrapped from the OS keystore.
+Load :: (env: *JniEnv, array: *void, identity: *Identity.Identity) -> bool {
+    if array == null || env.functions.GetArrayLength(env, array) != cast(s32)size_of(Identity.Identity) { return false }
+    env.functions.GetByteArrayRegion(env, array, 0, cast(s32)size_of(Identity.Identity), cast(*u8)identity)
+    return env.functions.ExceptionCheck(env) == 0
+}
+Allocation :: struct { pointer: *u8; bytes: []u8 }
+Take :: (count: s64) -> Allocation {
+    result: Allocation
+    result.pointer = cast(*u8)Allocate(cast(usize)count)
+    if result.pointer != null { result.bytes = BytesFromPointer(result.pointer, cast(u64)count) }
+    return result
+}
+Give :: (allocation: Allocation) {
+    if allocation.pointer != null { Crypto.Clear(allocation.bytes); Release(cast(*void)allocation.pointer) }
+}
+
+// A new device: 32-byte Ed25519 seed, then an ASCII client id.
+NewDevice :: (env: *JniEnv, receiver: *void) -> *void {
+    unused receiver
+    seed: [32]u8; random: [12]u8
+    defer { Native.Clear(seed[:]) }
+    if !Native.RandomBytes(seed[:]) || !Native.RandomBytes(random[:]) { return null }
+    output: [71]u8
+    defer { Native.Clear(output[:]) }
+    prefix := "photos-android-"; digits := "0123456789abcdef"
+    for i: 0..31 { output[i] = seed[i] }
+    for i: 0..14 { output[32+i] = prefix[i] }
+    for i: 0..11 { output[47+i*2] = digits[random[i] >> 4]; output[48+i*2] = digits[random[i] & 15] }
+    return Result(env, output[:])
+}
+Node :: (env: *JniEnv, receiver: *void, identity_bytes: *void, json: *void) -> s32 {
+    unused receiver
+    identity: Identity.Identity; defer { Identity.Clear(*identity) }
+    buffer := Take(1048576); defer { Give(buffer) }
+    if buffer.pointer == null || !Load(env, identity_bytes, *identity) { return 5 }
+    count := Bytes(env, json, buffer.bytes)
+    if count < 0 { return 5 }
+    return Upload.Node(*identity, TextFromBytes(buffer.bytes[:count]))
+}
+// [4-byte body length][body][X-Daochi-Signature]
+Login :: (env: *JniEnv, receiver: *void, identity_bytes: *void, client: *void, challenge: *void) -> *void {
+    unused receiver
+    identity: Identity.Identity; defer { Identity.Clear(*identity) }
+    client_id: [128]u8; challenge_bytes: [4096]u8
+    if !Load(env, identity_bytes, *identity) { return null }
+    client_count := Bytes(env, client, client_id[:]); challenge_count := Bytes(env, challenge, challenge_bytes[:])
+    if client_count < 1 || challenge_count < 1 { return null }
+    body: [6144]u8; signature: [4841]u8
+    if !Sign.Login(identity.public[:], identity.private[:], TextFromBytes(client_id[:client_count]),
+        TextFromBytes(challenge_bytes[:challenge_count]), body[:], signature[:]) { return null }
+    body_text := TextUntilNul(body[:]); signature_text := TextUntilNul(signature[:])
+    output: [11000]u8
+    if 4+body_text.count+signature_text.count > output.count { return null }
+    output[0] = cast(u8)(body_text.count >> 24); output[1] = cast(u8)(body_text.count >> 16)
+    output[2] = cast(u8)(body_text.count >> 8); output[3] = cast(u8)body_text.count
+    for i: 0..body_text.count-1 { output[4+i] = body_text[i] }
+    for i: 0..signature_text.count-1 { output[4+body_text.count+i] = signature_text[i] }
+    return Result(env, output[:4+body_text.count+signature_text.count])
+}
+Registration :: (env: *JniEnv, receiver: *void, identity_bytes: *void, seed_bytes: *void, client: *void, now: s64) -> *void {
+    unused receiver
+    identity: Identity.Identity; defer { Identity.Clear(*identity) }
+    seed: [32]u8; defer { Native.Clear(seed[:]) }
+    client_id: [128]u8
+    if !Load(env, identity_bytes, *identity) || Bytes(env, seed_bytes, seed[:]) != 32 { return null }
+    client_count := Bytes(env, client, client_id[:])
+    if client_count < 1 { return null }
+    body: [6144]u8
+    if !Sign.Registration(identity.public[:], identity.private[:], seed[:], TextFromBytes(client_id[:client_count]),
+        now, body[:]) { return null }
+    text := TextUntilNul(body[:]); descriptor := cast(*TextDescriptor)*text
+    return Result(env, BytesFromPointer(descriptor.data, cast(u64)text.count))
+}
+Header :: (env: *JniEnv, receiver: *void, identity_bytes: *void, seed_bytes: *void, method: s32, path: *void,
+    digest_bytes: *void, expires: s64) -> *void {
+    unused receiver
+    identity: Identity.Identity; defer { Identity.Clear(*identity) }
+    seed: [32]u8; defer { Native.Clear(seed[:]) }
+    target: [1024]u8; digest: [32]u8
+    if method < 1 || method > 4 || !Load(env, identity_bytes, *identity) || Bytes(env, seed_bytes, seed[:]) != 32 ||
+        Bytes(env, digest_bytes, digest[:]) != 32 { return null }
+    count := Bytes(env, path, target[:])
+    if count < 1 { return null }
+    header: [8192]u8
+    if !Sign.Header(identity.public[:], identity.private[:], seed[:], cast(u8)method, TextFromBytes(target[:count]),
+        digest[:], expires, header[:]) { return null }
+    text := TextUntilNul(header[:]); descriptor := cast(*TextDescriptor)*text
+    return Result(env, BytesFromPointer(descriptor.data, cast(u64)text.count))
+}
+// [64 hex preview id][64 hex sealed blob id][sealed preview]
+Preview :: (env: *JniEnv, receiver: *void, identity_bytes: *void, jpeg: *void) -> *void {
+    unused receiver
+    identity: Identity.Identity; defer { Identity.Clear(*identity) }
+    input := Take(Upload.PreviewMaximum); defer { Give(input) }
+    output := Take(Upload.PreviewMaximum+168); defer { Give(output) }
+    if input.pointer == null || output.pointer == null || !Load(env, identity_bytes, *identity) { return null }
+    count := Bytes(env, jpeg, input.bytes)
+    if count < 1 { return null }
+    preview_id: [65]u8; blob_id: [65]u8
+    sealed := Upload.Preview(*identity, input.bytes[:count], preview_id[:], blob_id[:], output.bytes[128:])
+    if sealed < 0 { return null }
+    for i: 0..63 { output.bytes[i] = preview_id[i]; output.bytes[64+i] = blob_id[i] }
+    return Result(env, output.bytes[:128+sealed])
+}
+Request :: (env: *JniEnv, receiver: *void, identity_bytes: *void, client: *void, since: s64, name: *void,
+    mime: *void, video: u8, taken_ms: s64, width: s64, height: s64, staged: *void, preview_id: *void,
+    preview_blob: *void) -> *void {
+    unused receiver
+    identity: Identity.Identity; defer { Identity.Clear(*identity) }
+    manifest := Take(2097152); defer { Give(manifest) }
+    output := Take(Upload.RequestMaximum+1); defer { Give(output) }
+    if manifest.pointer == null || output.pointer == null || !Load(env, identity_bytes, *identity) { return null }
+    client_id: [128]u8; name_bytes: [4096]u8; mime_bytes: [128]u8; preview: [64]u8; blob: [64]u8
+    client_count := Bytes(env, client, client_id[:]); name_count := Bytes(env, name, name_bytes[:])
+    mime_count := Bytes(env, mime, mime_bytes[:]); manifest_count := Bytes(env, staged, manifest.bytes)
+    preview_count := Bytes(env, preview_id, preview[:]); blob_count := Bytes(env, preview_blob, blob[:])
+    if client_count < 1 || name_count < 1 || mime_count < 0 || manifest_count < 1 || preview_count < 0 || blob_count < 0 {
+        return null
+    }
+    media: Upload.Media
+    media.name = TextFromBytes(name_bytes[:name_count]); media.mime = TextFromBytes(mime_bytes[:mime_count])
+    media.video = video != 0; media.taken_ms = taken_ms; media.width = width; media.height = height
+    length := Upload.Request(*identity, TextFromBytes(client_id[:client_count]), since, media,
+        TextFromBytes(manifest.bytes[:manifest_count]), TextFromBytes(preview[:preview_count]),
+        TextFromBytes(blob[:blob_count]), output.bytes)
+    if length < 1 { return null }
+    return Result(env, output.bytes[:length])
+}
+Confirmed :: (env: *JniEnv, receiver: *void, response: *void, since: s64) -> s64 {
+    unused receiver
+    buffer := Take(8388608); defer { Give(buffer) }
+    if buffer.pointer == null { return -1 }
+    count := Bytes(env, response, buffer.bytes)
+    if count < 2 { return -1 }
+    return Upload.Confirmed(TextFromBytes(buffer.bytes[:count]), since)
+}
+
+NewDeviceFn :: #type (*JniEnv,*void) -> *void #c_call;
+NodeFn :: #type (*JniEnv,*void,*void,*void) -> s32 #c_call;
+LoginFn :: #type (*JniEnv,*void,*void,*void,*void) -> *void #c_call;
+RegistrationFn :: #type (*JniEnv,*void,*void,*void,*void,s64) -> *void #c_call;
+HeaderFn :: #type (*JniEnv,*void,*void,*void,s32,*void,*void,s64) -> *void #c_call;
+PreviewFn :: #type (*JniEnv,*void,*void,*void) -> *void #c_call;
+RequestFn :: #type (*JniEnv,*void,*void,*void,s64,*void,*void,u8,s64,s64,s64,*void,*void,*void) -> *void #c_call;
+ConfirmedFn :: #type (*JniEnv,*void,*void,s64) -> s64 #c_call;
+NewDeviceMethod :: struct { name: *u8; signature: *u8; procedure: NewDeviceFn }
+NodeMethod :: struct { name: *u8; signature: *u8; procedure: NodeFn }
+LoginMethod :: struct { name: *u8; signature: *u8; procedure: LoginFn }
+RegistrationMethod :: struct { name: *u8; signature: *u8; procedure: RegistrationFn }
+HeaderMethod :: struct { name: *u8; signature: *u8; procedure: HeaderFn }
+PreviewMethod :: struct { name: *u8; signature: *u8; procedure: PreviewFn }
+RequestMethod :: struct { name: *u8; signature: *u8; procedure: RequestFn }
+ConfirmedMethod :: struct { name: *u8; signature: *u8; procedure: ConfirmedFn }
+Names :: struct { name: [40]u8; signature: [64]u8 }
+Set :: (names: *Names, name: string, signature: string) -> bool {
+    return CopyCString(name, names.name[:]) && CopyCString(signature, names.signature[:])
+}
+Register :: (vm: *JniVm) -> s32 {
+    env: *JniEnv
+    if vm.functions.GetEnv(vm,*env,JniVersion)!=0 || env==null { return -1 }
+    class_name: [96]u8; unused CopyCString("xyz/waozi/photos/PhotosActivity",class_name[:])
+    klass:=env.functions.FindClass(env,*class_name[0]); if klass==null { return -1 }
+    defer { env.functions.DeleteLocalRef(env,klass) }
+    names: Names
+    device: NewDeviceMethod
+    if !Set(*names,"nativeBackupNewDevice","()[B") { return -1 }
+    device.name=*names.name[0]; device.signature=*names.signature[0]; device.procedure=NewDevice
+    if env.functions.RegisterNatives(env,klass,cast(*void)*device,1)!=0 { return -1 }
+    node: NodeMethod
+    if !Set(*names,"nativeBackupNode","([B[B)I") { return -1 }
+    node.name=*names.name[0]; node.signature=*names.signature[0]; node.procedure=Node
+    if env.functions.RegisterNatives(env,klass,cast(*void)*node,1)!=0 { return -1 }
+    login: LoginMethod
+    if !Set(*names,"nativeBackupLogin","([B[B[B)[B") { return -1 }
+    login.name=*names.name[0]; login.signature=*names.signature[0]; login.procedure=Login
+    if env.functions.RegisterNatives(env,klass,cast(*void)*login,1)!=0 { return -1 }
+    registration: RegistrationMethod
+    if !Set(*names,"nativeBackupRegistration","([B[B[BJ)[B") { return -1 }
+    registration.name=*names.name[0]; registration.signature=*names.signature[0]; registration.procedure=Registration
+    if env.functions.RegisterNatives(env,klass,cast(*void)*registration,1)!=0 { return -1 }
+    header: HeaderMethod
+    if !Set(*names,"nativeBackupHeader","([B[BI[B[BJ)[B") { return -1 }
+    header.name=*names.name[0]; header.signature=*names.signature[0]; header.procedure=Header
+    if env.functions.RegisterNatives(env,klass,cast(*void)*header,1)!=0 { return -1 }
+    preview: PreviewMethod
+    if !Set(*names,"nativeBackupPreview","([B[B)[B") { return -1 }
+    preview.name=*names.name[0]; preview.signature=*names.signature[0]; preview.procedure=Preview
+    if env.functions.RegisterNatives(env,klass,cast(*void)*preview,1)!=0 { return -1 }
+    request: RequestMethod
+    if !Set(*names,"nativeBackupRequest","([B[BJ[B[BZJJJ[B[B[B)[B") { return -1 }
+    request.name=*names.name[0]; request.signature=*names.signature[0]; request.procedure=Request
+    if env.functions.RegisterNatives(env,klass,cast(*void)*request,1)!=0 { return -1 }
+    confirmed: ConfirmedMethod
+    if !Set(*names,"nativeBackupConfirmed","([BJ)J") { return -1 }
+    confirmed.name=*names.name[0]; confirmed.signature=*names.signature[0]; confirmed.procedure=Confirmed
+    return env.functions.RegisterNatives(env,klass,cast(*void)*confirmed,1)
+}

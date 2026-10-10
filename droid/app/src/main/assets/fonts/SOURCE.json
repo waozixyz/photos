@@ -1,0 +1,8 @@
+{
+  "source": "https://raw.githubusercontent.com/google/fonts/main/ofl/notosansjp/NotoSansJP%5Bwght%5D.ttf",
+  "source_sha256": "c2f3b4d463500a2ddcd3849cded1fceeb9fd6d1c32e6cbecd568453ba50fc68f",
+  "asset_sha256": "b836f4c3a5bd7d928893fb909eb2f02902143b12fc166337fc4c72e3bdb2d7f3",
+  "weight": 400,
+  "license": "OFL-1.1",
+  "purpose": "Android native UI TrueType outlines, including CJK filenames"
+}

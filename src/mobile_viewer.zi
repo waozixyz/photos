@@ -1,0 +1,34 @@
+// Photo navigation belongs to Photos. The host supplies the pointer samples.
+State :: struct {
+    pending: bool; moved: bool; x: float32; y: float32; started: s64;
+    tapped: bool; tap_x: float32; tap_y: float32; tap_time: s64
+}
+Decision :: struct { navigation: s32; double_tap: bool }
+Reset :: (state: *State) { state.* = .{} }
+Absolute :: (value: float32) -> float32 { return ifx value < 0.0 then -value else value }
+Update :: (state: *State, eligible: bool, inside: bool, x: float32, y: float32,
+    pressed: bool, down: bool, released: bool, now: s64, width: float32, zoom: float32) -> Decision {
+    result: Decision
+    if !eligible || now < 0 || width <= 0.0 || (state.pending && now < state.started) ||
+        (state.tapped && now < state.tap_time) { Reset(state); return result }
+    if pressed {
+        state.pending = inside; state.moved = false
+        state.x = x; state.y = y; state.started = now
+    }
+    if !state.pending { return result }
+    if !down && !released { Reset(state); return result }
+    dx := x-state.x; dy := y-state.y
+    horizontal := Absolute(dx); vertical := Absolute(dy)
+    if horizontal > 12.0 || vertical > 12.0 { state.moved = true }
+    if !released { return result }
+    state.pending = false
+    threshold := width*0.15; if threshold < 64.0 { threshold = 64.0 }
+    if zoom <= 1.01 && horizontal >= threshold && horizontal > vertical*1.5 && now-state.started <= 800 {
+        result.navigation = ifx dx < 0.0 then 1 else -1; state.tapped = false; return result
+    }
+    if state.moved || !inside || now-state.started > 250 { state.tapped = false; return result }
+    if state.tapped && now-state.tap_time <= 350 && Absolute(x-state.tap_x) <= 24.0 && Absolute(y-state.tap_y) <= 24.0 {
+        result.double_tap = true; state.tapped = false
+    } else { state.tapped = true; state.tap_x = x; state.tap_y = y; state.tap_time = now }
+    return result
+}

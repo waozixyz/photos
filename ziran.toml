@@ -20,6 +20,15 @@ library = "X11"
 backend = "desktop"
 codegen = "zib"
 
+[tool.kryon.profiles.android]
+backend = "android"
+
+[tool.kryon.android]
+package = "xyz.waozi.photos"
+activity = "PhotosActivity"
+min_sdk = "28"
+abis = "armeabi-v7a,arm64-v8a,x86_64"
+
 [install]
 bin = "photos"
 

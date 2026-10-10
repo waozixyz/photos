@@ -1,0 +1,248 @@
+// Camera originals reach only the owner's pinned ThinkPad node. This module
+// builds the exact Daochi v6 request bytes from the validated identity; the
+// platform adapter owns HTTP, staged files and scheduling. Keys and plaintext
+// never enter its results except as Daochi-sealed ciphertext.
+#scope_module
+Identity :: #import "backup_identity";
+Crypto :: #import "backup_crypto";
+Policy :: #import "node_policy";
+Record :: #import "daochi_client/record";
+Native :: #import "daochi_client/crypto_native";
+#import "daochi_client/wire"
+UTF8 :: #import "std/utf8";
+#import "std/json_scan"
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+c :: #system_library "c";
+Allocate :: (bytes: usize) -> *void #foreign c "malloc";
+Release :: (bytes: *void) #foreign c "free";
+Chunk :: 8388608
+Collection :: "private.photos.v1.records.media"
+Schema :: "photos.media.v1"
+
+Hex :: (bytes: []u8, output: []u8) -> bool {
+    if output.count < bytes.count*2+1 { return false }
+    digits := "0123456789abcdef"
+    for i: 0..bytes.count-1 { output[i*2] = digits[bytes[i] >> 4]; output[i*2+1] = digits[bytes[i] & 15] }
+    output[bytes.count*2] = 0
+    return true
+}
+Hex64 :: (text: string) -> bool {
+    if text.count != 64 { return false }
+    for byte: text { if !((byte >= 48 && byte <= 57) || (byte >= 97 && byte <= 102)) { return false } }
+    return true
+}
+// Exact non-negative JSON integer; -1 when malformed or above 2^53.
+Integer :: (json: string, at: s32) -> s64 {
+    if at < 0 || at >= cast(s32)json.count || json[at] < 48 || json[at] > 57 { return -1 }
+    if json[at] == 48 { return ifx at+1 < cast(s32)json.count && json[at+1] >= 48 && json[at+1] <= 57 then -1 else 0 }
+    value: s64; cursor := at
+    while cursor < cast(s32)json.count && json[cursor] >= 48 && json[cursor] <= 57 {
+        if value > 900719925474099 { return -1 }
+        value = value*10 + cast(s64)(json[cursor]-48); cursor += 1
+    }
+    if cursor < cast(s32)json.count && (json[cursor] == 46 || json[cursor] == 101 || json[cursor] == 69) { return -1 }
+    return value
+}
+Number :: (writer: Writer, value: s64) -> Writer {
+    digits: [24]u8; count: s64; remaining := value; negative := value < 0
+    if negative { remaining = -value }
+    while true {
+        digits[count] = cast(u8)(48 + remaining % 10); count += 1; remaining /= 10
+        if remaining == 0 { break }
+    }
+    result := writer
+    if negative { result = WriteByte(result, 45) }
+    while count > 0 { count -= 1; result = WriteByte(result, digits[count]) }
+    return result
+}
+Lower :: (byte: u8) -> u8 { return ifx byte >= 65 && byte <= 90 then byte + 32 else byte }
+EndsWith :: (name: string, suffix: string) -> bool {
+    if name.count <= suffix.count { return false }
+    offset := name.count - suffix.count
+    for i: 0..suffix.count-1 { if Lower(name[offset+i]) != suffix[i] { return false } }
+    return true
+}
+// The library extension comes from the device name when Photos supports it,
+// otherwise from the provider's media type; unsupported originals stay queued.
+Extension :: (name: string, mime: string, video: bool) -> string {
+    images: [13]string = .{".jpg",".jpeg",".jpe",".png",".webp",".gif",".heic",".heif",".avif",".tif",".tiff",".bmp",".dng"}
+    videos: [10]string = .{".mp4",".mov",".m4v",".3gp",".avi",".webm",".mpg",".mpeg",".mkv",".wmv"}
+    if video { for suffix: videos { if EndsWith(name, suffix) { return suffix } } }
+    else { for suffix: images { if EndsWith(name, suffix) { return suffix } } }
+    if !video {
+        if mime == "image/jpeg" { return ".jpg" }; if mime == "image/png" { return ".png" }
+        if mime == "image/webp" { return ".webp" }; if mime == "image/gif" { return ".gif" }
+        if mime == "image/heic" { return ".heic" }; if mime == "image/heif" { return ".heif" }
+        if mime == "image/avif" { return ".avif" }; if mime == "image/tiff" { return ".tif" }
+        if mime == "image/bmp" { return ".bmp" }; if mime == "image/x-adobe-dng" { return ".dng" }
+        return ""
+    }
+    if mime == "video/mp4" { return ".mp4" }; if mime == "video/quicktime" { return ".mov" }
+    if mime == "video/3gpp" { return ".3gp" }; if mime == "video/webm" { return ".webm" }
+    if mime == "video/x-matroska" { return ".mkv" }; if mime == "video/mpeg" { return ".mpg" }
+    if mime == "video/x-msvideo" || mime == "video/avi" { return ".avi" }
+    return ""
+}
+
+// Native staging's own manifest: {"id":…,"size":…,"manifest":{"chunk_bytes":
+// 8388608,"chunks":[…]}}. Each digest names one sealed 8 MiB chunk file.
+Staged :: struct { id: string; size: s64; chunks: s32; array: s32 }
+ReadStaged :: (json: string, staged: *Staged) -> bool {
+    if json.count < 2 || json.count > 2097152 || !UTF8.Valid(json) { return false }
+    at := Space(json, 0)
+    if ValueEnd(json, at, 0) < 0 || Space(json, ValueEnd(json, at, 0)) != cast(s32)json.count { return false }
+    names: [3]string = .{"id", "size", "manifest"}; fields: [3]s32
+    if !ObjectPositions(json, at, names[:], fields[:]) || fields[0] < 0 || fields[1] < 0 || fields[2] < 0 { return false }
+    id := ReadString(json, fields[0])
+    if !id.valid || id.end - id.start != 64 { return false }
+    staged.id = json[id.start:id.end]
+    staged.size = Integer(json, fields[1])
+    if !Hex64(staged.id) || staged.size < 0 || staged.size > cast(s64)Chunk*16384 { return false }
+    inner: [2]string = .{"chunk_bytes", "chunks"}; values: [2]s32
+    if !ObjectPositions(json, fields[2], inner[:], values[:]) || values[0] < 0 || values[1] < 0 ||
+        Integer(json, values[0]) != Chunk || json[values[1]] != 91 { return false }
+    staged.array = values[1]
+    staged.chunks = ArrayCount(json, values[1])
+    if staged.chunks != cast(s32)((staged.size + Chunk - 1) / Chunk) { return false }
+    for index: 0..staged.chunks-1 {
+        element := ReadString(json, ElementAt(json, values[1], index))
+        if !element.valid || element.end - element.start != 64 || !Hex64(json[element.start:element.end]) { return false }
+    }
+    return true
+}
+Chunks :: (writer: Writer, json: string, staged: Staged) -> Writer {
+    result := WriteByte(writer, 91)
+    for index: 0..staged.chunks-1 {
+        element := ReadString(json, ElementAt(json, staged.array, index))
+        if index > 0 { result = WriteByte(result, 44) }
+        result = WriteByte(result, 34); result = WriteText(result, json[element.start:element.end]); result = WriteByte(result, 34)
+    }
+    return WriteByte(result, 93)
+}
+
+#scope_export
+Media :: struct {
+    name: string
+    mime: string
+    video: bool
+    taken_ms: s64
+    width: s64
+    height: s64
+}
+RequestMaximum :: 750000
+PreviewMaximum :: 4194304
+
+// 0 permitted, 5 malformed policy, 6 another node, 7 outward Photos replication.
+Node :: (identity: *Identity.Identity, json: string) -> s32 { return Policy.Check(json, identity.node[:]) }
+
+// Gallery preview as the desktop stores it: id = SHA-256 of the JPEG, sealed
+// as a resumable blob in part "preview". Returns the sealed length or -1.
+Preview :: (identity: *Identity.Identity, jpeg: []u8, preview_id: []u8, blob_id: []u8, output: []u8) -> s64 {
+    if jpeg.count < 1 || jpeg.count > PreviewMaximum || preview_id.count < 65 || blob_id.count < 65 ||
+        output.count < jpeg.count+40 { return -1 }
+    digest: [32]u8; account: [65]u8
+    if !Crypto.Digest(jpeg, digest[:]) || !Hex(digest[:], preview_id) || !Hex(identity.account[:], account[:]) { return -1 }
+    aad: Vec(u8)
+    BuilderPrint(*aad, "{\"account_id\":\"%\",\"app_id\":\"photos\",\"id\":\"%\",\"part\":\"preview\",\"schema\":\"%\"}",
+        TextUntilNul(account[:]), TextUntilNul(preview_id), Schema)
+    length := Crypto.Seal(jpeg, VecSlice(aad, 0, aad.count), identity.content[:], output, true)
+    if length != jpeg.count+40 || !Crypto.Digest(output[:length], digest[:]) || !Hex(digest[:], blob_id) {
+        Crypto.Clear(output); return -1
+    }
+    return length
+}
+
+// One encrypted photos.media.v1 record inside a v6 encrypted-records request.
+// The record is a device baseline: updated 0 never replaces newer library
+// metadata (albums, edits, faces) on the node or desktop for the same original.
+Request :: (identity: *Identity.Identity, client_id: string, since: s64, media: Media, staged_json: string,
+    preview_id: string, preview_blob: string, output: []u8) -> s64 {
+    if output.count < 1 { return -1 }
+    output[0] = 0
+    staged: Staged
+    extension := Extension(media.name, media.mime, media.video)
+    if !ReadStaged(staged_json, *staged) || extension.count == 0 || since < 0 || since > 9007199254740991 ||
+        media.name.count < 1 || media.name.count > 1024 || !UTF8.Valid(media.name) ||
+        media.width < 0 || media.height < 0 || media.width > 1000000 || media.height > 1000000 ||
+        client_id.count < 1 || client_id.count > 128 { return -1 }
+    for byte: media.name { if byte < 32 { return -1 } }
+    for byte: client_id { if byte < 33 || byte > 126 || byte == 34 || byte == 92 { return -1 } }
+    taken := media.taken_ms / 1000
+    if taken < -62135596800 || taken >= 253402300800 { return -1 }
+    if (preview_id.count != 0 || preview_blob.count != 0) && (!Hex64(preview_id) || !Hex64(preview_blob)) { return -1 }
+    plain_size := staged_json.count + media.name.count*6 + 1024
+    plain_pointer := cast(*u8)Allocate(cast(usize)plain_size)
+    if plain_pointer == null { return -1 }
+    plain := BytesFromPointer(plain_pointer, cast(u64)plain_size)
+    defer { Crypto.Clear(plain); Release(cast(*void)plain_pointer) }
+    plain[0] = 0
+    record: Writer = .{plain, 0, true}
+    record = WriteText(record, "{\"albums\":[],\"archived\":0,\"caption\":\"\",\"edits\":{},\"extension\":\"")
+    record = WriteText(record, extension)
+    record = WriteText(record, "\",\"favorite\":0,\"height\":"); record = Number(record, media.height)
+    record = WriteText(record, ",\"hidden\":0,\"id\":\""); record = WriteText(record, staged.id)
+    record = WriteText(record, ifx media.video then "\",\"kind\":\"video\"" else "\",\"kind\":\"photo\"")
+    record = WriteText(record, ",\"manifest\":{\"chunk_bytes\":8388608,\"chunks\":"); record = Chunks(record, staged_json, staged)
+    if preview_id.count > 0 {
+        record = WriteText(record, ",\"preview\":\""); record = WriteText(record, preview_blob)
+        record = WriteText(record, "\",\"preview_id\":\""); record = WriteText(record, preview_id); record = WriteByte(record, 34)
+    }
+    record = WriteText(record, "},\"metadata\":{},\"name\":"); record = AppendJsonQuoted(record, media.name)
+    record = WriteText(record, ",\"size\":"); record = Number(record, staged.size)
+    record = WriteText(record, ",\"tags\":\"\",\"taken\":"); record = Number(record, taken)
+    record = WriteText(record, ",\"trashed\":0,\"updated\":0,\"width\":"); record = Number(record, media.width)
+    record = WriteByte(record, 125)
+    if !record.valid { return -1 }
+    account: [65]u8
+    if !Hex(identity.account[:], account[:]) { return -1 }
+    metadata: Record.RecordMetadata
+    metadata.account_id = TextUntilNul(account[:]); metadata.app_id = "photos"
+    metadata.collection = Collection; metadata.id = staged.id; metadata.schema = Schema
+    envelope_size := Record.RecordEnvelopeBytes(metadata, "main", record.cursor)
+    if envelope_size < 0 { return -1 }
+    envelope_pointer := cast(*u8)Allocate(cast(usize)envelope_size)
+    if envelope_pointer == null { return -1 }
+    envelope := BytesFromPointer(envelope_pointer, cast(u64)envelope_size)
+    defer { Release(cast(*void)envelope_pointer) }
+    nonce: [24]u8
+    sealed := Record.SealRecord(metadata, "main", identity.content[:], plain[:record.cursor], nonce[:], envelope)
+    if sealed < 0 { return -1 }
+    request: Writer = .{output, 0, true}
+    request = WriteText(request, "{\"app_id\":\"photos\",\"client_clock\":"); request = Number(request, since)
+    request = WriteText(request, ",\"client_id\":"); request = AppendJsonQuoted(request, client_id)
+    request = WriteText(request, ",\"encrypted_records\":[{\"ciphertext\":\"")
+    if request.valid {
+        encoded := Record.RecordBase64(envelope[:sealed], output[request.cursor:])
+        if encoded < 0 { request.valid = false } else { request.cursor += encoded }
+    }
+    request = WriteText(request, "\",\"collection\":\""); request = WriteText(request, Collection)
+    request = WriteText(request, "\",\"id\":\""); request = WriteText(request, staged.id)
+    request = WriteText(request, "\",\"key_id\":\"main\",\"nonce\":\"")
+    if request.valid {
+        encoded := Record.RecordBase64(nonce[:], output[request.cursor:])
+        if encoded < 0 { request.valid = false } else { request.cursor += encoded }
+    }
+    request = WriteText(request, "\",\"schema_version\":1,\"updated_at\":\"1970-01-01T00:00:00Z\"}],")
+    request = WriteText(request, "\"encrypted_records_only\":true,\"protocol_version\":6,\"record_limit\":1,\"since_server_version\":")
+    request = Number(request, since)
+    request = WriteText(request, ",\"user_id_hash\":\""); request = WriteText(request, TextUntilNul(account[:]))
+    request = WriteText(request, "\"}")
+    if !request.valid || request.cursor > RequestMaximum { output[0] = 0; return -1 }
+    return request.cursor
+}
+
+// The node's acknowledgment of an encrypted-records request. Returns its
+// server version for the next request, or -1 when the upload is unconfirmed.
+Confirmed :: (response: string, since: s64) -> s64 {
+    if response.count < 2 || response.count > 8388608 || !UTF8.Valid(response) { return -1 }
+    at := Space(response, 0)
+    if ValueEnd(response, at, 0) < 0 || Space(response, ValueEnd(response, at, 0)) != cast(s32)response.count { return -1 }
+    names: [4]string = .{"status", "server_version", "encrypted_records_only", "full_snapshot_required"}; fields: [4]s32
+    if !ObjectPositions(response, at, names[:], fields[:]) || fields[0] < 0 || fields[1] < 0 || fields[2] < 0 { return -1 }
+    status := ReadString(response, fields[0])
+    if !status.valid || !SpanEqualsASCII(response, status, "ok") || !MatchLiteral(response, fields[2], "true") { return -1 }
+    if fields[3] >= 0 && !MatchLiteral(response, fields[3], "false") { return -1 }
+    version := Integer(response, fields[1])
+    return ifx version >= since then version else -1
+}

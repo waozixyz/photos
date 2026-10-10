@@ -1,0 +1,54 @@
+Gesture :: #import "mobile_viewer";
+#program_export
+Answer :: () -> s32 {
+    state: Gesture.State
+    unused Gesture.Update(*state,true,true,300.0,300.0,true,true,false,0,480.0,1.0)
+    value:=Gesture.Update(*state,true,true,200.0,306.0,false,false,true,200,480.0,1.0)
+    if value.navigation!=1 || state.pending { return 1 }
+    unused Gesture.Update(*state,true,true,200.0,300.0,true,true,false,300,480.0,1.0)
+    value=Gesture.Update(*state,true,true,300.0,306.0,false,false,true,500,480.0,1.0)
+    if value.navigation!= -1 { return 2 }
+    // Panning a magnified image and vertical scrolling do not navigate.
+    unused Gesture.Update(*state,true,true,300.0,300.0,true,true,false,600,480.0,2.0)
+    value=Gesture.Update(*state,true,true,200.0,306.0,false,false,true,800,480.0,2.0)
+    if value.navigation!=0 { return 3 }
+    unused Gesture.Update(*state,true,true,300.0,300.0,true,true,false,900,480.0,1.0)
+    value=Gesture.Update(*state,true,true,200.0,450.0,false,false,true,1000,480.0,1.0)
+    if value.navigation!=0 { return 4 }
+    // Short taps must be near one another; every double tap consumes its pair.
+    unused Gesture.Update(*state,true,true,240.0,400.0,true,true,false,1100,480.0,1.0)
+    value=Gesture.Update(*state,true,true,240.0,400.0,false,false,true,1200,480.0,1.0)
+    if value.double_tap { return 5 }
+    unused Gesture.Update(*state,true,true,241.0,401.0,true,true,false,1300,480.0,1.0)
+    value=Gesture.Update(*state,true,true,241.0,401.0,false,false,true,1400,480.0,1.0)
+    if !value.double_tap || state.tapped { return 6 }
+    unused Gesture.Update(*state,true,true,241.0,401.0,true,true,false,1500,480.0,1.0)
+    value=Gesture.Update(*state,true,true,241.0,401.0,false,false,true,1600,480.0,1.0)
+    if value.double_tap { return 7 }
+    // Loading, lock, focus loss, pointer loss and bad clocks clear a held swipe.
+    unused Gesture.Update(*state,true,true,300.0,300.0,true,true,false,1700,480.0,1.0)
+    value=Gesture.Update(*state,false,true,200.0,300.0,false,false,true,1800,480.0,1.0)
+    if value.navigation!=0 || state.pending || state.tapped { return 8 }
+    unused Gesture.Update(*state,true,true,300.0,300.0,true,true,false,1900,480.0,1.0)
+    unused Gesture.Update(*state,true,true,200.0,300.0,false,false,false,2000,480.0,1.0)
+    value=Gesture.Update(*state,true,true,100.0,300.0,false,false,true,2100,480.0,1.0)
+    if value.navigation!=0 { return 9 }
+    unused Gesture.Update(*state,true,true,300.0,300.0,true,true,false,2200,480.0,1.0)
+    value=Gesture.Update(*state,true,true,200.0,300.0,false,false,true,2199,480.0,1.0)
+    if value.navigation!=0 || state.pending { return 10 }
+    // A finger beginning on a viewer control cannot become photo navigation.
+    unused Gesture.Update(*state,true,false,300.0,100.0,true,true,false,2300,480.0,1.0)
+    value=Gesture.Update(*state,true,true,100.0,300.0,false,false,true,2400,480.0,1.0)
+    if value.navigation!=0 { return 11 }
+    // Long drags and motion that returns to its origin cannot be double taps.
+    unused Gesture.Update(*state,true,true,300.0,300.0,true,true,false,2500,480.0,1.0)
+    unused Gesture.Update(*state,true,true,350.0,300.0,false,true,false,2550,480.0,1.0)
+    value=Gesture.Update(*state,true,true,300.0,300.0,false,false,true,2600,480.0,1.0)
+    if value.double_tap || state.tapped { return 12 }
+    unused Gesture.Update(*state,true,true,300.0,300.0,true,true,false,2700,480.0,1.0)
+    value=Gesture.Update(*state,true,true,100.0,300.0,false,false,true,3600,480.0,1.0)
+    if value.navigation!=0 { return 13 }
+    return 42
+}
+#program_export
+main :: () -> s32 { return ifx Answer()==42 then 0 else Answer() }

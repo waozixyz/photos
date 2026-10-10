@@ -395,8 +395,10 @@ public final class PhotosGalleryProbe extends Instrumentation {
             require(count.moveToFirst() && count.getInt(0) == imageCount+1 && count.getInt(1) == 0,
                 "camera_queue_preserves_unique_pending_versions_without_claiming_backup");
         }
-        require(activity.checkSelfPermission(android.Manifest.permission.INTERNET) != android.content.pm.PackageManager.PERMISSION_GRANTED,
-            "camera_discovery_sends_no_data_outside_device");
+        android.security.NetworkSecurityPolicy network = android.security.NetworkSecurityPolicy.getInstance();
+        require(network.isCleartextTrafficPermitted("127.0.0.1") && !network.isCleartextTrafficPermitted("192.0.2.10")
+            && !network.isCleartextTrafficPermitted("thinkpad.local") && !network.isCleartextTrafficPermitted("localhost"),
+            "camera_backup_cleartext_reaches_only_this_phones_loopback");
         File stagedRoot = new File(activity.getFilesDir(), "camera-backup/staged");
         File outside = new File(activity.getFilesDir(), "linked-staging-fixture");
         require(outside.mkdirs(), "linked_staging_fixture_is_test_owned");
@@ -481,6 +483,41 @@ public final class PhotosGalleryProbe extends Instrumentation {
         action("back", "", 0);
     }
 
+    // Runs last: the harness forwards this guest's loopback port to its own
+    // disposable Daochi node, whose identity matches the recovered pin.
+    private void uploadChecks() throws Exception {
+        int expected;
+        BackupQueue before = new BackupQueue(activity, () -> {}, false);
+        try {
+            require(before.scan(() -> false) && before.prepared >= 2 && before.confirmed == 0,
+                "prepared_originals_wait_for_thinkpad_acknowledgment");
+            expected = before.prepared;
+        } finally { before.close(); }
+        action("upload_backup", "", 0);
+        JSONObject value = state();
+        long deadline = SystemClock.uptimeMillis() + 240000;
+        while (SystemClock.uptimeMillis() < deadline) {
+            value = state();
+            if (value.getInt("backup_uploading") == 0 && (value.getInt("backup_confirmed") >= expected
+                || !value.getString("backup_upload_failure").isEmpty())) break;
+            SystemClock.sleep(200);
+        }
+        require(value.getString("backup_upload_failure").isEmpty(), "pinned_upload_failure_" + value.getString("backup_upload_failure"));
+        require(value.getInt("backup_confirmed") == expected && value.getInt("backup_prepared") == 0,
+            "pinned_thinkpad_acknowledges_every_encrypted_original");
+        String[] staged = new File(activity.getFilesDir(), "camera-backup/staged").list();
+        require(staged != null && staged.length == 0, "acknowledged_ciphertext_copies_are_released");
+        File device = new File(activity.getFilesDir(), "backup-device");
+        require(device.length() == 99, "device_signing_key_is_keystore_sealed");
+        BackupQueue after = new BackupQueue(activity, () -> {}, false);
+        try {
+            require(after.scan(() -> false) && after.confirmed == expected && after.queued == 0 && after.prepared == 0,
+                "unchanged_originals_stay_backed_up_after_rescan");
+            require(after.upload(() -> false), "repeated_upload_with_nothing_pending_is_a_no_op");
+        } finally { after.close(); }
+        screenshot("upload");
+    }
+
     private static byte[] readBytes(java.io.InputStream input) throws Exception {
         java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
         byte[] bytes = new byte[8192]; int count;
@@ -519,6 +556,8 @@ public final class PhotosGalleryProbe extends Instrumentation {
                 backupChecks();
             } else if (stage.equals("selected")) {
                 selectedChecks();
+            } else if (stage.equals("upload")) {
+                uploadChecks();
             } else if (!stage.equals("full")) {
                 require(value.getInt("access") == (stage.equals("partial") ? 4 : 0), "expected_access");
                 require(value.getJSONArray("photos").length() == 0 && value.getLong("selected") == -1, "ungranted_photos_excluded");
