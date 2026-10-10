@@ -49,8 +49,16 @@ def process_usage(pid):
     return cpu_seconds, memory
 
 
+def sample_bytes(path):
+    try:
+        return path.stat().st_size
+    except FileNotFoundError:
+        return 0
+
+
 def measure(name, command, env, output, probe, calls, cpu=False):
     trace = output / (name + ".frames")
+    samples = output / (name + ".cpu")
     child = None
     first_call = len(calls)
     before = output / (name + ".before.png")
@@ -59,7 +67,7 @@ def measure(name, command, env, output, probe, calls, cpu=False):
         try:
             child_env = dict(env, LD_PRELOAD=str(probe), PHOTOS_FRAME_PROBE=str(trace))
             if cpu:
-                child_env["PHOTOS_CPU_PROBE"] = str(output / (name + ".cpu"))
+                child_env["PHOTOS_CPU_PROBE"] = str(samples)
             child = subprocess.Popen(command, env=child_env, stdout=log, stderr=log)
             deadline = time.monotonic() + 20
             window = None
@@ -91,10 +99,12 @@ def measure(name, command, env, output, probe, calls, cpu=False):
                 raise RuntimeError(name + " did not render its first synthetic thumbnail")
             subprocess.run(["xdotool", "mousemove", "--window", window, "600", "600"], env=env, check=True)
             cpu_before, _ = process_usage(child.pid)
+            sample_start = sample_bytes(samples) if cpu else 0
             start = time.monotonic()
             subprocess.run(["xdotool", "click", "--repeat", "110", "--delay", "35", "5"],
                            env=env, check=True)
             finish = time.monotonic()
+            sample_end = sample_bytes(samples) if cpu else 0
             cpu_after, memory = process_usage(child.pid)
             time.sleep(.5)
             state_text = subprocess.check_output(["xprop", "-id", window, "_HARMONY_APP_STATE"],
@@ -121,6 +131,7 @@ def measure(name, command, env, output, probe, calls, cpu=False):
                         cpu_percent=100*(cpu_after-cpu_before)/(finish-start),
                         rss_kib=memory.get("VmRSS"), peak_rss_kib=memory.get("VmHWM"),
                         cpu_sampled=cpu,
+                        cpu_sample_bytes=[sample_start, sample_end] if cpu else None,
                         source_sha256={str(Path(path)): hashlib.sha256(Path(path).read_bytes()).hexdigest()
                                        for path in command})
         finally:
