@@ -70,6 +70,7 @@ LayoutFeed :: (cols: s32, height: float32) -> float32 {
     return y
 }
 feed_height: float32;
+close_requested: bool;
 swipe: SelectionDrag.State;
 swipe_epoch: s64;
 swipe_end: s32 = -1;
@@ -523,8 +524,20 @@ GuestView :: (session: Session, viewport: Rectangle, key: s32, modifiers: s32, t
 
 #program_export
 Frame :: (session: Session, viewport: Rectangle) -> s32 {
+    unused HostWindow.WindowInterceptClose(true)
+    if HostWindow.WindowTakeCloseRequest() {
+        close_requested = true
+        if Model.editor != "" { Model.Set(Model.message[:], "Finish or cancel the current edit before closing Photos.") }
+    }
     Prepare(); defer { Publish() }
     Model.Tick(HostWindow.WindowFocused())
+    // A hidden hosted window may be closed by Harmony. Preserve an editor
+    // and every accepted/queued request before releasing the app process.
+    if close_requested && Model.editor == "" && !Model.loading && !Model.queued_request {
+        Model.StopPlayback()
+        HostWindow.WindowQuit()
+        return 0
+    }
     if (swipe.pending || swipe.active) && (!Model.swipe_selection_enabled || (!Model.selecting && swipe_selecting) || Model.busy || Model.guest_active ||
         Model.app_locked || Model.editor != "" || Model.selected >= 0 || Model.CatalogView() ||
         Model.gallery_epoch != swipe_epoch || !HostWindow.WindowFocused() ||

@@ -1,5 +1,6 @@
 """Delay a real service heartbeat while editing on an owned private display."""
 import ast
+import ctypes as c
 import json
 import os
 from pathlib import Path
@@ -77,6 +78,7 @@ def main():
         thread.start()
         environment = dict(os.environ, KRYON_SERVICE_ROOT=str(root), PHOTOS_CONFIG=str(configuration))
         portable = os.environ.get('PHOTOS_HEARTBEAT_PORTABLE') == '1'
+        closing = os.environ.get('PHOTOS_CLOSE_DURING_HEARTBEAT') == '1'
         if portable:
             flags = [] if (ROOT / 'ziran.local.toml').exists() else ['--locked']
             kryon = Path(subprocess.check_output(['ziran', 'pkg', 'path', 'kryon', *flags], cwd=ROOT, text=True).strip())
@@ -86,10 +88,11 @@ def main():
             command = [os.environ.get('PHOTOS_BINARY', str(ROOT / 'build/photos-desktop'))]
         app = subprocess.Popen(command, env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
-        def wait(predicate, message):
+        def wait(predicate, message, allow_exit=False):
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
-                assert app.poll() is None, app.stderr.read().decode()
+                if not allow_exit:
+                    assert app.poll() is None, app.stderr.read().decode()
                 assert not errors, errors
                 value = predicate()
                 if value:
@@ -99,6 +102,29 @@ def main():
 
         def xdo(*arguments):
             return subprocess.check_output(['xdotool', *map(str, arguments)], text=True).strip()
+
+        def request_close(window):
+            # ICCCM close for this test-owned window, with no window kill.
+            x = c.CDLL('libX11.so.6')
+            x.XOpenDisplay.argtypes = [c.c_char_p]
+            x.XOpenDisplay.restype = c.c_void_p
+            x.XInternAtom.argtypes = [c.c_void_p, c.c_char_p, c.c_int]
+            x.XInternAtom.restype = c.c_ulong
+            x.XSendEvent.argtypes = [c.c_void_p, c.c_ulong, c.c_int, c.c_long, c.c_void_p]
+            x.XFlush.argtypes = [c.c_void_p]
+            x.XCloseDisplay.argtypes = [c.c_void_p]
+            display = x.XOpenDisplay(os.environ['DISPLAY'].encode())
+            assert display
+            try:
+                event = (c.c_ulong * 24)()
+                event[0], event[2], event[3], event[4] = 33, 1, display, int(window)
+                event[5] = x.XInternAtom(display, b'WM_PROTOCOLS', 0)
+                event[6] = 32
+                event[7] = x.XInternAtom(display, b'WM_DELETE_WINDOW', 0)
+                assert x.XSendEvent(display, int(window), 0, 0, c.byref(event))
+                x.XFlush(display)
+            finally:
+                x.XCloseDisplay(display)
 
         def find_window():
             result = subprocess.run(['xdotool', 'search', '--onlyvisible', '--pid', str(app.pid)], capture_output=True, text=True)
@@ -157,6 +183,10 @@ def main():
                                           if control['control'] == '41'), None), 'Album text field is missing')
                 click(field)
             xdo('type', '--delay', '20', '--clearmodifiers', '--', 'Heartbeat album')
+            if closing:
+                request_close(window)
+                time.sleep(.3)
+                assert app.poll() is None, 'Close discarded an unfinished editor'
             hold.set()
             wait(pending.is_set, 'Photos did not keep its active service alive')
             if portable:
@@ -173,15 +203,23 @@ def main():
                 assert snapshot['loading'], 'A submitted edit did not retain its pending state'
                 assert not any(control['label'] == 'Cancel' and control['enabled']
                                for control in snapshot['controls']), 'Cancel remained enabled after submitting Save'
+            if closing:
+                request_close(window)
+                time.sleep(2.2)
+                assert app.poll() is None, 'Close discarded an accepted Save behind the heartbeat'
             release.set()
-            wait(lambda: any(request['action'] == 'album_create' for request in requests), 'Save was lost behind the heartbeat')
-            wait(lambda: library.db.execute('SELECT 1 FROM albums WHERE name=?', ('Heartbeat album',)).fetchone(), 'Album save did not finish')
-            if not portable:
+            wait(lambda: any(request['action'] == 'album_create' for request in requests), 'Save was lost behind the heartbeat', closing)
+            wait(lambda: library.db.execute('SELECT 1 FROM albums WHERE name=?', ('Heartbeat album',)).fetchone(), 'Album save did not finish', closing)
+            if closing:
+                assert app.wait(timeout=10) == 0, app.stderr.read().decode()
+            elif not portable:
                 wait(lambda: state().get('editor') == '' and not state().get('loading'), 'Album editor did not finish')
             assert library.album_details('Heartbeat album')['name'] == 'Heartbeat album'
             assert (source / 'Synthetic.jpg').read_bytes() == original
             assert not errors, errors
             print('Private Photos heartbeat: editing remains enabled, queued Save persists exact text, original unchanged')
+            if closing:
+                print('Graceful close waited for the unfinished editor and accepted Save, then released the process')
         finally:
             release.set()
             stop.set()
