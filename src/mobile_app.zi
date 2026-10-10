@@ -1,9 +1,12 @@
-// Native Android gallery. Kryon owns layout, scrolling and every UI action;
-// the OS adapter exposes the granted device media and decoded private previews.
+// Native Android gallery in the style of Ente Photos: an edge-to-edge grid
+// grouped by day, a bottom tab bar, a black full-screen viewer and grouped
+// settings. Kryon owns layout, scrolling and every UI action; the OS adapter
+// exposes the granted device media and decoded private previews.
 using UI :: #import "kryon/Widgets";
 using Media :: #import "mobile_media";
 Input :: #import "kryon/tree_input";
 ScrollDevice :: #import "kryon/ScrollDevice";
+ScrollLayout :: #import "kryon/scroll";
 JNI :: #import "kryon/AndroidJni";
 Device :: #import "kryon/AndroidDevice";
 Theme :: #import "kryon/SystemTheme";
@@ -12,13 +15,39 @@ Viewer :: #import "viewer";
 Gesture :: #import "mobile_viewer";
 Host :: #import "kryon/Raylib";
 Crypto :: #import "backup_crypto";
+PhotosIcon :: #import "mingcute/mingcute_regular_pic";
+PhotosSelected :: #import "mingcute/mingcute_filled_pic";
+AlbumsIcon :: #import "mingcute/mingcute_regular_album_2";
+AlbumsSelected :: #import "mingcute/mingcute_filled_album_2";
+VideosIcon :: #import "mingcute/mingcute_regular_video";
+VideosSelected :: #import "mingcute/mingcute_filled_video";
+SettingsIcon :: #import "mingcute/mingcute_regular_settings_3";
+SettingsSelected :: #import "mingcute/mingcute_filled_settings_3";
+BackIcon :: #import "mingcute/mingcute_regular_arrow_left";
+ShareIcon :: #import "mingcute/mingcute_regular_share_2";
+PlayIcon :: #import "mingcute/mingcute_filled_play";
+ZoomIcon :: #import "mingcute/mingcute_regular_zoom_in";
+FitIcon :: #import "mingcute/mingcute_regular_fullscreen_exit";
+PreviousIcon :: #import "mingcute/mingcute_regular_left";
+NextIcon :: #import "mingcute/mingcute_regular_right";
+CloudIcon :: #import "mingcute/mingcute_regular_cloud";
+LockIcon :: #import "mingcute/mingcute_regular_lock";
 #import "std/byte_text_linux"
 #import "std/text_buffer"
-scroll: s32; last_generation: s64 = -1; settings: bool;
-last_selected: s64 = -1; theme: s32 = -1;
+TopHeight :: 56.0
+NavHeight :: 64.0
+HeaderHeight :: 44.0
+Gap :: 2.0
+scroll: s32; settings: bool; theme: s32 = -1;
+last_view: [16]u8; last_album: [32]u8; last_page: s32 = -1; more_generation: s64 = -1;
+last_selected: s64 = -1;
 font_ready: bool;
 gesture: Gesture.State;
 password: [1025]u8; password_cursor: s32; password_anchor: s32; password_focused: bool;
+// Grid geometry for the loaded items, rebuilt every frame in content units.
+tile_x: [480]float32; tile_y: [480]float32; header: [480]bool; header_y: [480]float32;
+day_label: [480][32]u8;
+labels_generation: s64 = -1; labels_count: s32 = -1;
 ClearPassword :: () {
     for i: 0..1024 { password[i]=0 }
     password_cursor=0; password_anchor=0; password_focused=false
@@ -45,16 +74,109 @@ Password :: (session: Session, bounds: Rectangle, key: s32) {
         }
     }
 }
-Label :: (session: Session, key: u64, value: string, bounds: Rectangle, font: s32 = 15) {
-    props: TextProps; props.key=key; props.text=value; props.bounds=bounds; props.font=font; props.wrap=TextWrap.TextWrapNone; Text(session,props)
+// Ente's colors: black (or white) canvas, near-white (or black) text and its
+// green accent, following the phone's dark mode. The viewer is always dark.
+Pack :: (red: s32, green: s32, blue: s32) -> u32 { return (cast(u32)red << 24) | (cast(u32)green << 16) | (cast(u32)blue << 8) | 255 }
+EntePalette :: (dark: bool) -> Theme.SystemPalette {
+    palette := Theme.SystemPaletteFallback(dark)
+    if dark {
+        palette.background = Pack(0,0,0); palette.base = Pack(22,22,22); palette.text = Pack(255,255,255); palette.border = Pack(38,38,38)
+    } else {
+        palette.background = Pack(255,255,255); palette.base = Pack(245,245,245); palette.text = Pack(0,0,0); palette.border = Pack(224,224,224)
+    }
+    palette.selected = Pack(29,185,84)
+    return palette
 }
-Action :: (session: Session, id: s32, value: string, bounds: Rectangle, enabled: bool = true) -> bool {
-    props: ButtonProps; props.key=cast(u64)id; props.id=id; props.label=value; props.bounds=bounds; props.disabled=!enabled; return Button(session,props)==1
+Label :: (session: Session, key: u64, value: string, bounds: Rectangle, font: s32 = 15, align: TextAlign = TextAlign.TextAlignStart) {
+    props: TextProps; props.key=key; props.text=value; props.bounds=bounds; props.font=font; props.wrap=TextWrap.TextWrapNone; props.align=align; Text(session,props)
 }
-Picture :: (session: Session, key: u64, photo: Photo, bounds: Rectangle, cover: bool) {
-    if photo.image[0]==0 { return }
-    props: ImageProps; props.key=key; props.asset_path=TextFromCString(*photo.image[0]); props.alt_text=TextFromCString(*photo.name[0]); props.bounds=bounds
-    props.fit=ifx cover then ImageFit.ImageFitCover else ImageFit.ImageFitContain; Image(session,props)
+Wrapped :: (session: Session, key: u64, value: string, bounds: Rectangle, font: s32 = 14, align: TextAlign = TextAlign.TextAlignStart) {
+    props: TextProps; props.key=key; props.text=value; props.bounds=bounds; props.font=font; props.wrap=TextWrap.TextWrapAuto; props.align=align; Text(session,props)
+}
+// A settings row: full width, left aligned, like Ente's menu items.
+Row :: (session: Session, id: s32, value: string, bounds: Rectangle, enabled: bool = true, primary: bool = false) -> bool {
+    props: ButtonProps; props.key=cast(u64)id; props.id=id; props.label=value; props.bounds=bounds; props.disabled=!enabled
+    props.content_alignment=ContentAlignment.ContentAlignmentStart
+    if primary { props.tone=ButtonTone.ButtonToneAccent }
+    return Button(session,props)==1
+}
+Primary :: (session: Session, id: s32, value: string, bounds: Rectangle, enabled: bool = true) -> bool {
+    props: ButtonProps; props.key=cast(u64)id; props.id=id; props.label=value; props.bounds=bounds; props.disabled=!enabled
+    props.tone=ButtonTone.ButtonToneAccent; props.pill=true; return Button(session,props)==1
+}
+IconButton :: (session: Session, id: s32, shape: string, label: string, bounds: Rectangle, enabled: bool = true) -> bool {
+    props: ButtonProps; props.key=cast(u64)id; props.id=id; props.label=label; props.icon_shape=shape; props.icon_only=true
+    props.emphasis=ButtonEmphasis.ButtonEmphasisGhost; props.circle=true; props.bounds=bounds; props.disabled=!enabled
+    return Button(session,props)==1
+}
+Picture :: (session: Session, key: u64, path: *u8, alt: *u8, bounds: Rectangle) {
+    if path[0]==0 { return }
+    props: ImageProps; props.key=key; props.asset_path=TextFromCString(path); props.alt_text=TextFromCString(alt); props.bounds=bounds
+    props.fit=ImageFit.ImageFitCover; Image(session,props)
+}
+// "Today", "Yesterday", "Sat, 10 Oct" this year, or "10 Oct 2025".
+Days :: (year: s64, month: s64, day: s64) -> s64 {
+    y := year - (ifx month <= 2 then 1 else 0)
+    era := (ifx y >= 0 then y else y - 399) / 400
+    yoe := y - era * 400
+    doy := (153 * ((month + 9) % 12) + 2) / 5 + day - 1
+    return era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468
+}
+Digits :: (text: string, at: s32, count: s32) -> s64 {
+    value: s64
+    for i: 0..count-1 {
+        byte := text[at+i]; if byte < 48 || byte > 57 { return -1 }
+        value = value * 10 + cast(s64)(byte - 48)
+    }
+    return value
+}
+Put :: (out: []u8, at: *s32, text: string) {
+    for byte: text { if at.* < cast(s32)out.count - 1 { out[at.*] = byte; at.* += 1 } }
+    out[at.*] = 0
+}
+PutNumber :: (out: []u8, at: *s32, value: s64) {
+    digits: [24]u8; count: s32; rest := value
+    while true { digits[count] = cast(u8)(48 + rest % 10); count += 1; rest /= 10; if rest == 0 { break } }
+    while count > 0 { count -= 1; if at.* < cast(s32)out.count - 1 { out[at.*] = digits[count]; at.* += 1 } }
+    out[at.*] = 0
+}
+DayLabel :: (date: string, out: []u8) {
+    at: s32; out[0] = 0
+    today := TextFromCString(*Media.today[0]); yesterday := TextFromCString(*Media.yesterday[0])
+    if date.count == 0 { Put(out, *at, "Earlier"); return }
+    if date == today { Put(out, *at, "Today"); return }
+    if date == yesterday { Put(out, *at, "Yesterday"); return }
+    if date.count != 10 { Put(out, *at, date); return }
+    year := Digits(date, 0, 4); month := Digits(date, 5, 2); day := Digits(date, 8, 2)
+    if year < 0 || month < 1 || month > 12 || day < 1 || day > 31 { Put(out, *at, date); return }
+    months: [12]string = .{"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"}
+    weekdays: [7]string = .{"Sun","Mon","Tue","Wed","Thu","Fri","Sat"}
+    current := ifx today.count == 10 then Digits(today, 0, 4) else -1
+    if year == current {
+        weekday := ((Days(year, month, day) % 7) + 7 + 4) % 7
+        Put(out, *at, weekdays[weekday]); Put(out, *at, ", "); PutNumber(out, *at, day); Put(out, *at, " "); Put(out, *at, months[month-1])
+    } else {
+        PutNumber(out, *at, day); Put(out, *at, " "); Put(out, *at, months[month-1]); Put(out, *at, " "); PutNumber(out, *at, year)
+    }
+}
+Same :: (a: *u8, b: *u8) -> bool { return TextFromCString(a) == TextFromCString(b) }
+Copy :: (out: []u8, text: string) { at: s32; Put(out, *at, text) }
+NavItem :: (session: Session, id: s32, label: string, shape: string, chosen: string, selected: bool, bounds: Rectangle) -> bool {
+    props: ButtonProps; props.key=cast(u64)id; props.id=id; props.label=label
+    props.icon_shape=ifx selected then chosen else shape; props.icon_placement=IconPlacement.IconPlacementAbove
+    props.emphasis=ButtonEmphasis.ButtonEmphasisGhost; props.bounds=bounds; props.selected=selected
+    if selected { props.tone=ButtonTone.ButtonToneAccent }
+    return Button(session,props)==1
+}
+Navigation :: (session: Session, viewport: Rectangle, tab: s32) {
+    top := viewport.y+viewport.height-NavHeight
+    bar: BoxProps; bar.key=9; bar.bounds=.{viewport.x,top,viewport.width,NavHeight}; bar.fill=StyleTokenColor("canvas"); Box(session,bar)
+    line: BoxProps; line.key=8; line.bounds=.{viewport.x,top,viewport.width,1.0}; line.fill=StyleTokenColor("border"); Box(session,line)
+    width := viewport.width/4.0
+    if NavItem(session,10,"Photos",PhotosIcon.Shape,PhotosSelected.Shape,tab==0,.{viewport.x,top+4.0,width,NavHeight-8.0}) { settings=false; Media.Request("view","photos") }
+    if NavItem(session,11,"Albums",AlbumsIcon.Shape,AlbumsSelected.Shape,tab==1,.{viewport.x+width,top+4.0,width,NavHeight-8.0}) { settings=false; Media.Request("view","albums") }
+    if NavItem(session,12,"Videos",VideosIcon.Shape,VideosSelected.Shape,tab==2,.{viewport.x+2.0*width,top+4.0,width,NavHeight-8.0}) { settings=false; Media.Request("view","videos") }
+    if NavItem(session,13,"Settings",SettingsIcon.Shape,SettingsSelected.Shape,tab==3,.{viewport.x+3.0*width,top+4.0,width,NavHeight-8.0}) { settings=true; scroll=0 }
 }
 Frame :: (session: Session, viewport: Rectangle) -> s32 {
     if Device.AndroidLifecyclePaused()!=0 || Device.AndroidLifecycleFocused()==0 {
@@ -82,13 +204,17 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         }
     }
     if Media.locked || Media.backup_pending || Media.backup_configured || !Media.recovery_selected { ClearPassword() }
-    dark:=Device.AndroidSystemDark()
-    if dark!=theme { unused Palette.SystemPaletteInstall(Theme.SystemPaletteFallback(dark!=0)); theme=dark }
+    viewing:=Media.selected>=0 && Media.count>0 && !settings
+    dark: s32 = ifx Device.AndroidSystemDark()!=0 || viewing then 1 else 0
+    if dark!=theme { unused Palette.SystemPaletteInstall(EntePalette(dark!=0)); theme=dark }
     if Media.selected!=last_selected { Viewer.Reset(); Gesture.Reset(*gesture); last_selected=Media.selected }
     if settings || Media.loading || Media.selected<0 { Gesture.Reset(*gesture) }
-    if Media.generation!=last_generation { scroll=0; last_generation=Media.generation }
+    // Keep the grid where it was across loads, more items and the viewer;
+    // only another view, folder or page starts again at the top.
+    if !Same(*Media.view[0],*last_view[0]) || !Same(*Media.album[0],*last_album[0]) || Media.page!=last_page {
+        scroll=0; Copy(last_view[:],TextFromCString(*Media.view[0])); Copy(last_album[:],TextFromCString(*Media.album[0])); last_page=Media.page
+    }
     background: BoxProps; background.key=1; background.bounds=viewport; background.fill=StyleTokenColor("canvas"); Box(session,background)
-    x:=viewport.x+12.0; y:=viewport.y+12.0; width:=viewport.width-24.0
     key:=KeyboardTake(session)
     if password_focused && (key==4 || key==Input.KeyEscape) { password_focused=false; key=0 }
     if key==4 || key==Input.KeyEscape {
@@ -97,130 +223,219 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         else if Media.album[0]!=0 { Media.Request("back") }
         else { JNI.AndroidJniFinishActivity() }
     }
-    Label(session,2,"Photos",.{x,y,width-96.0,36.0},28)
+    x:=viewport.x+16.0; width:=viewport.width-32.0
     if Media.locked {
         Gesture.Reset(*gesture); Viewer.Reset()
-        Label(session,4,"Photos is locked",.{x,y+80.0,width,40.0},24)
-        Label(session,5,"Confirm your device screen lock to open Photos.",.{x,y+134.0,width,30.0},14)
-        Label(session,8,TextFromCString(*Media.security_status[0]),.{x,y+316.0,width,30.0},14)
-        if Action(session,6,"Unlock",.{x,y+192.0,width,48.0},!Media.auth_pending) { Media.Request("unlock") }
-        if !Media.device_secure && Action(session,7,"Device security settings",.{x,y+252.0,width,48.0}) { Media.Request("device_security") }
+        middle:=viewport.y+viewport.height*0.38
+        unused IconButton(session,4,LockIcon.Shape,"Locked",.{viewport.x+viewport.width/2.0-32.0,middle-96.0,64.0,64.0},false)
+        Label(session,5,"Photos is locked",.{x,middle-16.0,width,32.0},22,TextAlign.TextAlignCenter)
+        Wrapped(session,8,"Confirm your device screen lock to open Photos.",.{x,middle+24.0,width,44.0},14,TextAlign.TextAlignCenter)
+        if Primary(session,6,"Unlock",.{x,middle+84.0,width,48.0},!Media.auth_pending) { Media.Request("unlock") }
+        if !Media.device_secure && Row(session,7,"Device security settings",.{x,middle+144.0,width,48.0}) { Media.Request("device_security") }
+        Wrapped(session,9,TextFromCString(*Media.security_status[0]),.{x,middle+204.0,width,44.0},13,TextAlign.TextAlignCenter)
         return 0
     }
-    if Action(session,3,"Access",.{x+width-84.0,y,84.0,36.0}) { settings=true }
-    y+=46.0
-    tabs: [4]string=.{"Photos","Albums","Videos","Settings"}
-    for i: 0..3 {
-        if Action(session,10+cast(s32)i,tabs[i],.{x+cast(float32)i*(width/4.0),y,width/4.0-4.0,40.0}) {
-            settings=i==3; scroll=0
-            if i==0 { Media.Request("view","photos") }; if i==1 { Media.Request("view","albums") }; if i==2 { Media.Request("view","videos") }
-        }
-    }
-    y+=50.0
-    Label(session,20,TextFromCString(*Media.status[0]),.{x,y,width,26.0},14); y+=34.0
+    if viewing { return ViewerFrame(session,viewport) }
+    tab: s32 = ifx settings then 3 else ifx TextFromCString(*Media.view[0])=="albums" || Media.album[0]!=0 then 1 else ifx TextFromCString(*Media.view[0])=="videos" then 2 else 0
+    Navigation(session,viewport,tab)
+    body:=Rectangle.{viewport.x,viewport.y+TopHeight,viewport.width,viewport.height-TopHeight-NavHeight}
     if settings || Media.permission_bits==0 {
-        pointer:=Input.PointerSample(session)
-        ScrollDevice.BeginScrollFrame(session,.{pointer.x,pointer.y},pointer.pressed,pointer.down,pointer.released,PointerWheelTake(session,viewport),ClockSeconds())
-        panel: ScrollProps; panel.key=70; panel.bounds=.{x,y,width,viewport.y+viewport.height-y-12.0}; panel.content_height=1236; panel.scroll_offset=scroll
-        scrolled:=Scroll(session,panel); scroll=scrolled.scroll_offset; y-=cast(float32)scroll
-        Label(session,21,"Photo access",.{x,y,width,34.0},24)
-        Label(session,22,"Choose which device photos Photos can read.",.{x,y+44.0,width,28.0},14)
-        if Action(session,23,"Choose photos and videos",.{x,y+86.0,width,44.0}) { Media.Request("access") }
-        if Action(session,24,"System settings",.{x,y+142.0,width,44.0}) { Media.Request("settings") }
-        if Action(session,25,"Refresh gallery",.{x,y+198.0,width,44.0},Media.permission_bits!=0) { settings=false; Media.Request("refresh") }
-        Label(session,26,"Your original files stay on this device.",.{x,y+262.0,width,26.0},14)
-        Label(session,71,"Privacy",.{x,y+310.0,width,34.0},24)
-        if Action(session,72,ifx Media.lock_enabled then "Turn off device lock" else "Enable device lock",.{x,y+356.0,width,44.0},!Media.auth_pending) { Media.Request(ifx Media.lock_enabled then "disable_lock" else "enable_lock") }
-        if Media.lock_enabled && Action(session,73,"Lock now",.{x,y+412.0,width,44.0},!Media.auth_pending) { settings=false; Media.Request("lock") }
-        if Action(session,74,ifx Media.hide_content then "Allow screenshots and recent-app previews" else "Hide content in screenshots and recent apps",.{x,y+468.0,width,44.0}) { Media.Request("hide_content") }
-        Label(session,75,"Device lock asks again when Photos returns from the background.",.{x,y+532.0,width,36.0},14)
-        Label(session,76,TextFromCString(*Media.security_status[0]),.{x,y+578.0,width,30.0},14)
-        Label(session,80,"ThinkPad backup",.{x,y+626.0,width,34.0},24)
-        Label(session,81,TextFromCString(*Media.backup_status[0]),.{x,y+668.0,width,28.0},14)
-        if !Media.backup_configured {
-            if Action(session,82,"Choose encrypted recovery file",.{x,y+710.0,width,44.0},!Media.backup_pending) { ClearPassword(); Media.Request("choose_recovery") }
-            if Media.recovery_selected && !Media.backup_pending {
-                Password(session,.{x,y+766.0,width,48.0},key)
-                if Action(session,85,"Restore backup keys",.{x,y+826.0,width,44.0},password[0]!=0) {
-                    Media.Restore(TextFromCString(*password[0])); ClearPassword()
-                }
-            }
-        }
-        Label(session,86,"Use the recovery file saved in desktop Photos.",.{x,y+888.0,width,30.0},14)
-        Label(session,87,TextFromCString(*Media.backup_queue_status[0]),.{x,y+928.0,width,30.0},14)
-        if Media.backup_ready {
-            if Action(session,88,"Scan selected folders",.{x,y+972.0,width,44.0},!Media.backup_scanning) { Media.Request("scan_backup") }
-            if Action(session,89,"Stop camera queue",.{x,y+1028.0,width,44.0},Media.backup_folder_count>0) { Media.Request("stop_backup_queue") }
-            if Action(session,91,"Prepare selected photos",.{x,y+1084.0,width,44.0},!Media.backup_preparing && Media.backup_queued>Media.backup_prepared) { Media.Request("prepare_backup") }
-            if Action(session,92,ifx Media.backup_uploading then "Uploading to ThinkPad" else "Upload to ThinkPad",.{x,y+1140.0,width,44.0},!Media.backup_uploading && Media.backup_prepared>0) { Media.Request("upload_backup") }
-        }
-        if scrolled.opened { End(session) }
-        return 0
+        if Media.permission_bits==0 && !settings { return AccessFrame(session,viewport,body) }
+        Label(session,2,"Settings",.{x,viewport.y+14.0,width,30.0},22)
+        return SettingsFrame(session,body,key)
     }
-    if Media.selected>=0 && Media.count>0 {
-        photo: Photo=Media.photos[0]
-        if Action(session,30,"Back",.{x,y,84.0,40.0}) { Media.Request("back") }
-        if photo.video && Action(session,31,"Play video",.{x+96.0,y,width-96.0,40.0}) { Media.Request("play") }
-        if !photo.video && Action(session,31,"Share",.{x+96.0,y,width-96.0,40.0}) { Media.Request("share") }
-        image_bounds:=Rectangle.{x,y+50.0,width,viewport.y+viewport.height-y-234.0}
-        touch:=Input.PointerSample(session)
-        move:=Gesture.Update(*gesture,!Media.loading,Input.PointInBounds(touch.x,touch.y,image_bounds),touch.x,touch.y,
-            touch.pressed,touch.down,touch.released,Clock.Milliseconds(),image_bounds.width,Viewer.zoom)
-        if move.navigation!=0 { Media.Request(ifx move.navigation>0 then "next" else "previous") }
-        if move.double_tap { if Viewer.zoom>1.01 { Viewer.Fit() } else { Viewer.ChangeZoom(2.0) } }
-        Viewer.Draw(session,40,TextFromCString(*Media.photos[0].image[0]),TextFromCString(*Media.photos[0].name[0]),image_bounds)
-        controls:=viewport.y+viewport.height-172.0
-        if Action(session,32,"Previous",.{x,controls,width/4.0-3.0,40.0},!Media.loading) { Media.Request("previous") }
-        if Action(session,33,"Fit",.{x+width/4.0,controls,width/4.0-3.0,40.0}) { Viewer.Fit() }
-        if Action(session,34,"Zoom +",.{x+width/2.0,controls,width/4.0-3.0,40.0}) { Viewer.ChangeZoom(1.5) }
-        if Action(session,35,"Next",.{x+3.0*width/4.0,controls,width/4.0-3.0,40.0},!Media.loading) { Media.Request("next") }
-        Label(session,41,TextFromCString(*photo.name[0]),.{x,viewport.y+viewport.height-114.0,width,28.0},16)
-        Label(session,42,TextFromCString(*photo.date[0]),.{x,viewport.y+viewport.height-82.0,width,24.0},14)
-        Label(session,43,TextFromCString(*photo.folder[0]),.{x,viewport.y+viewport.height-52.0,width,24.0},14)
-        return 0
-    }
-    body:=Rectangle.{x,y,width,viewport.y+viewport.height-y-68.0}
     if Media.album[0]!=0 {
-        if Action(session,63,"Back to albums",.{x,y,width,36.0}) { Media.Request("back") }
-        body.y+=44.0; body.height-=44.0; y+=44.0
+        if IconButton(session,63,BackIcon.Shape,"Back to albums",.{viewport.x+4.0,viewport.y+8.0,40.0,40.0}) { Media.Request("back") }
+        folder:=ifx Media.count>0 then TextFromCString(*Media.photos[0].folder[0]) else "Album"
+        Label(session,2,folder,.{viewport.x+52.0,viewport.y+14.0,viewport.width-180.0,30.0},20)
         if Media.backup_ready {
-            if Action(session,90,ifx Media.backup_folder_selected then "Pause backup for this folder" else "Queue this folder for backup",.{x,y,width,40.0},!Media.backup_scanning) { Media.Request("backup_folder") }
-            body.y+=48.0; body.height-=48.0; y+=48.0
+            backup: ButtonProps; backup.key=90; backup.id=90; backup.icon_shape=CloudIcon.Shape; backup.pill=true
+            backup.label=ifx Media.backup_folder_selected then "Backing up" else "Back up"; backup.disabled=Media.backup_scanning
+            backup.bounds=.{viewport.x+viewport.width-124.0,viewport.y+10.0,116.0,36.0}
+            if Media.backup_folder_selected { backup.tone=ButtonTone.ButtonToneAccent } else { backup.emphasis=ButtonEmphasis.ButtonEmphasisOutline }
+            if Button(session,backup)==1 { Media.Request("backup_folder") }
         }
+    } else {
+        Label(session,2,ifx tab==1 then "Albums" else ifx tab==2 then "Videos" else "Photos",.{x,viewport.y+14.0,width,30.0},22)
     }
-    isAlbums:=TextFromCString(*Media.view[0])=="albums"
-    columns:=cast(s32)(width/112.0); if columns<2 { columns=2 }; if columns>6 { columns=6 }
-    cell:=(width-cast(float32)(columns-1)*8.0)/cast(float32)columns
-    height: float32=ifx isAlbums then 76.0 else cell+50.0
-    count:=ifx isAlbums then Media.album_count else Media.count
-    if count==0 && !Media.loading {
-        Label(session,64,"No accessible photos in this view.",.{x,y+24.0,width,30.0},16)
+    if tab==1 { return AlbumsFrame(session,body) }
+    return GridFrame(session,body)
+}
+// A slim scroll indicator over the content's edge, as Ente shows, instead of
+// a desktop scrollbar track that covers the grid's last column.
+Slim :: () -> ScrollLayout.ScrollMetrics {
+    metrics: ScrollLayout.ScrollMetrics; metrics.scrollbar_width=4; metrics.safe_gap=20; metrics.default_wheel_step=42
+    metrics.drag_threshold=5; metrics.visual_bleed=8; metrics.thumb_min_height=32
+    return metrics
+}
+Status :: (session: Session, body: Rectangle, message: string) {
+    Wrapped(session,64,message,.{body.x+24.0,body.y+body.height*0.35,body.width-48.0,48.0},15,TextAlign.TextAlignCenter)
+}
+GridFrame :: (session: Session, body: Rectangle) -> s32 {
+    if Media.count==0 {
+        Status(session,body,ifx Media.loading then "Loading your photos…" else "No photos or videos here yet")
+        return 0
     }
-    rows:=ifx isAlbums then count else (count+columns-1)/columns
+    // The tiles end where the scroll indicator begins.
+    width:=body.width-cast(float32)Slim().scrollbar_width
+    columns: s32 = 4; if width>=600.0 { columns=cast(s32)(width/150.0) }
+    cell:=(width-cast(float32)(columns-1)*Gap)/cast(float32)columns
+    if Media.generation!=labels_generation || Media.count!=labels_count {
+        for i: 0..Media.count-1 { DayLabel(TextFromCString(*Media.photos[i].date[0]),day_label[i][:]) }
+        labels_generation=Media.generation; labels_count=Media.count
+    }
+    y: float32 = 0.0; column: s32
+    for i: 0..Media.count-1 {
+        header[i]=i==0 || !Same(*Media.photos[i].date[0],*Media.photos[i-1].date[0])
+        if header[i] {
+            if column!=0 { y+=cell+Gap; column=0 }
+            header_y[i]=y; y+=HeaderHeight
+        }
+        tile_x[i]=cast(float32)column*(cell+Gap); tile_y[i]=y
+        column+=1; if column==columns { column=0; y+=cell+Gap }
+    }
+    if column!=0 { y+=cell+Gap }
+    total:=y+16.0
     pointer:=Input.PointerSample(session)
     ScrollDevice.BeginScrollFrame(session,.{pointer.x,pointer.y},pointer.pressed,pointer.down,pointer.released,PointerWheelTake(session,body),ClockSeconds())
-    props: ScrollProps; props.key=50; props.bounds=body; props.content_height=cast(s32)(cast(float32)rows*height); props.scroll_offset=scroll
+    props: ScrollProps; props.key=50; props.metrics=Slim(); props.bounds=body; props.content_height=cast(s32)total; props.scroll_offset=scroll
     scrolling:=Scroll(session,props); scroll=scrolling.scroll_offset
-    for i: 0..count-1 {
-        bx:=x+(ifx isAlbums then 0.0 else cast(float32)(i%columns)*(cell+8.0))
-        by:=y+cast(float32)(ifx isAlbums then i else i/columns)*height-cast(float32)scroll
-        if by+height<body.y || by>body.y+body.height { continue }
-        if isAlbums {
-            group: Album=Media.albums[i]
-            if Action(session,1000+i,TextFromCString(*group.name[0]),.{bx,by,width,58.0}) { Media.Request("album",TextFromCString(*group.id[0])) }
-        } else {
-            photo: Photo=Media.photos[i]
-            Picture(session,cast(u64)(2000+i),photo,.{bx,by,cell,cell},true)
-            open: ButtonProps; open.key=cast(u64)(3000+i); open.id=3000+i; open.label=TextFromCString(*photo.name[0]); open.bounds=.{bx,by,cell,cell}; open.invisible=true
-            if Button(session,open)==1 { Media.Request("open",TextFromCString(*photo.id[0])) }
-            if Action(session,1000+i,ifx photo.video then "Video" else TextFromCString(*photo.date[0]),.{bx,by+cell+4.0,cell,36.0}) { Media.Request("open",TextFromCString(*photo.id[0])) }
+    offset:=body.y-cast(float32)scroll
+    for i: 0..Media.count-1 {
+        if header[i] && header_y[i]+offset+HeaderHeight>=body.y && header_y[i]+offset<=body.y+body.height {
+            Label(session,cast(u64)(5000+i),TextFromCString(*day_label[i][0]),.{body.x+16.0,header_y[i]+offset+12.0,body.width-32.0,24.0},16)
+        }
+        top:=tile_y[i]+offset
+        if top+cell<body.y || top>body.y+body.height { continue }
+        bounds:=Rectangle.{body.x+tile_x[i],top,cell,cell}
+        photo:=*Media.photos[i]
+        Picture(session,cast(u64)(2000+i),*photo.image[0],*photo.name[0],bounds)
+        open: ButtonProps; open.key=cast(u64)(3000+i); open.id=3000+i; open.label=TextFromCString(*photo.name[0]); open.bounds=bounds; open.invisible=true
+        if Button(session,open)==1 { Media.Request("open",TextFromCString(*photo.id[0])) }
+        if photo.video {
+            badge: ButtonProps; badge.key=cast(u64)(4000+i); badge.id=4000+i; badge.label="Play video"; badge.icon_shape=PlayIcon.Shape
+            badge.icon_only=true; badge.circle=true; badge.size=ControlSize.ControlSizeSmall; badge.bounds=.{bounds.x+6.0,bounds.y+cell-34.0,28.0,28.0}
+            if Button(session,badge)==1 { Media.Request("open",TextFromCString(*photo.id[0])) }
         }
     }
     if scrolling.opened { End(session) }
-    footer:=viewport.y+viewport.height-56.0
-    if Action(session,60,"Previous",.{x,footer,width/3.0-4.0,40.0},!Media.loading && Media.page>0) { Media.Request("page","",Media.page-1) }
-    if Action(session,61,"Refresh",.{x+width/3.0,footer,width/3.0-4.0,40.0},!Media.loading) { Media.Request("refresh") }
-    if Action(session,62,"More",.{x+2.0*width/3.0,footer,width/3.0-4.0,40.0},!Media.loading && Media.more) { Media.Request("page","",Media.page+1) }
+    // Continuous scrolling: fetch the next items before the end is reached.
+    if Media.more && !Media.loading && more_generation!=Media.generation &&
+        cast(float32)scroll+body.height*2.5>=total {
+        more_generation=Media.generation; Media.Request("more")
+    }
+    return 0
+}
+AlbumsFrame :: (session: Session, body: Rectangle) -> s32 {
+    if Media.album_count==0 {
+        Status(session,body,ifx Media.loading then "Loading albums…" else "No device albums yet")
+        return 0
+    }
+    columns: s32 = 2; if body.width>=560.0 { columns=cast(s32)(body.width/200.0) }
+    spacing: float32 = 12.0
+    size: float32 = (body.width-32.0-cast(float32)(columns-1)*spacing)/cast(float32)columns
+    height: float32 = size+52.0
+    rows:=(Media.album_count+columns-1)/columns
+    pointer:=Input.PointerSample(session)
+    ScrollDevice.BeginScrollFrame(session,.{pointer.x,pointer.y},pointer.pressed,pointer.down,pointer.released,PointerWheelTake(session,body),ClockSeconds())
+    props: ScrollProps; props.key=51; props.metrics=Slim(); props.bounds=body; props.content_height=cast(s32)(cast(float32)rows*height+16.0); props.scroll_offset=scroll
+    scrolling:=Scroll(session,props); scroll=scrolling.scroll_offset
+    for i: 0..Media.album_count-1 {
+        bx:=body.x+16.0+cast(float32)(i%columns)*(size+spacing)
+        by:=body.y+8.0+cast(float32)(i/columns)*height-cast(float32)scroll
+        if by+height<body.y || by>body.y+body.height { continue }
+        group:=*Media.albums[i]
+        frame: BoxProps; frame.key=cast(u64)(6000+i); frame.bounds=.{bx,by,size,size}; frame.fill=StyleTokenColor("surface"); frame.radius=10.0; Box(session,frame)
+        Picture(session,cast(u64)(6100+i),*group.cover[0],*group.name[0],.{bx,by,size,size})
+        open: ButtonProps; open.key=cast(u64)(1000+i); open.id=1000+i; open.label=TextFromCString(*group.name[0]); open.bounds=.{bx,by,size,height}; open.invisible=true
+        if Button(session,open)==1 { Media.Request("album",TextFromCString(*group.id[0])) }
+        Label(session,cast(u64)(6200+i),TextFromCString(*group.name[0]),.{bx,by+size+8.0,size,22.0},15)
+        count: [24]u8; at: s32; PutNumber(count[:],*at,cast(s64)group.count); Put(count[:],*at,ifx group.count==1 then " item" else " items")
+        Label(session,cast(u64)(6300+i),TextFromCString(*count[0]),.{bx,by+size+30.0,size,18.0},12)
+    }
+    if scrolling.opened { End(session) }
+    return 0
+}
+AccessFrame :: (session: Session, viewport: Rectangle, body: Rectangle) -> s32 {
+    x:=body.x+24.0; width:=body.width-48.0; middle:=body.y+body.height*0.32
+    unused IconButton(session,20,PhotosIcon.Shape,"Photos",.{body.x+body.width/2.0-32.0,middle-84.0,64.0,64.0},false)
+    Label(session,21,"Your photos, on this device",.{x,middle,width,30.0},20,TextAlign.TextAlignCenter)
+    Wrapped(session,22,"Allow Photos to read the photos and videos you choose. Originals stay on this phone.",.{x,middle+38.0,width,48.0},14,TextAlign.TextAlignCenter)
+    if Primary(session,23,"Allow access",.{x,middle+104.0,width,48.0}) { Media.Request("access") }
+    if Row(session,24,"Open system settings",.{x,middle+164.0,width,48.0}) { Media.Request("settings") }
+    unused viewport
+    return 0
+}
+Section :: (session: Session, key: u64, title: string, x: float32, y: float32, width: float32) {
+    Label(session,key,title,.{x,y,width,22.0},13)
+}
+SettingsFrame :: (session: Session, body: Rectangle, key: s32) -> s32 {
+    x:=body.x+16.0; width:=body.width-32.0
+    pointer:=Input.PointerSample(session)
+    ScrollDevice.BeginScrollFrame(session,.{pointer.x,pointer.y},pointer.pressed,pointer.down,pointer.released,PointerWheelTake(session,body),ClockSeconds())
+    panel: ScrollProps; panel.key=70; panel.metrics=Slim(); panel.bounds=body; panel.content_height=1260; panel.scroll_offset=scroll
+    scrolled:=Scroll(session,panel); scroll=scrolled.scroll_offset; y:=body.y+8.0-cast(float32)scroll
+    Section(session,21,"PHOTO ACCESS",x,y,width); y+=28.0
+    if Row(session,23,"Choose photos and videos",.{x,y,width,52.0}) { Media.Request("access") }; y+=58.0
+    if Row(session,24,"System settings",.{x,y,width,52.0}) { Media.Request("settings") }; y+=58.0
+    if Row(session,25,"Refresh gallery",.{x,y,width,52.0},Media.permission_bits!=0) { settings=false; Media.Request("refresh") }; y+=58.0
+    Wrapped(session,26,"Your original files stay on this device.",.{x,y,width,22.0},13); y+=40.0
+    Section(session,71,"PRIVACY",x,y,width); y+=28.0
+    if Row(session,72,ifx Media.lock_enabled then "Turn off device lock" else "Enable device lock",.{x,y,width,52.0},!Media.auth_pending) { Media.Request(ifx Media.lock_enabled then "disable_lock" else "enable_lock") }; y+=58.0
+    if Media.lock_enabled {
+        if Row(session,73,"Lock now",.{x,y,width,52.0},!Media.auth_pending) { settings=false; Media.Request("lock") }; y+=58.0
+    }
+    if Row(session,74,ifx Media.hide_content then "Allow screenshots and recent-app previews" else "Hide content in screenshots and recent apps",.{x,y,width,52.0}) { Media.Request("hide_content") }; y+=58.0
+    Wrapped(session,75,"Device lock asks again when Photos returns from the background.",.{x,y,width,40.0},13); y+=44.0
+    if Media.security_status[0]!=0 { Wrapped(session,76,TextFromCString(*Media.security_status[0]),.{x,y,width,40.0},13); y+=44.0 }
+    y+=8.0
+    Section(session,80,"THINKPAD BACKUP",x,y,width); y+=28.0
+    Wrapped(session,81,TextFromCString(*Media.backup_status[0]),.{x,y,width,40.0},14); y+=46.0
+    if !Media.backup_configured {
+        if Row(session,82,"Choose encrypted recovery file",.{x,y,width,52.0},!Media.backup_pending) { ClearPassword(); Media.Request("choose_recovery") }; y+=58.0
+        if Media.recovery_selected && !Media.backup_pending {
+            Password(session,.{x,y,width,48.0},key); y+=56.0
+            if Row(session,85,"Restore backup keys",.{x,y,width,52.0},password[0]!=0,true) {
+                Media.Restore(TextFromCString(*password[0])); ClearPassword()
+            }
+            y+=58.0
+        }
+        Wrapped(session,86,"Use the recovery file saved in desktop Photos.",.{x,y,width,22.0},13); y+=34.0
+    }
+    if Media.backup_queue_status[0]!=0 { Wrapped(session,87,TextFromCString(*Media.backup_queue_status[0]),.{x,y,width,44.0},13); y+=50.0 }
+    if Media.backup_ready {
+        if Row(session,88,"Scan selected folders",.{x,y,width,52.0},!Media.backup_scanning) { Media.Request("scan_backup") }; y+=58.0
+        if Row(session,89,"Stop camera queue",.{x,y,width,52.0},Media.backup_folder_count>0) { Media.Request("stop_backup_queue") }; y+=58.0
+        if Row(session,91,"Prepare selected photos",.{x,y,width,52.0},!Media.backup_preparing && Media.backup_queued>Media.backup_prepared) { Media.Request("prepare_backup") }; y+=58.0
+        if Row(session,92,ifx Media.backup_uploading then "Uploading to ThinkPad" else "Upload to ThinkPad",.{x,y,width,52.0},!Media.backup_uploading && Media.backup_prepared>0,true) { Media.Request("upload_backup") }; y+=58.0
+    }
+    if scrolled.opened { End(session) }
+    return 0
+}
+ViewerFrame :: (session: Session, viewport: Rectangle) -> s32 {
+    photo:=*Media.photos[0]
+    black: BoxProps; black.key=39; black.bounds=viewport; black.fill=Color.{0,0,0,255}; Box(session,black)
+    image_bounds:=Rectangle.{viewport.x,viewport.y+TopHeight,viewport.width,viewport.height-TopHeight-112.0}
+    touch:=Input.PointerSample(session)
+    move:=Gesture.Update(*gesture,!Media.loading,Input.PointInBounds(touch.x,touch.y,image_bounds),touch.x,touch.y,
+        touch.pressed,touch.down,touch.released,Clock.Milliseconds(),image_bounds.width,Viewer.zoom)
+    if move.navigation!=0 { Media.Request(ifx move.navigation>0 then "next" else "previous") }
+    if move.double_tap { if Viewer.zoom>1.01 { Viewer.Fit() } else { Viewer.ChangeZoom(2.0) } }
+    Viewer.Draw(session,40,TextFromCString(*photo.image[0]),TextFromCString(*photo.name[0]),image_bounds)
+    if IconButton(session,30,BackIcon.Shape,"Back",.{viewport.x+4.0,viewport.y+8.0,40.0,40.0}) { Media.Request("back") }
+    Label(session,41,TextFromCString(*photo.name[0]),.{viewport.x+52.0,viewport.y+8.0,viewport.width-112.0,22.0},15)
+    day: [32]u8; DayLabel(TextFromCString(*photo.date[0]),day[:])
+    Label(session,42,TextFromCString(*day[0]),.{viewport.x+52.0,viewport.y+30.0,viewport.width-112.0,18.0},12)
+    if photo.video {
+        if IconButton(session,31,PlayIcon.Shape,"Play video",.{viewport.x+viewport.width-48.0,viewport.y+8.0,40.0,40.0}) { Media.Request("play") }
+    } else if IconButton(session,31,ShareIcon.Shape,"Share",.{viewport.x+viewport.width-48.0,viewport.y+8.0,40.0,40.0}) { Media.Request("share") }
+    bottom:=viewport.y+viewport.height-112.0
+    Label(session,43,TextFromCString(*photo.folder[0]),.{viewport.x+16.0,bottom+8.0,viewport.width-32.0,20.0},13,TextAlign.TextAlignCenter)
+    step:=viewport.width/4.0; row:=bottom+44.0
+    if IconButton(session,32,PreviousIcon.Shape,"Previous",.{viewport.x+step*0.5-24.0,row,48.0,48.0},!Media.loading) { Media.Request("previous") }
+    if IconButton(session,33,FitIcon.Shape,"Fit",.{viewport.x+step*1.5-24.0,row,48.0,48.0}) { Viewer.Fit() }
+    if IconButton(session,34,ZoomIcon.Shape,"Zoom in",.{viewport.x+step*2.5-24.0,row,48.0,48.0}) { Viewer.ChangeZoom(1.5) }
+    if IconButton(session,35,NextIcon.Shape,"Next",.{viewport.x+step*3.5-24.0,row,48.0,48.0},!Media.loading) { Media.Request("next") }
     return 0
 }
 Clock :: #import "kryon/ClockLinux";

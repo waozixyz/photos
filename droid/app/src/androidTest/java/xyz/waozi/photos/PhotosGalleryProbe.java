@@ -114,6 +114,48 @@ public final class PhotosGalleryProbe extends Instrumentation {
         SystemClock.sleep(wait);
     }
 
+    // Photos lays out in dp inside the system-bar insets; these locate its
+    // fixed chrome in screen pixels for touch input. Like PhotosActivity, the
+    // bars count while hidden, and a display cutout counts where it is larger.
+    private android.graphics.Rect insets() {
+        final android.graphics.Rect result = new android.graphics.Rect();
+        runOnMainSync(() -> {
+            android.view.WindowInsets value = activity.getWindow().getDecorView().getRootWindowInsets();
+            if (value == null) return;
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                android.graphics.Insets bars = value.getInsetsIgnoringVisibility(android.view.WindowInsets.Type.systemBars());
+                result.set(bars.left, bars.top, bars.right, bars.bottom);
+            } else result.set(value.getSystemWindowInsetLeft(), value.getSystemWindowInsetTop(),
+                value.getSystemWindowInsetRight(), value.getSystemWindowInsetBottom());
+            android.view.DisplayCutout cutout = android.os.Build.VERSION.SDK_INT >= 28 ? value.getDisplayCutout() : null;
+            if (cutout != null) result.set(Math.max(result.left, cutout.getSafeInsetLeft()), Math.max(result.top, cutout.getSafeInsetTop()),
+                Math.max(result.right, cutout.getSafeInsetRight()), Math.max(result.bottom, cutout.getSafeInsetBottom()));
+        });
+        return result;
+    }
+    // The EXIF fixture's capture instant, as the phone's own calendar day.
+    private static String fixtureDay() {
+        java.text.SimpleDateFormat day = new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT);
+        day.setTimeZone(java.util.TimeZone.getDefault());
+        return day.format(new java.util.Date(1577836800000L));
+    }
+    private float dp() { return activity.getResources().getDisplayMetrics().density; }
+    private float screenWidth() { return activity.getWindow().getDecorView().getWidth(); }
+    private float screenHeight() { return activity.getWindow().getDecorView().getHeight(); }
+    private void tapTab(int index) throws Exception {
+        android.graphics.Rect inset = insets(); float width = (screenWidth() - inset.left - inset.right) / 4f;
+        tap(inset.left + (index + 0.5f) * width, screenHeight() - inset.bottom - 32 * dp());
+    }
+    private void tapBack() throws Exception { android.graphics.Rect inset = insets(); tap(inset.left + 24 * dp(), inset.top + 28 * dp()); }
+    private void tapFolderBackup() throws Exception {
+        android.graphics.Rect inset = insets(); tap(screenWidth() - inset.right - 66 * dp(), inset.top + 28 * dp());
+    }
+    private void tapTile(int column, int row) throws Exception {
+        android.graphics.Rect inset = insets(); float width = screenWidth() - inset.left - inset.right - 4 * dp();
+        float cell = (width - 6 * dp()) / 4f;
+        tap(inset.left + column * (cell + 2 * dp()) + cell / 2f, inset.top + 100 * dp() + row * (cell + 2 * dp()) + cell / 2f);
+    }
+
     private void swipe(float from, float to, float y) throws Exception {
         long down = SystemClock.uptimeMillis();
         for (int i = 0; i <= 12; i++) {
@@ -132,7 +174,13 @@ public final class PhotosGalleryProbe extends Instrumentation {
         SystemClock.sleep(250);
         Bitmap picture = getUiAutomation().takeScreenshot();
         if (picture == null) throw new AssertionError("screenshot unavailable");
-        try { return picture.getPixel(240, 280); }
+        // The 4:3 fixture fitted to the width spans 0.375 widths above the
+        // image area's center and 0.75 at double zoom; halfway between is
+        // black while fitted and covered once magnified, with a wide margin.
+        android.graphics.Rect inset = insets();
+        float width = screenWidth() - inset.left - inset.right;
+        float top = inset.top + 56 * dp(), bottom = screenHeight() - inset.bottom - 112 * dp();
+        try { return picture.getPixel((int)(screenWidth() / 2), (int)((top + bottom) / 2 - 0.5625f * width)); }
         finally { picture.recycle(); }
     }
 
@@ -337,7 +385,7 @@ public final class PhotosGalleryProbe extends Instrumentation {
     private File queueFile() { return new File(activity.getFilesDir(), "camera-backup/queue.sqlite"); }
 
     private void queueChecks() throws Exception {
-        tap(180, 102);
+        tapTab(1);
         JSONObject groups = action("view", "albums", 0);
         JSONArray albums = groups.getJSONArray("albums");
         require(albums.length() >= 2, "camera_queue_has_distinct_device_folders");
@@ -352,7 +400,7 @@ public final class PhotosGalleryProbe extends Instrumentation {
         int imageCount = images.getInt("total");
         require(imageCount > 0, "camera_queue_image_folder_has_originals");
         // Native UI button selects the folder; no provider file is opened.
-        tap(240, 246);
+        tapFolderBackup();
         JSONObject value = queued(1, imageCount);
         require(value.getInt("backup_queued") == imageCount && value.getInt("backup_folder_selected") == 1,
             "native_folder_button_queues_only_selected_folder");
@@ -553,7 +601,7 @@ public final class PhotosGalleryProbe extends Instrumentation {
         require(PhotosActivity.visible, "photos_returns_to_the_foreground");
         SystemClock.sleep(1000);
         settled();
-        tap(409, 102);
+        tapTab(3);
         for (int i = 0; i < 3; i++) { shell("input swipe 240 860 240 160 400"); SystemClock.sleep(600); }
         screenshot("background");
     }
@@ -612,21 +660,26 @@ public final class PhotosGalleryProbe extends Instrumentation {
                 screenshot(stage);
             } else {
                 require(value.getInt("access") == 3, "full_media_access");
-                require(value.getInt("total") == 36 && value.getJSONArray("photos").length() == 30 && value.getInt("more") == 1, "bounded_first_page");
+                // The grid starts with 30 items and, near the end, extends the
+                // list in bounded steps; this screen shows all 36 at once.
+                int loaded = value.getJSONArray("photos").length();
+                require(value.getInt("total") == 36 && (loaded == 30 && value.getInt("more") == 1 || loaded == 36 && value.getInt("more") == 0), "bounded_continuous_list");
                 JSONArray photos = value.getJSONArray("photos");
                 for (int i = 0; i < photos.length(); i++) {
                     JSONObject photo = photos.getJSONObject(i);
                     require(new File(photo.getString("image")).length() > 0, "decoded_preview_" + i);
                 }
+                // Items without capture dates fill the first 30 positions; the
+                // old capture date sorts after them.
                 boolean cameraDate = false;
-                for (int i = 0; i < photos.length(); i++) {
+                for (int i = 0; i < Math.min(30, photos.length()); i++) {
                     JSONObject item = photos.getJSONObject(i);
-                    if (item.getString("name").equals("写真-00-é.jpg") && item.getString("date").equals("2020-01-01")) cameraDate = true;
+                    if (item.getString("name").equals("写真-00-é.jpg") && item.getString("date").equals(fixtureDay())) cameraDate = true;
                 }
                 require(!cameraDate, "capture_date_order_with_missing_dates");
                 screenshot("gallery");
                 String touched = photos.getJSONObject(1).getString("id");
-                tap(180, 220);
+                tapTile(1, 0);
                 value = viewerAt(touched);
                 require(value.getLong("selected") == Long.parseLong(touched), "native_thumbnail_touch_opens_viewer");
                 swipe(380, 80, 500);
@@ -645,14 +698,14 @@ public final class PhotosGalleryProbe extends Instrumentation {
                 tap(240, 500, 30); tap(240, 500, 30);
                 SystemClock.sleep(500);
                 require(previewPixel() == fitPixel, "native_double_tap_fit");
-                tap(54, 185);
+                tapBack();
                 value = settled();
                 require(value.getLong("selected") == -1 && value.getInt("total") == 36, "native_touch_returns_to_gallery");
                 value = action("page", "", 1);
                 require(value.getJSONArray("photos").length() == 6 && value.getInt("page") == 1 && value.getInt("more") == 0, "second_page");
                 for (int i = 0; i < value.getJSONArray("photos").length(); i++) {
                     JSONObject item = value.getJSONArray("photos").getJSONObject(i);
-                    if (item.getString("name").equals("写真-00-é.jpg") && item.getString("date").equals("2020-01-01")) cameraDate = true;
+                    if (item.getString("name").equals("写真-00-é.jpg") && item.getString("date").equals(fixtureDay())) cameraDate = true;
                 }
                 require(cameraDate, "camera_capture_date");
                 value = action("view", "albums", 0);

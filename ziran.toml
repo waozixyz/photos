@@ -62,3 +62,7 @@ source = true
 [dependencies.daochi_client]
 git = "https://github.com/ziranlang/daochi-client.git"
 ref = "master"
+
+[dependencies.mingcute]
+git = "https://github.com/kryonlabs/mingcute.git"
+ref = "master"

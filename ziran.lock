@@ -3,19 +3,11 @@
   "packages": [
     {
       "commit": "f01be2f1d5acf2a570e351013221238b7c543760",
-      "dependencies": {"kryon": "p0ccbb92c54bb4180"},
+      "dependencies": {"kryon": "p4c51b15b9095d376"},
       "id": "p03de317562242e4f",
       "name": "Kss",
       "ref": "master",
       "url": "https://github.com/kryonlabs/kss.git"
-    },
-    {
-      "commit": "2e93528c1e759a78a72366162ac7adb4df437131",
-      "dependencies": {"raylib": "p5a77c9c35110e925"},
-      "id": "p0ccbb92c54bb4180",
-      "name": "kryon",
-      "ref": "master",
-      "url": "https://github.com/kryonlabs/kryon.git"
     },
     {
       "commit": "040c41e9c1c772e553e61d51b08b37f332b06488",
@@ -26,12 +18,28 @@
       "url": "https://github.com/ziranlang/sqlite.git"
     },
     {
+      "commit": "e6832d0c9bd2d7905a81f4b0ef3f3b3e8cd32590",
+      "dependencies": {"raylib": "p5a77c9c35110e925"},
+      "id": "p4c51b15b9095d376",
+      "name": "kryon",
+      "ref": "master",
+      "url": "https://github.com/kryonlabs/kryon.git"
+    },
+    {
       "commit": "5cc7677b290f0448462410f7c7e85f518664b943",
       "dependencies": {"liboqs": "pfb3df7cb222b1bdc"},
       "id": "p55635fc8976895a9",
       "name": "Oqs",
       "ref": "master",
       "url": "https://github.com/ziranlang/oqs.git"
+    },
+    {
+      "commit": "933691600cf10e81b1f53d9919dbcb371c1968e1",
+      "dependencies": {},
+      "id": "p56788fa3dab3e73a",
+      "name": "mingcute",
+      "ref": "master",
+      "url": "https://github.com/kryonlabs/mingcute.git"
     },
     {
       "commit": "fafa2cea97d0cb379d832086ba45a989fa6f9c8e",
@@ -43,14 +51,6 @@
       "url": "https://github.com/raysan5/raylib.git"
     },
     {
-      "commit": "7e4e8396aec46a0039fdabef4c70c2d3636ace31",
-      "dependencies": {"oqs": "p55635fc8976895a9"},
-      "id": "pd5da7a0b570d7e24",
-      "name": "DaochiClient",
-      "ref": "master",
-      "url": "https://github.com/ziranlang/daochi-client.git"
-    },
-    {
       "commit": "b09c88c14082339b66c7b7158d609a771e64ca69",
       "dependencies": {},
       "id": "pbeb32cf8d2e03b02",
@@ -58,6 +58,14 @@
       "ref": "version-3.53.4",
       "source": true,
       "url": "https://github.com/sqlite/sqlite.git"
+    },
+    {
+      "commit": "7e4e8396aec46a0039fdabef4c70c2d3636ace31",
+      "dependencies": {"oqs": "p55635fc8976895a9"},
+      "id": "pd5da7a0b570d7e24",
+      "name": "DaochiClient",
+      "ref": "master",
+      "url": "https://github.com/ziranlang/daochi-client.git"
     },
     {
       "commit": "a6a93de672b7e2c6c13a02cbbe0e6457fe9306fd",
@@ -79,11 +87,11 @@
     }
   ],
   "root": {
-    "dependencies": {"daochi_client": "pd5da7a0b570d7e24", "kryon": "p0ccbb92c54bb4180", "kss": "p03de317562242e4f", "libsodium": "pddc9c82431af7bc6", "oqs": "p55635fc8976895a9", "sqlite": "p450e8db63484350c"},
+    "dependencies": {"daochi_client": "pd5da7a0b570d7e24", "kryon": "p4c51b15b9095d376", "kss": "p03de317562242e4f", "libsodium": "pddc9c82431af7bc6", "mingcute": "p56788fa3dab3e73a", "oqs": "p55635fc8976895a9", "sqlite": "p450e8db63484350c"},
     "name": "photos"
   },
   "toolchain": {
-    "commit": "9ad629149ab39fed2fc6c3d8e7c81911c6387677",
+    "commit": "f5d3b94de2de4010e97cb70ffcb6f3dd863ff36b",
     "ref": "master",
     "url": "https://github.com/ziranlang/ziran.git"
   }

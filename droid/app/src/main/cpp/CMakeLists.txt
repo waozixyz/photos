@@ -57,9 +57,11 @@ execute_process(COMMAND "${HOST_PYTHON}"
     --manifest "${APP_ZIRAN_MANIFEST}" ${APP_ZIRAN_DEFINES}
     WORKING_DIRECTORY "${REPO_ROOT}" COMMAND_ERROR_IS_FATAL ANY)
 include("${APP_ZIRAN_MANIFEST}")
+# A rebuilt compiler regenerates the C as well.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     ${APP_ZIRAN_SOURCES} ${APP_LIBRARY_ZIRAN_SOURCES}
-    "${REPO_ROOT}/ziran.toml" "${REPO_ROOT}/ziran.lock")
+    "${REPO_ROOT}/ziran.toml" "${REPO_ROOT}/ziran.lock"
+    "${ZIRAN_BIN}" "${ZI2C_BIN}")
 if(EXISTS "${REPO_ROOT}/ziran.local.toml")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
         "${REPO_ROOT}/ziran.local.toml")

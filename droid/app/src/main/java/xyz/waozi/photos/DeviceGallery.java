@@ -47,6 +47,10 @@ final class DeviceGallery {
     private long generation;
     private int permission;
     private int page;
+    // Items shown from the current page, grown by scrolling ("more") up to 480.
+    private int limit = 30;
+    // Thumbnails stay cached while the view, folder, page and access are unchanged.
+    private String cacheKey = "";
     private String mode = "photos";
     private String album = "";
     private long selected = -1;
@@ -206,13 +210,17 @@ final class DeviceGallery {
             } else if (action.equals("view")) {
                 String next = input.optString("view");
                 if (!next.equals("photos") && !next.equals("videos") && !next.equals("albums")) return;
-                mode = next; album = ""; selected = -1; page = 0; refresh();
+                mode = next; album = ""; selected = -1; page = 0; limit = 30; refresh();
             } else if (action.equals("album")) {
                 String id = input.optString("id");
                 if (!id.matches("-?[0-9]{1,20}")) return;
-                album = id; mode = "photos"; selected = -1; page = 0; refresh();
+                album = id; mode = "photos"; selected = -1; page = 0; limit = 30; refresh();
             } else if (action.equals("page")) {
-                page = Math.max(0, Math.min(100000, input.optInt("page"))); selected = -1; refresh();
+                page = Math.max(0, Math.min(100000, input.optInt("page"))); selected = -1; limit = 30; refresh();
+            } else if (action.equals("more")) {
+                // Continuous scrolling extends the loaded list in bounded steps.
+                if (selected >= 0 || mode.equals("albums") || limit >= 480) return;
+                limit = Math.min(limit + 60, 480); refresh(true);
             } else if (action.equals("open")) {
                 long id = input.optLong("id", -1);
                 if (id < 0 || !allowed(id)) return;
@@ -250,7 +258,7 @@ final class DeviceGallery {
                     activity.startActivity(Intent.createChooser(intent, "Share photo"));
                 });
             } else if (action.equals("back")) {
-                if (selected < 0 && !album.isEmpty()) { album = ""; mode = "albums"; page = 0; }
+                if (selected < 0 && !album.isEmpty()) { album = ""; mode = "albums"; page = 0; limit = 30; }
                 selected = -1; refresh();
             } else if (action.equals("refresh")) refresh();
         } catch (Exception ignored) { }
@@ -292,7 +300,9 @@ final class DeviceGallery {
                     if (!current(revision) || selected != id) return;
                     selected = direction > 0 ? next : previous;
                     selectedVideo = direction > 0 ? nextVideo : previousVideo;
-                    page = (direction > 0 ? index : index - 1) / 30; refresh();
+                    int position = direction > 0 ? index : index - 1;
+                    if (position < page * 30 || position >= page * 30 + limit) { page = position / 30; limit = 30; }
+                    refresh();
                 }
                 return;
                 }
@@ -302,19 +312,23 @@ final class DeviceGallery {
         } catch (Exception error) { synchronized (this) { if (current(revision)) refresh(); } }
     }
 
-    synchronized void refresh() {
+    synchronized void refresh() { refresh(false); }
+
+    // Appending keeps the current photos visible until the longer list loads.
+    synchronized void refresh(boolean keep) {
         if (closed) return;
         permission = access();
         visibleIds = new String[0];
         long revision = ++generation;
-        int currentPage = page;
+        int currentPage = page, currentLimit = limit;
         String currentMode = mode, currentAlbum = album;
         long currentSelected = selected;
-        state = empty(lock.locked ? "Photos is locked" : !lock.message.isEmpty() ? lock.message : permission == 0 ? "Choose photo access to browse this device" : "Loading this device",
-            active && lock.allowed() && permission != 0);
+        if (!keep || permission == 0 || !lock.allowed())
+            state = empty(lock.locked ? "Photos is locked" : !lock.message.isEmpty() ? lock.message : permission == 0 ? "Choose photo access to browse this device" : "Loading this device",
+                active && lock.allowed() && permission != 0);
         executor.execute(() -> {
             if (!current(revision)) { if (generation == revision) clearCache(); return; }
-            load(revision, currentPage, currentMode, currentAlbum, currentSelected);
+            load(revision, currentPage, currentLimit, currentMode, currentAlbum, currentSelected);
         });
     }
 
@@ -361,11 +375,22 @@ final class DeviceGallery {
     }
 
     private void clearCache() {
+        synchronized (this) { cacheKey = ""; }
         File[] files = cache.listFiles();
         if (files != null) for (File file : files) if (file.isFile()) file.delete();
     }
 
+    // Full-size viewer images are never reused across loads.
+    private void clearViews() {
+        File[] files = cache.listFiles();
+        if (files != null) for (File file : files) if (file.isFile() && file.getName().endsWith("-view.png")) file.delete();
+    }
+
     private File image(Uri uri, long revision, long id, boolean large, boolean video) throws Exception {
+        // A thumbnail decoded for this view is reused while it stays current;
+        // the row itself came from this revision's permission-scoped query.
+        File thumbnail = new File(cache, "t-" + id + ".png");
+        if (!large && thumbnail.isFile() && current(revision)) return thumbnail;
         Bitmap bitmap;
         if (large && !video) {
             bitmap = ImageDecoder.decodeBitmap(ImageDecoder.createSource(activity.getContentResolver(), uri), (decoder, info, source) -> {
@@ -374,11 +399,11 @@ final class DeviceGallery {
                 if (longest > 2048) decoder.setTargetSampleSize((longest + 2047) / 2048);
                 decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
             });
-        } else if (Build.VERSION.SDK_INT >= 29) bitmap = activity.getContentResolver().loadThumbnail(uri, new Size(320, 320), null);
+        } else if (Build.VERSION.SDK_INT >= 29) bitmap = activity.getContentResolver().loadThumbnail(uri, new Size(256, 256), null);
         else if (video) bitmap = MediaStore.Video.Thumbnails.getThumbnail(activity.getContentResolver(), id, MediaStore.Video.Thumbnails.MINI_KIND, null);
         else bitmap = MediaStore.Images.Thumbnails.getThumbnail(activity.getContentResolver(), id, MediaStore.Images.Thumbnails.MINI_KIND, null);
         if (bitmap == null) throw new java.io.IOException("No preview available");
-        File file = new File(cache, revision + "-" + id + (large ? "-view" : "") + ".png");
+        File file = large ? new File(cache, revision + "-" + id + "-view.png") : thumbnail;
         try {
             if (!current(revision) || !allowed(id)) throw new SecurityException();
             try (FileOutputStream output = new FileOutputStream(file)) {
@@ -389,9 +414,12 @@ final class DeviceGallery {
         } finally { bitmap.recycle(); }
     }
 
-    private void load(long revision, int currentPage, String currentMode, String currentAlbum, long currentSelected) {
+    private void load(long revision, int currentPage, int currentLimit, String currentMode, String currentAlbum, long currentSelected) {
         if (!current(revision)) return;
-        clearCache();
+        String key = currentMode + "\n" + currentAlbum + "\n" + permission + "\n" + currentPage;
+        boolean reuse;
+        synchronized (this) { reuse = key.equals(cacheKey); }
+        if (reuse) clearViews(); else { clearCache(); synchronized (this) { cacheKey = key; } }
         try {
             ContentResolver resolver = activity.getContentResolver();
             JSONArray photos = new JSONArray(), albums = new JSONArray();
@@ -405,7 +433,10 @@ final class DeviceGallery {
             if (currentSelected >= 0) { selection += " AND _id=?"; arguments.add(Long.toString(currentSelected)); }
             String[] columns = {"_id", "_display_name", "media_type", MediaStore.Images.ImageColumns.DATE_TAKEN, "date_added", "bucket_id", "bucket_display_name", "_size", "width", "height"};
             int total = 0;
-            SimpleDateFormat day = new SimpleDateFormat("yyyy-MM-dd", Locale.ROOT); day.setTimeZone(TimeZone.getTimeZone("UTC"));
+            // Capture dates group by the phone's own calendar day, as people expect.
+            SimpleDateFormat day = new SimpleDateFormat("yyyy-MM-dd", Locale.ROOT); day.setTimeZone(TimeZone.getDefault());
+            long now = System.currentTimeMillis();
+            String today = day.format(new Date(now)), yesterday = day.format(new Date(now - 86400000L));
             try (Rows rows = new Rows(columns, selection, arguments.toArray(new String[0]))) {
                     total = rows.count();
                     if (currentMode.equals("albums")) {
@@ -414,16 +445,31 @@ final class DeviceGallery {
                             String id = cursor.getString(5), name = cursor.getString(6);
                             if (id == null) continue;
                             JSONObject folder = folders.get(id);
-                            if (folder == null) { folder = new JSONObject().put("id", id).put("name", name == null ? "Photos" : name).put("count", 0); folders.put(id, folder); }
+                            if (folder == null) {
+                                // Rows arrive newest first: the first item is the folder's cover.
+                                folder = new JSONObject().put("id", id).put("name", name == null ? "Photos" : name).put("count", 0)
+                                    .put("cover_id", cursor.getLong(0)).put("cover_video", cursor.getInt(2) == 3);
+                                folders.put(id, folder);
+                            }
                             folder.put("count", folder.getInt("count") + 1);
                         }
                         int start = currentPage * 30, index = 0;
-                        for (JSONObject folder : folders.values()) { if (index >= start && index < start + 30) albums.put(folder); index++; }
+                        for (JSONObject folder : folders.values()) {
+                            if (index >= start && index < start + 30 && current(revision)) {
+                                long cover = folder.getLong("cover_id"); boolean video = folder.getBoolean("cover_video");
+                                Uri uri = ContentUris.withAppendedId(video ? MediaStore.Video.Media.getContentUri("external") : MediaStore.Images.Media.getContentUri("external"), cover);
+                                try { folder.put("cover", image(uri, revision, cover, false, video).getAbsolutePath()); }
+                                catch (Exception error) { folder.put("cover", ""); }
+                                folder.remove("cover_id"); folder.remove("cover_video");
+                                albums.put(folder);
+                            }
+                            index++;
+                        }
                         total = folders.size();
                     } else {
                         int start = currentSelected >= 0 ? 0 : currentPage * 30;
                         int index = 0;
-                        while (photos.length() < 30 && rows.next()) {
+                        while (photos.length() < (currentSelected >= 0 ? 1 : currentLimit) && rows.next()) {
                             if (!current(revision)) return;
                             if (index++ < start) continue;
                             Cursor cursor = rows.cursor();
@@ -448,7 +494,8 @@ final class DeviceGallery {
                 state = security(new JSONObject()).put("generation", revision).put("access", permission)
                     .put("status", (permission & 3) == 3 ? "On this device" : (permission & 4) != 0 ? "Selected photos and videos" : "On this device")
                     .put("loading", 0).put("page", currentPage).put("view", currentMode).put("album", currentAlbum)
-                    .put("total", total).put("more", currentSelected < 0 && (currentPage + 1) * 30 < total ? 1 : 0)
+                    .put("total", total).put("today", today).put("yesterday", yesterday)
+                    .put("more", currentSelected < 0 && (currentMode.equals("albums") ? (currentPage + 1) * 30 : currentPage * 30 + photos.length()) < total ? 1 : 0)
                     .put("photos", photos).put("albums", albums).put("selected", currentSelected)
                     .toString().getBytes(StandardCharsets.UTF_8);
             }
