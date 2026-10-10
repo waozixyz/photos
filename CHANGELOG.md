@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.58
+
+- Photos' library and sync services now start when Photos opens and stop after a quiet period, and Harmony closes a hidden Photos window after saving pending edits, so Photos no longer uses memory or CPU while you are not viewing it.
+- Scroll the gallery more smoothly, with less CPU use while scrolling and almost none while the gallery sits idle.
+- Refresh the library and recheck access on real elapsed time, even while the window is idle.
+- Show a new Photos icon in the launcher and in Harmony.
+- Encrypt backups and sign ThinkPad sync with the shared Daochi client; existing keys and encrypted backups keep working.
+- Add a development Android app for browsing granted device photos, folders and videos, with touch browsing, zoom and system sharing.
+- Protect the Android gallery with device authentication and optional screenshot privacy, and restore desktop backup keys into the phone's secure storage.
+- Retain selected device folders and pending camera items across restarts, pause ungranted originals and rediscover changed files without duplicates.
+- Prepare selected Android originals as encrypted chunks on the device, preserve exact bytes and reuse verified preparations on retry.
+- Back up Android photos and videos from selected folders to the ThinkPad over a USB-forwarded connection, also while Photos is closed, with previews, retries and confirmation before an item counts as backed up. Photos already in the desktop library keep their albums and edits.
+- Keep the Android gallery open after system sharing clears private previews.
+- Render Japanese and Chinese filenames with a bundled offline font.
+
 ## 0.1.57
 
 - Click and drag a photo in any direction to select multiple items immediately, without selecting a first photo or entering Select mode.
