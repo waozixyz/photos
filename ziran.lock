@@ -3,11 +3,19 @@
   "packages": [
     {
       "commit": "f01be2f1d5acf2a570e351013221238b7c543760",
-      "dependencies": {"kryon": "p75e3c640f251bec0"},
+      "dependencies": {"kryon": "p0ccbb92c54bb4180"},
       "id": "p03de317562242e4f",
       "name": "Kss",
       "ref": "master",
       "url": "https://github.com/kryonlabs/kss.git"
+    },
+    {
+      "commit": "2e93528c1e759a78a72366162ac7adb4df437131",
+      "dependencies": {"raylib": "p5a77c9c35110e925"},
+      "id": "p0ccbb92c54bb4180",
+      "name": "kryon",
+      "ref": "master",
+      "url": "https://github.com/kryonlabs/kryon.git"
     },
     {
       "commit": "040c41e9c1c772e553e61d51b08b37f332b06488",
@@ -33,14 +41,6 @@
       "ref": "fafa2cea97d0cb379d832086ba45a989fa6f9c8e",
       "source": true,
       "url": "https://github.com/raysan5/raylib.git"
-    },
-    {
-      "commit": "de94356e1e8805fc71fc0f97be74525bf01411b2",
-      "dependencies": {"raylib": "p5a77c9c35110e925"},
-      "id": "p75e3c640f251bec0",
-      "name": "kryon",
-      "ref": "master",
-      "url": "https://github.com/kryonlabs/kryon.git"
     },
     {
       "commit": "c6a9d9a7116eac632a7ea696e19f27c2367a6c8b",
@@ -79,7 +79,7 @@
     }
   ],
   "root": {
-    "dependencies": {"daochi_client": "p7d882196d75a0662", "kryon": "p75e3c640f251bec0", "kss": "p03de317562242e4f", "libsodium": "pddc9c82431af7bc6", "oqs": "p55635fc8976895a9", "sqlite": "p450e8db63484350c"},
+    "dependencies": {"daochi_client": "p7d882196d75a0662", "kryon": "p0ccbb92c54bb4180", "kss": "p03de317562242e4f", "libsodium": "pddc9c82431af7bc6", "oqs": "p55635fc8976895a9", "sqlite": "p450e8db63484350c"},
     "name": "photos"
   },
   "toolchain": {
