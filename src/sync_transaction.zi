@@ -1,7 +1,10 @@
 // Private pipe adapter for Daochi's canonical v6 transaction builder/signers.
 // Existing account and device keys are supplied, never generated or stored.
 Wire :: #import "sync_crypto";
-Protocol :: #import "daochi_client/transaction";
+Protocol :: #import "daochi_client/sync";
+Transaction :: #import "daochi_client/transaction";
+Client :: #import "daochi_client/client";
+Auth :: #import "daochi_client/auth";
 Keys :: #import "daochi_client/keys";
 Crypto :: #import "daochi_client/crypto";
 Native :: #import "daochi_client/crypto_native";
@@ -11,6 +14,13 @@ c :: #system_library "c";
 Read :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign c "read";
 Hex :: (input: []u8, output: []u8) -> bool {
     return output.count > 0 && Crypto.BytesToHex(*input[0],input.count,*output[0],output.count)!=0
+}
+SignDevice :: (context: *void, message: string, output: []u8) -> bool {
+    if context==null || output.count<129 { return false }
+    descriptor:=cast(*TextDescriptor)*message
+    signature: [64]u8
+    return Native.SignDevice(BytesFromPointer(cast(*u8)context,32),
+        BytesFromPointer(descriptor.data,cast(u64)message.count),signature[:]) && Hex(signature[:],output)
 }
 main :: () -> s32 {
     // version, method (GET/POST/PUT/HEAD), path length and Unix expiration.
@@ -34,19 +44,19 @@ main :: () -> s32 {
     if !Native.DevicePublic(seed[:],device_public[:]) || !Native.RandomBytes(nonce[:]) || !Native.RandomBytes(tx_id[:]) ||
         !Hex(digest[:],hash[:]) || !Hex(nonce[:],nonce_text[:]) || !Hex(tx_id[:],tx_text[:]) { return 2 }
     Crypto.Sha256Hex(*device_public[0],32,*device_id[0])
-    transaction: Protocol.SyncTransaction
+    transaction: Transaction.SyncTransaction
     transaction.account_id=TextUntilNul(account.public_id[:]); transaction.app_id="photos"
     transaction.device_key_id=TextUntilNul(device_id[:]); transaction.tx_id=TextUntilNul(tx_text[:])
     transaction.nonce=TextUntilNul(nonce_text[:]); transaction.body_sha256_hex=TextUntilNul(hash[:]); transaction.expires_at=cast(s64)expires
     methods: [4]string=.{"GET","POST","PUT","HEAD"}
     method:=methods[frame[1]-1]; target:=TextFromBytes(path[:count])
-    message: [2048]u8; header: [8192]u8; signature: [4841]u8; device_signature: [64]u8; device_text: [129]u8
-    if !Protocol.BuildTransactionMessage(transaction,method,target,message[:]) { return 2 }
-    text:=TextUntilNul(message[:]); descriptor:=cast(*TextDescriptor)*text
-    if !Keys.SignAccountMessage(cast(*void)*account,text,signature[:]) ||
-        !Native.SignDevice(seed[:],BytesFromPointer(descriptor.data,cast(u64)text.count),device_signature[:]) ||
-        !Hex(device_signature[:],device_text[:]) ||
-        !Protocol.BuildTransactionHeader(transaction,method,target,TextUntilNul(signature[:]),TextUntilNul(device_text[:]),header[:]) { return 2 }
-    text=TextUntilNul(header[:]); descriptor=cast(*TextDescriptor)*text
+    client: Client.Client
+    client.app_id="photos"; client.identity.account_id=transaction.account_id
+    client.identity.signing_context=cast(*void)*account; client.signer=Keys.SignAccountMessage
+    device: Protocol.Device
+    device.key_id=transaction.device_key_id; device.signing_context=cast(*void)*seed[0]; device.signer=SignDevice
+    header: [8192]u8
+    if Protocol.SignTransactionHeader(client,device,transaction,method,target,header[:])!=cast(Auth.AuthResult)Auth.AuthResult.AUTH_OK { return 2 }
+    text:=TextUntilNul(header[:]); descriptor:=cast(*TextDescriptor)*text
     return ifx Wire.SendAll(descriptor.data,text.count) then 0 else 2
 }
