@@ -130,6 +130,7 @@ def measure(name, command, env, output, probe, calls, cpu=False):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--baseline-bundle", type=Path)
+    parser.add_argument("--bundle", type=Path, help="portable candidate to measure")
     parser.add_argument("--baseline-native", type=Path)
     parser.add_argument("--player", type=Path)
     parser.add_argument("--mode", choices=("native-prior-ui", "standalone-native", "portable-prior-ui", "portable-current-ui"))
@@ -140,6 +141,7 @@ def main():
     kryon = Path(subprocess.check_output(["ziran", "pkg", "path", "kryon", *flags],
                                        env=env, cwd=ROOT, text=True).strip())
     player = args.player.resolve() if args.player else kryon / "build/bin/zib"
+    bundle = args.bundle.resolve() if args.bundle else ROOT / "build/photos-portable.zib"
     work = ROOT / "build/scroll-performance"
     work.mkdir(parents=True, exist_ok=True)
     output = ROOT / "backup/scroll-performance/current"
@@ -189,7 +191,7 @@ def main():
                     cases.append(("standalone-native", [str(ROOT / "build/photos-desktop")]))
                     if args.baseline_bundle:
                         cases.append(("portable-prior-ui", [str(player), str(args.baseline_bundle.resolve())]))
-                    cases.append(("portable-current-ui", [str(player), str(ROOT / "build/photos-portable.zib")]))
+                    cases.append(("portable-current-ui", [str(player), str(bundle)]))
                     for name, command in cases:
                         if args.mode and name != args.mode:
                             continue

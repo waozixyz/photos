@@ -1,0 +1,39 @@
+Model :: #import "model";
+#import "std/text"
+#import "std/text_buffer"
+
+Check :: (photo: *Model.Photo) -> bool {
+    return TextView(photo.id[:photo.id_size]) == TextUntilNul(photo.id[:]) &&
+        TextView(photo.name[:photo.name_size]) == TextUntilNul(photo.name[:]) &&
+        TextView(photo.thumbnail[:photo.thumbnail_size]) == TextUntilNul(photo.thumbnail[:]) &&
+        TextView(photo.display[:photo.display_size]) == TextUntilNul(photo.display[:]) &&
+        TextView(photo.date[:photo.date_size]) == TextUntilNul(photo.date[:]) &&
+        TextView(photo.kind[:photo.kind_size]) == TextUntilNul(photo.kind[:])
+}
+#program_export
+main :: () -> s32 {
+    photo: Model.Photo
+    first := "{\"id\":\"123\",\"name\":\"Caf\u00e9 \u65c5\u884c\",\"thumbnail\":\"/private/thumb.png\",\"original\":\"/private/full.png\",\"date\":\"2026-10-09\",\"kind\":\"live\"}"
+    if Model.ReadPhoto(first,0,*photo) != cast(s32)first.count || !Check(*photo) ||
+        photo.name_size != 12 || !photo.live || photo.kind_size != 5 ||
+        TextView(photo.display[:photo.display_size]) != "/private/full.png" { return 1 }
+    photo = .{}
+    nul := "{\"name\":\"before\\u0000after\",\"display\":\"/display\",\"original\":\"/original\",\"kind\":\"video\"}"
+    if Model.ReadPhoto(nul,0,*photo) != cast(s32)nul.count || !Check(*photo) || photo.name_size != 6 ||
+        photo.id_size != 0 || photo.thumbnail_size != 0 || photo.date_size != 0 ||
+        TextView(photo.display[:photo.display_size]) != "/display" { return 2 }
+    // An oversized value is refused, rather than retaining a stale length.
+    value: Vec(u8); BuilderPrint(*value,"{\"name\":\"")
+    for i: 0..512 { BuilderPrint(*value,"x") }
+    BuilderPrint(*value,"\"}")
+    if Model.ReadPhoto(BuilderFinish(value),0,*photo) < 0 || !Check(*photo) || photo.name_size != 0 { return 3 }
+    photo = .{}
+    value = .{}; BuilderPrint(*value,"{\"name\":\"")
+    for i: 0..511 { BuilderPrint(*value,"x") }
+    BuilderPrint(*value,"\"}")
+    if Model.ReadPhoto(BuilderFinish(value),0,*photo) < 0 || !Check(*photo) || photo.name_size != 512 { return 4 }
+    // The views belong to the photo buffers; changes never outlive their data.
+    Model.Wipe(photo.name[:]); photo.name_size = 0
+    if TextView(photo.name[:photo.name_size]) != "" { return 5 }
+    return 0
+}

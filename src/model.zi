@@ -52,6 +52,13 @@ Photo :: struct {
     display: [4097]u8
     date: [32]u8
     kind: [16]u8
+    // Loaded once with the page; drawing borrows these existing buffers.
+    id_size: s32
+    name_size: s32
+    thumbnail_size: s32
+    display_size: s32
+    date_size: s32
+    kind_size: s32
     favorite: bool
     hidden: bool
     trashed: bool
@@ -370,7 +377,16 @@ ReadPhoto :: (json: string, start: s32, photo: *Photo) -> s32 {
         at = Space(json, ValueEnd(json, at, 0)); fields += 1
         if at >= 0 && at < cast(s32)json.count && json[at] == 44 { at = Space(json, at + 1) }
     }
-    return ifx at >= 0 && at < cast(s32)json.count && json[at] == 125 then at + 1 else -1
+    if at < 0 || at >= cast(s32)json.count || json[at] != 125 { return -1 }
+    // Match the existing bounded NUL view, including escaped NUL and invalid
+    // strings, and never retain a view into a replaceable transport response.
+    photo.id_size = cast(s32)TextUntilNul(photo.id[:]).count
+    photo.name_size = cast(s32)TextUntilNul(photo.name[:]).count
+    photo.thumbnail_size = cast(s32)TextUntilNul(photo.thumbnail[:]).count
+    photo.display_size = cast(s32)TextUntilNul(photo.display[:]).count
+    photo.date_size = cast(s32)TextUntilNul(photo.date[:]).count
+    photo.kind_size = cast(s32)TextUntilNul(photo.kind[:]).count
+    return at + 1
 }
 CheckAppBackground :: (focused: bool, now: s64) -> bool {
     decision := AppLockPolicy.Background(app_lock_enabled,app_locked,guest_active,focused,app_lock_since,now,app_lock_delay)

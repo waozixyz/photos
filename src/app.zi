@@ -59,7 +59,7 @@ LayoutFeed :: (cols: s32, height: float32) -> float32 {
     y: float32; column: s32
     for i: 0..Model.count - 1 {
         group := i == 0
-        if i > 0 { group = TextUntilNul(Model.photos[i].date[:]) != TextUntilNul(Model.photos[i-1].date[:]) }
+        if i > 0 { group = TextView(Model.photos[i].date[:Model.photos[i].date_size]) != TextView(Model.photos[i-1].date[:Model.photos[i-1].date_size]) }
         if Model.view == "large" || Model.view == "similar" || Model.view == "similar_groups" { group = false }
         if group { if column > 0 { y += height }; column = 0; y += 42.0 }
         unused VecPush(item_y, y); unused VecPush(item_column, column); unused VecPush(group_start, group)
@@ -113,7 +113,7 @@ SwipeSelection :: (session: Session, pointer: Input.PointerFrame, body: Rectangl
         !Model.app_locked && Model.editor == "" && Model.selected < 0 && HostWindow.WindowFocused() &&
         (Model.view != "hidden" || Model.vault_unlocked)
     hit := GalleryHit(pointer.x,pointer.y,body,cell,swipe.active)
-    selected := hit >= 0 && Model.IsPicked(TextUntilNul(Model.photos[hit].id[:]))
+    selected := hit >= 0 && Model.IsPicked(TextView(Model.photos[hit].id[:Model.photos[hit].id_size]))
     decision := SelectionDrag.Update(*swipe,eligible,hit,selected,
         pointer.x,pointer.y,pointer.pressed,pointer.down,pointer.released,
         Clock.Milliseconds(),body.y,body.height,pointer.x >= body.x && pointer.x < body.x+body.width)
@@ -385,14 +385,14 @@ OfflineMap :: (session: Session, body: Rectangle) {
 }
 ExpandedPhoto :: (session: Session, bounds: Rectangle) {
     photo := *Model.photos[Model.selected]
-    image := ifx photo.display[0] != 0 then TextUntilNul(photo.display[:]) else TextUntilNul(photo.thumbnail[:])
+    image := ifx photo.display[0] != 0 then TextView(photo.display[:photo.display_size]) else TextView(photo.thumbnail[:photo.thumbnail_size])
     x := bounds.x; y := bounds.y; width := bounds.width
     if Action(session, 385, "Back", .{x, y, 82.0, 36.0}) { Viewer.expanded = false }
     if Action(session, 386, "Previous", .{x + 92.0, y, 96.0, 36.0}, Model.selected > 0) { Model.Choose(Model.selected - 1) }
     if Action(session, 387, "Next", .{x + 198.0, y, 82.0, 36.0}, Model.selected + 1 < Model.count) { Model.Choose(Model.selected + 1) }
-    Label(session, 388, TextUntilNul(photo.name[:]), .{x + 294.0, y + 2.0, width - 294.0, 32.0}, 17)
+    Label(session, 388, TextView(photo.name[:photo.name_size]), .{x + 294.0, y + 2.0, width - 294.0, 32.0}, 17)
     picture := Rectangle.{x, y + 48.0, width, bounds.height - 102.0}
-    Viewer.Draw(session, 5300000, image, TextUntilNul(photo.name[:]), picture)
+    Viewer.Draw(session, 5300000, image, TextView(photo.name[:photo.name_size]), picture)
     ViewerControls(session, image, .{x, y + bounds.height - 42.0, width, 36.0}, picture, !Model.loading)
 }
 Slideshow :: (session: Session, bounds: Rectangle) {
@@ -486,17 +486,17 @@ GuestView :: (session: Session, viewport: Rectangle, key: s32, modifiers: s32, t
         if Action(session,51,"Previous",.{x+96.0,body.y,100.0,36.0},!Model.loading && Model.selected>0) { Model.Choose(Model.selected-1) }
         if Action(session,52,"Next",.{x+206.0,body.y,86.0,36.0},!Model.loading && Model.selected+1<Model.count) { Model.Choose(Model.selected+1) }
         photo := *Model.photos[Model.selected]
-        ready := !Model.loading && TextUntilNul(Model.detail_id[:]) == TextUntilNul(photo.id[:])
-        image := ifx photo.display[0] != 0 && TextUntilNul(photo.kind[:]) == "photo" then TextUntilNul(photo.display[:]) else TextUntilNul(photo.thumbnail[:])
+        ready := !Model.loading && TextUntilNul(Model.detail_id[:]) == TextView(photo.id[:photo.id_size])
+        image := ifx photo.display[0] != 0 && TextView(photo.kind[:photo.kind_size]) == "photo" then TextView(photo.display[:photo.display_size]) else TextView(photo.thumbnail[:photo.thumbnail_size])
         picture := Rectangle.{x,body.y+48.0,width,body.height-104.0}
-        if TextUntilNul(photo.kind[:]) == "photo" {
-            Viewer.Draw(session,3000,image,TextUntilNul(photo.name[:]),picture)
+        if TextView(photo.kind[:photo.kind_size]) == "photo" {
+            Viewer.Draw(session,3000,image,TextView(photo.name[:photo.name_size]),picture)
             ViewerControls(session,image,.{x,body.y+body.height-44.0,width,36.0},picture,ready)
-        } else { ImageAt(session,3000,image,TextUntilNul(photo.name[:]),picture) }
-        if TextUntilNul(photo.kind[:]) == "video" || photo.live {
+        } else { ImageAt(session,3000,image,TextView(photo.name[:photo.name_size]),picture) }
+        if TextView(photo.kind[:photo.kind_size]) == "video" || photo.live {
             if Action(session,350,ifx photo.live then "Play Live Photo" else "Play video",.{x+width-156.0,body.y,156.0,36.0},ready) { Model.BeginPlayback() }
         }
-        Label(session,606,TextUntilNul(photo.name[:]),.{x,body.y+body.height-76.0,width,24.0},15)
+        Label(session,606,TextView(photo.name[:photo.name_size]),.{x,body.y+body.height-76.0,width,24.0},15)
     } else {
         if Action(session,607,"Previous page",.{x,body.y,140.0,36.0},!Model.loading && Model.offset>0) { Model.GuestPage(-1) }
         if Action(session,608,"Next page",.{x+150.0,body.y,140.0,36.0},!Model.loading && Model.offset+60<Model.matches) { Model.GuestPage(1) }
@@ -513,8 +513,8 @@ GuestView :: (session: Session, viewport: Rectangle, key: s32, modifiers: s32, t
             if by+cell+32.0<body.y || by>body.y+body.height { continue }
             photo := *Model.photos[i]
             if Action(session,100+i,"Open photo",.{bx,by,cell,cell},!Model.loading) { Model.Choose(i) }
-            ImageAt(session,cast(u64)(3000+i),TextUntilNul(photo.thumbnail[:]),TextUntilNul(photo.name[:]),.{bx+3.0,by+3.0,cell-6.0,cell-6.0},true)
-            Label(session,cast(u64)(4000+i),TextUntilNul(photo.date[:]),.{bx,by+cell+4.0,cell,24.0},13)
+            ImageAt(session,cast(u64)(3000+i),TextView(photo.thumbnail[:photo.thumbnail_size]),TextView(photo.name[:photo.name_size]),.{bx+3.0,by+3.0,cell-6.0,cell-6.0},true)
+            Label(session,cast(u64)(4000+i),TextView(photo.date[:photo.date_size]),.{bx,by+cell+4.0,cell,24.0},13)
         }
         if scrolling.opened { unused End(session) }
     }
@@ -658,7 +658,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session,514,"Back",.{x,body.y+86.0,100.0,36.0}) { Model.CancelEditor(); return 0 }
         caption: Vec(u8); BuilderPrint(*caption,"Code % of % · select a box · scanning stays on this device",QRDetection.chosen+1,QRDetection.count)
         value := BuilderFinish(caption); Label(session,515,value,.{x+112.0,body.y+86.0,width-112.0,36.0},14); Model.Release(value)
-        image := ifx photo.display[0] != 0 then TextUntilNul(photo.display[:]) else TextUntilNul(photo.thumbnail[:])
+        image := ifx photo.display[0] != 0 then TextView(photo.display[:photo.display_size]) else TextView(photo.thumbnail[:photo.thumbnail_size])
         canvas := Rectangle.{x,body.y+136.0,width,body.height-316.0}
         QRDetection.Draw(session,image,canvas,ready); Record(516,"Detected QR area",canvas,ready)
         preview: TextProps; preview.key = 517; preview.bounds = .{x,body.y+body.height-168.0,width,140.0}; preview.font = 15
@@ -682,7 +682,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
             TextDetection.Set(TextDetection.language[:], TextUntilNul(TextDetection.languages[TextDetection.language_index][:])); Model.BeginText()
         }; Model.Release(value)
         Label(session, 441, "Drag across words to select · recognition stays on this device", .{x, body.y + 130.0, width, 26.0}, 14)
-        image := ifx photo.display[0] != 0 then TextUntilNul(photo.display[:]) else TextUntilNul(photo.thumbnail[:])
+        image := ifx photo.display[0] != 0 then TextView(photo.display[:photo.display_size]) else TextView(photo.thumbnail[:photo.thumbnail_size])
         canvas := Rectangle.{x, body.y + 166.0, width, body.height - 284.0}
         TextDetection.Draw(session, image, canvas, ready)
         Record(442, "Detected text area", canvas, ready)
@@ -765,27 +765,27 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, 52, "Next", .{x + 180.0, body.y, 68.0, 36.0}, Model.selected + 1 < Model.count) { Model.Choose(Model.selected + 1) }
         if Action(session, 53, ifx photo.favorite then "Unfavorite" else "Favorite", .{x + 258.0, body.y, 106.0, 36.0}, !Model.loading) { SelectedAction("favorite") }
         if Action(session, 54, ifx photo.trashed then "Restore" else "Trash", .{x + 374.0, body.y, 76.0, 36.0}, !Model.loading) { SelectedAction(ifx photo.trashed then "restore" else "trash") }
-        image := ifx photo.display[0] != 0 && TextUntilNul(photo.kind[:]) == "photo" then TextUntilNul(photo.display[:]) else TextUntilNul(photo.thumbnail[:])
-        ready := !Model.loading && TextUntilNul(Model.detail_id[:]) == TextUntilNul(photo.id[:])
+        image := ifx photo.display[0] != 0 && TextView(photo.kind[:photo.kind_size]) == "photo" then TextView(photo.display[:photo.display_size]) else TextView(photo.thumbnail[:photo.thumbnail_size])
+        ready := !Model.loading && TextUntilNul(Model.detail_id[:]) == TextView(photo.id[:photo.id_size])
         if photo.live {
             if Action(session, 370, "Play Live Photo", .{x + 460.0, body.y, 144.0, 36.0}, ready && !photo.trashed) { Model.BeginPlayback() }
             if Action(session, 371, "Separate files", .{x + 614.0, body.y, 138.0, 36.0}, ready) { Model.Apply("live_separate") }
         }
-        if Action(session,669,ifx Model.semantic_enabled then "Find similar" else "Enable ML search",.{x+width-138.0,body.y,138.0,36.0},ready && TextUntilNul(photo.kind[:]) == "photo" && !photo.hidden && !photo.trashed) {
+        if Action(session,669,ifx Model.semantic_enabled then "Find similar" else "Enable ML search",.{x+width-138.0,body.y,138.0,36.0},ready && TextView(photo.kind[:photo.kind_size]) == "photo" && !photo.hidden && !photo.trashed) {
             if Model.semantic_enabled { Model.SimilarPhotos() } else { Model.Navigate("semantic") }; return 0
         }
-        if Action(session, 215, "Edit image", .{x, body.y + 44.0, 126.0, 36.0}, ready && TextUntilNul(photo.kind[:]) == "photo" && !photo.trashed) { Model.BeginImageEdit() }
-        if TextUntilNul(photo.kind[:]) == "video" {
+        if Action(session, 215, "Edit image", .{x, body.y + 44.0, 126.0, 36.0}, ready && TextView(photo.kind[:photo.kind_size]) == "photo" && !photo.trashed) { Model.BeginImageEdit() }
+        if TextView(photo.kind[:photo.kind_size]) == "video" {
             if Action(session, 330, "Edit video", .{x, body.y + 44.0, 126.0, 36.0}, ready && !photo.trashed) { Model.BeginVideoEdit() }
             if Action(session, 350, "Play video", .{x + 288.0, body.y + 44.0, 126.0, 36.0}, ready && !photo.trashed) { Model.BeginPlayback() }
         }
         else { ViewerControls(session, image, .{x + 288.0, body.y + 44.0, width - 288.0, 36.0}, .{x, body.y + 92.0, width, body.height - 364.0}, ready) }
         if Action(session, 216, "Edit location", .{x + 138.0, body.y + 44.0, 138.0, 36.0}, ready) { Model.BeginEdit("location", "Edit photo location", TextUntilNul(Model.detail_location[:]), "Latitude, longitude; leave empty to remove location") }
-        if TextUntilNul(photo.kind[:]) == "photo" { Viewer.Draw(session, 3000, image, TextUntilNul(photo.name[:]), .{x, body.y + 92.0, width, body.height - 364.0}) }
-        else { ImageAt(session, 3000, image, TextUntilNul(photo.name[:]), .{x, body.y + 92.0, width, body.height - 364.0}) }
-        name_width := width - (ifx TextUntilNul(photo.kind[:]) == "photo" then 270.0 else 138.0)
-        Label(session, 75, TextUntilNul(photo.name[:]), .{x, body.y + body.height - 262.0, name_width, 24.0}, 17)
-        if TextUntilNul(photo.kind[:]) == "photo" {
+        if TextView(photo.kind[:photo.kind_size]) == "photo" { Viewer.Draw(session, 3000, image, TextView(photo.name[:photo.name_size]), .{x, body.y + 92.0, width, body.height - 364.0}) }
+        else { ImageAt(session, 3000, image, TextView(photo.name[:photo.name_size]), .{x, body.y + 92.0, width, body.height - 364.0}) }
+        name_width := width - (ifx TextView(photo.kind[:photo.kind_size]) == "photo" then 270.0 else 138.0)
+        Label(session, 75, TextView(photo.name[:photo.name_size]), .{x, body.y + body.height - 262.0, name_width, 24.0}, 17)
+        if TextView(photo.kind[:photo.kind_size]) == "photo" {
             if Action(session,518,"Detect QR",.{x+width-258.0,body.y+body.height-270.0,122.0,32.0},ready && !photo.trashed) { Model.BeginQR() }
             if Action(session, 436, "Detect text", .{x + width - 126.0, body.y + body.height - 270.0, 126.0, 32.0}, ready && !photo.trashed) { Model.BeginText() }
         }
@@ -809,11 +809,11 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, 59, "Export", .{x + 4.0 * (step + 8.0), bottom, step, 36.0}, ready) { Model.BeginEdit("export", "Export original and metadata", "", "Destination folder; empty uses Pictures/Photos Export") }
         bottom += 44.0
         if Action(session, 97, "Edit date", .{x, bottom, step, 36.0}, ready) { Model.BeginEdit("taken", "Edit photo date", TextUntilNul(Model.detail_taken[:]), "Date and time; include an offset, or use UTC") }
-        if Action(session, 98, "Rename", .{x + step + 8.0, bottom, step, 36.0}, ready) { Model.BeginEdit("rename", "Rename photo", TextUntilNul(photo.name[:]), "File name; the original bytes stay intact") }
+        if Action(session, 98, "Rename", .{x + step + 8.0, bottom, step, 36.0}, ready) { Model.BeginEdit("rename", "Rename photo", TextView(photo.name[:photo.name_size]), "File name; the original bytes stay intact") }
         if Action(session, 99, "Remove from album", .{x + 2.0 * (step + 8.0), bottom, step * 2.0 + 8.0, 36.0}, ready) { Model.BeginEdit("album_remove", "Remove photo from album", TextUntilNul(Model.album[:]), "Album name; removing membership keeps the photo") }
         if Action(session, 95, ifx photo.archived then "Unarchive" else "Archive", .{x + 4.0 * (step + 8.0), bottom, step, 36.0}, ready) { SelectedAction("archived") }
         if Model.album[0] != 0 && Model.album_filter[0] == 0 && ready && !photo.hidden && !photo.trashed {
-            if Action(session, 205, "Use as album cover", .{x + width - 186.0, body.y + 44.0, 186.0, 36.0}) { Model.Apply("album_cover", TextUntilNul(photo.id[:])) }
+            if Action(session, 205, "Use as album cover", .{x + width - 186.0, body.y + 44.0, 186.0, 36.0}) { Model.Apply("album_cover", TextView(photo.id[:photo.id_size])) }
         }
         if Model.album[0] == 0 && !photo.hidden && !photo.trashed {
             if Action(session,464,"Jump to this day",.{x+width-170.0,body.y+44.0,170.0,36.0},ready) { Model.JumpPhoto() }
@@ -1028,8 +1028,8 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
             by := body.y + (ifx Model.CatalogView() then cast(float32)i * height else item_y[i]) - cast(float32)Model.scroll
             if by - 42.0 > body.y + body.height { break }
             if !Model.CatalogView() && group_start[i] && by - 42.0 < body.y + body.height && by > body.y {
-                Record(3000000 + i, TextUntilNul(Model.photos[i].date[:]), .{x + 4.0, by - 34.0, width - 12.0, 28.0}, false)
-                Label(session, cast(u64)(3000000 + i), TextUntilNul(Model.photos[i].date[:]), .{x + 4.0, by - 34.0, width - 12.0, 28.0}, 19)
+                Record(3000000 + i, TextView(Model.photos[i].date[:Model.photos[i].date_size]), .{x + 4.0, by - 34.0, width - 12.0, 28.0}, false)
+                Label(session, cast(u64)(3000000 + i), TextView(Model.photos[i].date[:Model.photos[i].date_size]), .{x + 4.0, by - 34.0, width - 12.0, 28.0}, 19)
             }
             if by + height < body.y || by > body.y + body.height { continue }
             if Model.CatalogView() {
@@ -1048,10 +1048,10 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                 }
             } else {
                 photo: *Photo = *Model.photos[i]
-                clicked := PhotoAction(session, cast(s32)(100 + i), TextUntilNul(photo.name[:]), .{bx, by, cell, cell})
-                ImageAt(session, cast(u64)(1000000 + i), TextUntilNul(photo.thumbnail[:]), TextUntilNul(photo.name[:]), .{bx + 3.0, by + 3.0, cell - 6.0, cell - 6.0}, true)
+                clicked := PhotoAction(session, cast(s32)(100 + i), TextView(photo.name[:photo.name_size]), .{bx, by, cell, cell})
+                ImageAt(session, cast(u64)(1000000 + i), TextView(photo.thumbnail[:photo.thumbnail_size]), TextView(photo.name[:photo.name_size]), .{bx + 3.0, by + 3.0, cell - 6.0, cell - 6.0}, true)
                 kind_y := ifx Model.view == "large" then by+8.0 else by+cell-30.0
-                if TextUntilNul(photo.kind[:]) == "video" { Label(session, cast(u64)(2100000 + i), "Video", .{bx + 8.0, kind_y, cell - 16.0, 22.0}, 12) }
+                if TextView(photo.kind[:photo.kind_size]) == "video" { Label(session, cast(u64)(2100000 + i), "Video", .{bx + 8.0, kind_y, cell - 16.0, 22.0}, 12) }
                 if photo.live { Label(session, cast(u64)(2200000 + i), "Live Photo", .{bx + 8.0, kind_y, cell - 16.0, 22.0}, 12) }
                 if Model.view == "large" {
                     label: Vec(u8); unit: s64 = 1048576; suffix := "MiB"
@@ -1067,7 +1067,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
                     badge: BoxProps; badge.key = cast(u64)(2400000+i); badge.bounds = .{bx+6.0,by+cell-32.0,cell-12.0,26.0}; badge.fill = BackgroundColor(); Box(session,badge)
                     Label(session,cast(u64)(2500000+i),text,.{bx+12.0,by+cell-30.0,cell-24.0,22.0},13); Model.Release(text)
                 }
-                if Model.IsPicked(TextUntilNul(photo.id[:])) {
+                if Model.IsPicked(TextView(photo.id[:photo.id_size])) {
                     badge: BoxProps; badge.key = cast(u64)(2300000 + i); badge.bounds = .{bx + 6.0, by + 6.0, 82.0, 28.0}; badge.fill = BackgroundColor(); Box(session, badge)
                     Label(session, cast(u64)(2200000 + i), "Selected", .{bx + 12.0, by + 8.0, 72.0, 24.0}, 14)
                 }

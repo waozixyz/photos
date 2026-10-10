@@ -248,3 +248,8 @@ historic-window-test: build
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/historic_window.py
 historic-portable-test: bundle
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_HISTORIC_PORTABLE=1 $(PYTHON) tests/historic_window.py
+
+.PHONY: gallery-text-test
+gallery-text-test:
+	ZIRAN=$(ZIRAN) sh tests/gallery_text_test.sh
+test: gallery-text-test
