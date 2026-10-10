@@ -56,7 +56,7 @@ def sample_bytes(path):
         return 0
 
 
-def measure(name, command, env, output, probe, calls, cpu=False):
+def measure(name, command, env, output, probe, calls, cpu=False, idle_seconds=0):
     trace = output / (name + ".frames")
     samples = output / (name + ".cpu")
     child = None
@@ -98,6 +98,23 @@ def measure(name, command, env, output, probe, calls, cpu=False):
             else:
                 raise RuntimeError(name + " did not render its first synthetic thumbnail")
             subprocess.run(["xdotool", "mousemove", "--window", window, "600", "600"], env=env, check=True)
+            idle = None
+            if idle_seconds > 0:
+                # Let thumbnail replies and pointer motion settle before the
+                # stationary interval. Keep idle and scroll CPU samples apart.
+                time.sleep(.5)
+                idle_cpu_before, _ = process_usage(child.pid)
+                idle_sample_start = sample_bytes(samples) if cpu else 0
+                idle_start = time.monotonic()
+                time.sleep(idle_seconds)
+                idle_finish = time.monotonic()
+                idle_sample_end = sample_bytes(samples) if cpu else 0
+                idle_cpu_after, idle_memory = process_usage(child.pid)
+                idle = dict(seconds=idle_finish-idle_start,
+                            cpu_seconds=idle_cpu_after-idle_cpu_before,
+                            cpu_percent=100*(idle_cpu_after-idle_cpu_before)/(idle_finish-idle_start),
+                            rss_kib=idle_memory.get("VmRSS"),
+                            cpu_sample_bytes=[idle_sample_start, idle_sample_end] if cpu else None)
             cpu_before, _ = process_usage(child.pid)
             sample_start = sample_bytes(samples) if cpu else 0
             start = time.monotonic()
@@ -119,11 +136,21 @@ def measure(name, command, env, output, probe, calls, cpu=False):
             if not changed or not paged or (state and (state.get("view") != "photos" or state.get("scroll", 0) <= 0)):
                 raise RuntimeError(name + " did not actually scroll the synthetic gallery")
             values = [tuple(map(float, line.split())) for line in trace.read_text().splitlines()]
-            durations = [duration for stamp, duration in values if start <= stamp <= finish and duration > 0]
+            presented = [stamp for stamp, _ in values if start <= stamp <= finish]
+            # A retained window's first presentation can follow a long quiet
+            # interval. Count that presentation, but time only intervals wholly
+            # inside the scroll measurement rather than treating idle as a stall.
+            durations = [duration for stamp, duration in values
+                         if start <= stamp-duration/1000 <= stamp <= finish and duration > 0]
             if not durations:
                 raise RuntimeError(name + " emitted no presentation samples")
-            return dict(mode=name, frames=len(durations), seconds=finish-start,
-                        fps=len(durations)/(finish-start), median_ms=statistics.median(durations),
+            if idle is not None:
+                idle_frames = [duration for stamp, duration in values
+                               if idle_start <= stamp <= idle_finish and duration > 0]
+                idle["frames"] = len(idle_frames)
+                idle["fps"] = len(idle_frames)/idle["seconds"]
+            return dict(mode=name, frames=len(presented), seconds=finish-start,
+                        fps=len(presented)/(finish-start), median_ms=statistics.median(durations),
                         p95_ms=sorted(durations)[int(len(durations)*.95)], max_ms=max(durations),
                         scroll=state.get("scroll"), nodes=state.get("nodes"), paged=paged,
                         rendered_gallery_changed=changed, deployment=False,
@@ -132,6 +159,7 @@ def measure(name, command, env, output, probe, calls, cpu=False):
                         rss_kib=memory.get("VmRSS"), peak_rss_kib=memory.get("VmHWM"),
                         cpu_sampled=cpu,
                         cpu_sample_bytes=[sample_start, sample_end] if cpu else None,
+                        idle=idle,
                         source_sha256={str(Path(path)): hashlib.sha256(Path(path).read_bytes()).hexdigest()
                                        for path in command})
         finally:
@@ -146,7 +174,11 @@ def main():
     parser.add_argument("--player", type=Path)
     parser.add_argument("--mode", choices=("native-prior-ui", "standalone-native", "portable-prior-ui", "portable-current-ui"))
     parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--idle-seconds", type=float, default=0,
+                        help="measure a stationary interval separately before scrolling")
     args = parser.parse_args()
+    if not 0 <= args.idle_seconds <= 60:
+        parser.error("--idle-seconds must be between 0 and 60")
     env = clean_environment()
     flags = [] if (ROOT / "ziran.local.toml").is_file() else ["--locked"]
     kryon = Path(subprocess.check_output(["ziran", "pkg", "path", "kryon", *flags],
@@ -206,7 +238,8 @@ def main():
                     for name, command in cases:
                         if args.mode and name != args.mode:
                             continue
-                        result = measure(name, command, env, output, probe, calls, args.cpu)
+                        result = measure(name, command, env, output, probe, calls,
+                                         args.cpu, args.idle_seconds)
                         results.append(result)
                         print(json.dumps({key: value for key, value in result.items() if key != "source_sha256"}), flush=True)
                     server.shutdown()

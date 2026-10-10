@@ -28,9 +28,12 @@ with tempfile.TemporaryDirectory() as folder:
     config=folder/'config.json';config.write_text(json.dumps(dict(root=str(library.root),sources=[])))
     env=os.environ.copy();env['PHOTOS_CONFIG']=str(config);env['KRYON_SERVICE_ROOT']=str(folder)
     calls=[]
+    typing=[]
     original_process=service_module.process
     def record_request(request, config):
         summary={key:request.get(key) for key in ('action','view','search','album','offset')}
+        if request.get('action') in ('album_create','album_add','album_rename','album_description'):
+            summary['value']=request.get('value')
         try:
             result=original_process(request,config)
             summary.update(count=result.get('count'),rows=len(result.get('photos',[])),unlocked=result.get('vault_unlocked'),error=result.get('error'))
@@ -40,7 +43,8 @@ with tempfile.TemporaryDirectory() as folder:
     service_module.process=record_request
     service=Server(dict(root=str(library.root),sources=[]),folder/'kryon/services/photos.sock')
     threading.Thread(target=service.serve_forever,daemon=True).start()
-    process=subprocess.Popen([os.environ.get('PHOTOS_BINARY',str(ROOT/'build/photos-desktop'))],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+    application_log=(output/'native-window.log').open('w')
+    process=subprocess.Popen([os.environ.get('PHOTOS_BINARY',str(ROOT/'build/photos-desktop'))],env=env,stdout=application_log,stderr=subprocess.PIPE)
     def xdo(*args):
         if args == ('click','1'):
             subprocess.check_call(['xdotool','mousedown','1'])
@@ -99,8 +103,17 @@ with tempfile.TemporaryDirectory() as folder:
         action('Select');action('Select loaded');action('Add to album')
         def enter(value):
             action(control=41)
+            assert state()['field_focused'], 'The published editor field must receive focus before typing'
+            phases=[]
+            def focus():
+                snapshot=state()
+                phases.append({key:snapshot.get(key) for key in ('editor','field_focused','search_focused')})
+            focus()
             xdo('keydown','ctrl');xdo('key','a');time.sleep(.1);xdo('keyup','ctrl');time.sleep(.1)
+            focus()
             xdo('type','--delay','45','--clearmodifiers','--',value);time.sleep(.2)
+            focus()
+            typing.append(phases)
         enter('Together');action('Save')
         assert library.query(album='Together')['count']==4, ([tuple(row) for row in library.db.execute('SELECT name,albums FROM photos')], state())
         action('Albums');state('albums')
@@ -237,8 +250,16 @@ with tempfile.TemporaryDirectory() as folder:
         assert library.query()['total']==5
         assert library.original(library.photo(parent['id'])).read_bytes()==original_bytes
         print('Private Xvfb: baseline organization/export/editor/memories plus confirmed Hidden password changes, search tips, structured filters, dynamic smart album creation/edit/deletion and original preservation verified')
+    except Exception:
+        diagnostic = dict(requests=calls[-30:],typing=typing,
+                          albums=[row['name'] for row in library.db.execute('SELECT name FROM albums')])
+        (output/'native-window-failure.json').write_text(json.dumps(diagnostic,indent=2)+'\n')
+        if window and process.poll() is None:
+            subprocess.run(['import','-window',window,str(output/'native-window-failure.png')],check=False)
+        raise
     finally:
         service.shutdown();service.server_close()
         process.terminate()
         try:process.wait(timeout=5)
         except subprocess.TimeoutExpired:process.kill();process.wait(timeout=5)
+        application_log.close()

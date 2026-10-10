@@ -19,7 +19,7 @@ HostWindow :: #import "kryon/Window";
         Window.Record(id, label, bounds.x, bounds.y, bounds.width, bounds.height, enabled)
     }
     Prepare :: () {
-        Window.control_count = 0;
+        Window.Prepare()
         PrepareTheme()
     }
     Publish :: () { Window.Publish() }
@@ -31,17 +31,23 @@ HostWindow :: #import "kryon/Window";
     Publish :: () {}
 }
 Input :: #import "kryon/tree_input";
+Frames :: #import "kryon/Frame";
 ScrollDevice :: #import "kryon/ScrollDevice";
 #import "std/text_buffer"
 PaletteStyle :: #import "kryon/SystemThemeHost";
 SystemTheme :: #import "kryon/SystemTheme";
 theme_ready: bool;
+theme_revision: s64;
+theme_polled: s64 = -1;
 current_theme: SystemTheme.SystemPalette;
 PrepareTheme :: () {
-    if theme_ready && Model.ticks % 30 != 0 { return }
+    now := Clock.Milliseconds()
+    // Preserve the former half-second refresh interval at idle frame rates.
+    if theme_ready && theme_polled >= 0 && now >= theme_polled && now - theme_polled < 500 { return }
+    theme_polled = now
     fresh := HostTheme.SystemPaletteRead()
     if !theme_ready || fresh.background != current_theme.background || fresh.text != current_theme.text || fresh.selected != current_theme.selected || fresh.base != current_theme.base {
-        unused PaletteStyle.SystemPaletteInstall(fresh); current_theme = fresh; theme_ready = true
+        unused PaletteStyle.SystemPaletteInstall(fresh); current_theme = fresh; theme_ready = true; theme_revision += 1
     }
 }
 BackgroundColor :: () -> Color { return StyleTokenColor("canvas") }
@@ -71,6 +77,26 @@ LayoutFeed :: (cols: s32, height: float32) -> float32 {
 }
 feed_height: float32;
 close_requested: bool;
+retained_revision: s64 = -1;
+retained_theme: s64 = -1;
+retained_scroll: s32 = -1;
+retained_view: string;
+retained_selection: s32 = -1;
+retained_selecting: bool;
+RetainView :: (session: Session) -> bool {
+    unchanged := retained_revision == Model.visual_revision && retained_theme == theme_revision &&
+        retained_scroll == Model.scroll && retained_view == Model.view && retained_selection == Model.picked_count &&
+        retained_selecting == Model.selecting
+    retained_revision = Model.visual_revision; retained_theme = theme_revision
+    retained_scroll = Model.scroll; retained_view = Model.view; retained_selection = Model.picked_count
+    retained_selecting = Model.selecting
+    // These views have ongoing animation, editable state or expiring private
+    // access. Their regular frame still owns that work after polling the model.
+    if !unchanged || Model.loading || Model.busy || Model.editor != "" || Model.selected >= 0 ||
+        Model.app_locked || Model.guest_active || Model.slide_active || Model.slide_picking ||
+        Model.view == "map" || swipe.pending || swipe.active || close_requested { return false }
+    return Frames.RetainFrame(session)
+}
 swipe: SelectionDrag.State;
 swipe_epoch: s64;
 swipe_end: s32 = -1;
@@ -529,8 +555,9 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         close_requested = true
         if Model.editor != "" { Model.Set(Model.message[:], "Finish or cancel the current edit before closing Photos.") }
     }
-    Prepare(); defer { Publish() }
+    defer { Publish() }
     Model.Tick(HostWindow.WindowFocused())
+    PrepareTheme()
     // A hidden hosted window may be closed by Harmony. Preserve an editor
     // and every accepted/queued request before releasing the app process.
     if close_requested && Model.editor == "" && !Model.loading && !Model.queued_request {
@@ -544,6 +571,8 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         (Model.view == "hidden" && !Model.vault_unlocked)) {
         Input.TreePointerCancel(session); CancelSwipe()
     }
+    if RetainView(session) { return 0 }
+    Prepare()
     background: BoxProps; background.key = 1; background.bounds = viewport; background.fill = BackgroundColor(); Box(session, background)
     key := KeyboardTake(session); modifiers := KeyboardModifiers(session); typed_bytes: [256]u8; typed := TypedTextTake(session, typed_bytes[:])
     if Model.guest_active { GuestView(session,viewport,key,modifiers,typed); return 0 }

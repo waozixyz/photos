@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 static FILE *output;
+static FILE *poll_output;
 static double previous;
 static int samples = -1;
 static uintptr_t image_base;
@@ -98,4 +99,24 @@ void SDL_RenderPresent(void *renderer) {
         fflush(output);
     }
     previous = current;
+}
+
+/* A stable window can continue polling timers without presenting its pixels.
+ * Record drained event polls separately so timer checks measure that cadence. */
+int SDL_PollEvent(void *event) {
+    static int (*poll)(void *);
+    if (!poll) poll = dlsym(RTLD_NEXT, "SDL_PollEvent");
+    if (!poll) return 0;
+    int result = poll(event);
+    const char *path = getenv("PHOTOS_POLL_PROBE");
+    if (!result && path) {
+        if (!poll_output) poll_output = fopen(path, "w");
+        if (poll_output) {
+            struct timespec clock;
+            clock_gettime(CLOCK_MONOTONIC, &clock);
+            fprintf(poll_output, "%.9f\n", clock.tv_sec + clock.tv_nsec * 1e-9);
+            fflush(poll_output);
+        }
+    }
+    return result;
 }

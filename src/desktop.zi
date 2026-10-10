@@ -6,6 +6,7 @@ Map :: #import "map";
 TextDetection :: #import "text_detection";
 QRDetection :: #import "qr_detection";
 Collage :: #import "collage";
+Clock :: #import "kryon/ClockLinux";
 #import "std/text"
 #import "std/byte_text_linux"
 SDL :: #system_library "SDL2";
@@ -22,18 +23,43 @@ control_labels: [512][513]u8;
 control_bounds: [512][4]float32;
 control_enabled: [512]bool;
 control_count: s32;
-frames: s32;
+composed_view: string;
+composed_editor: string;
+composed_selected: s32 = -1;
+published_view: string;
+published_editor: string;
+published_selected: s32 = -1;
+last_publish: s64 = -1;
+
+Prepare :: () {
+    control_count = 0
+    composed_view = Model.view
+    composed_editor = Model.editor
+    composed_selected = Model.selected
+}
 
 Record :: (id: s32, label: string, x: float32, y: float32, width: float32, height: float32, enabled: bool) {
     if control_count>=512 { return }; i:=control_count; control_count+=1
     control_ids[i]=id; Model.Set(control_labels[i][:],label); control_bounds[i]=.{x,y,width,height}; control_enabled[i]=enabled
 }
 Publish :: () {
-    frames+=1; if frames%10!=0 { return }
+    // An action can change the model after its controls were composed. Publish
+    // that transition only once the next frame has its matching controls.
+    if composed_view != Model.view || composed_editor != Model.editor ||
+        composed_selected != Model.selected { return }
+    now := Clock.Milliseconds()
+    changed := published_view != Model.view || published_editor != Model.editor ||
+        published_selected != Model.selected
+    // Preserve the former roughly six updates per second at idle frame rates.
+    if !changed && last_publish >= 0 && now >= last_publish && now-last_publish < 1000/6 { return }
     window:=Desktop.DesktopWindow(); if window==null { return }
     title_bytes: [16]u8; Model.Set(title_bytes[:],"Photos"); SetTitle(window,*title_bytes[0])
     info: WMInfo; Version(*info.version[0])
     if WindowInfo(window,*info)==0 || info.subsystem!=2 || info.window==0 { return }
+    last_publish = now
+    published_view = Model.view
+    published_editor = Model.editor
+    published_selected = Model.selected
     name: [32]u8; Model.Set(name[:],"_HARMONY_APP_STATE"); atom:=Atom(info.display,*name[0],0)
     out: Vec(u8); BuilderPrint(*out,"{\"interface\":\"harmony.app-state.v1\",\"app\":\"photos\",\"loading\":%",Model.loading)
     Model.Property(*out,"view",Model.view); Model.Property(*out,"status",TextFromCString(*Model.message[0]))
@@ -45,6 +71,7 @@ Publish :: () {
     BuilderPrint(*out,",\"app_lock_enabled\":%,\"app_locked\":%",Model.app_lock_enabled,Model.app_locked)
     BuilderPrint(*out,",\"app_lock_method\":%",Model.app_lock_method)
     BuilderPrint(*out,",\"app_lock_delay\":%",Model.app_lock_delay)
+    BuilderPrint(*out,",\"field_focused\":%,\"search_focused\":%",Model.focused,Model.search_focused)
     BuilderPrint(*out,",\"detected_words\":%",TextDetection.count)
     BuilderPrint(*out,",\"detected_codes\":%,\"chosen_code\":%",QRDetection.count,QRDetection.chosen)
     BuilderPrint(*out,",\"slideshow_active\":%,\"slideshow_paused\":%,\"slideshow_offset\":%,\"slideshow_count\":%,\"slideshow_interval\":%,\"slideshow_albums\":%",Model.slide_active,Model.slide_paused,Model.slide_offset,Model.slide_count,Model.slide_intervals[Model.slide_interval],Model.slide_album_count)

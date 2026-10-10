@@ -31,8 +31,11 @@ def main():
     subprocess.run(["cc", "-shared", "-fPIC", "-O2", str(ROOT / "tests/scroll_frame_probe.c"),
                     "-ldl", "-o", str(probe)], check=True)
     frames = output / "frames.txt"
+    polls = output / "polls.txt"
     if frames.exists():
         frames.unlink()
+    if polls.exists():
+        polls.unlink()
     with tempfile.TemporaryDirectory(prefix="photos-refresh-") as temporary:
         folder = Path(temporary)
         source = folder / "source"
@@ -57,7 +60,7 @@ def main():
         finally:
             library.db.close()
         env = dict(os.environ, KRYON_SERVICE_ROOT=str(folder),
-                   LD_PRELOAD=str(probe), PHOTOS_FRAME_PROBE=str(frames))
+                   LD_PRELOAD=str(probe), PHOTOS_FRAME_PROBE=str(frames), PHOTOS_POLL_PROBE=str(polls))
         config_file = folder / "config.json"
         config_file.write_text(json.dumps(config))
         env["PHOTOS_CONFIG"] = str(config_file)
@@ -98,11 +101,13 @@ def main():
                     assert 4.5 <= elapsed <= 6.5, ("Unexpected elapsed-time refresh", elapsed)
                     samples = [float(line.split()[0]) for line in frames.read_text().splitlines()]
                     start, end = queries[0] + 1.5, queries[1] - .25
-                    idle_frames = sum(start <= stamp < end for stamp in samples)
-                    fps = idle_frames / (end - start)
-                    assert 10 <= fps <= 20, ("The check did not exercise idle cadence", fps)
+                    presented = sum(start <= stamp < end for stamp in samples) / (end - start)
+                    polled = sum(start <= float(stamp) < end for stamp in polls.read_text().splitlines()) / (end - start)
+                    assert 10 <= polled <= 20, ("The check did not exercise idle timer polling", polled)
+                    assert presented <= polled + 1, ("Idle presentation exceeded timer polling", presented, polled)
                     assert hashlib.sha256(original.read_bytes()).hexdigest() == digest, "Synthetic original changed"
-                    print(json.dumps(dict(portable=args.portable, refresh_seconds=elapsed, idle_fps=fps,
+                    print(json.dumps(dict(portable=args.portable, refresh_seconds=elapsed,
+                                          idle_poll_fps=polled, idle_present_fps=presented,
                                           unchanged_original=True, private_display=True, deployment=False)))
                 finally:
                     if child.poll() is None:

@@ -206,6 +206,9 @@ scroll: s32;
 offset: s32;
 feed_base: s32;
 revision: s64;
+// Request/response changes invalidate an accepted view even when they do not
+// replace the gallery's photo data (for example an error or status reply).
+visual_revision: s64;
 gallery_epoch: s64;
 swipe_selection_enabled: bool = true;
 loading: bool;
@@ -251,6 +254,7 @@ Quoted :: (out: *Vec(u8), value: string) {
 }
 Property :: (out: *Vec(u8), key: string, value: string) { BuilderPrint(out, ",\"%\":", key); Quoted(out, value) }
 Request :: (action: string = "query", id: string = "", value: string = "") {
+    visual_revision += 1
     if loading || keeping_alive {
         Set(queued_action[:], action); Set(queued_id[:], id); Set(queued_value[:], value)
         queued_request = true
@@ -440,6 +444,7 @@ Tick :: (window_focused: bool) {
         response = Transport.error != ""
     }
     if response {
+        visual_revision += 1
         loading = false; busy = false
         app_lock_check_pending = false
         app_auth_response := app_lock_auth_pending; app_lock_auth_pending = false
