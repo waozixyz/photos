@@ -8,6 +8,7 @@ Auth :: #import "daochi_client/auth";
 Keys :: #import "daochi_client/keys";
 Crypto :: #import "daochi_client/crypto";
 Native :: #import "daochi_client/crypto_native";
+AccountRequest :: #import "sync_account";
 #import "std/byte_text_linux"
 #import "std/text_buffer"
 c :: #system_library "c";
@@ -25,7 +26,14 @@ SignDevice :: (context: *void, message: string, output: []u8) -> bool {
 main :: () -> s32 {
     // version, method (GET/POST/PUT/HEAD), path length and Unix expiration.
     frame: [12]u8
-    if !Wire.ReadAll(*frame[0],12) || frame[0]!=1 || frame[1]<1 || frame[1]>4 { return 2 }
+    if !Wire.ReadAll(*frame[0],12) { return 2 }
+    if frame[0] == 2 {
+        account_frame: [16]u8
+        for index: 0..11 { account_frame[index] = frame[index] }
+        if !Wire.ReadAll(*account_frame[12], 4) { return 2 }
+        return AccountRequest.Prepare(account_frame[:])
+    }
+    if frame[0]!=1 || frame[1]<1 || frame[1]>4 { return 2 }
     count:=cast(s64)Wire.Number(frame[2:4])
     expires: u64
     for byte: frame[4:] { expires=(expires<<8)|cast(u64)byte }

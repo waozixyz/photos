@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 from datetime import datetime, timezone
 
 from .sync_crypto import encrypt, decrypt, seal_blob, seal_record, device_seed, device_public
-from . import account_sign, sync_http, sync_pages, sync_transaction
+from . import account_sign, sync_http, sync_pages, sync_transaction, sync_account
 
 from .library import atomic, packed, digest_file
 
@@ -83,21 +83,16 @@ class Client:
     def login(self):
         self.check_node()
         challenge = self.raw('/api/v1/sync/challenge?user_id=' + self.account)
-        body = packed(dict(user_id_hash=self.account, client_id=self.client_id, public_key=self.public.hex())).encode()
-        message = '\n'.join(['daochi-sync-v1', 'POST', '/api/v1/sync/login',
-                             hashlib.sha256(body).hexdigest(), challenge['nonce'], '']).encode()
-        signature = account_sign.sign(self.private, message).hex()
+        body, signature = sync_account.login(self.public, self.private, self.client_id,
+                                             packed(challenge).encode())
         result = self.raw('/api/v1/sync/login', 'POST', body,
                           {'Content-Type': 'application/json', 'X-Daochi-User': self.account, 'X-Daochi-Signature': signature})
-        self.token = result['auth_token']
-        public = self.device_public.hex()
-        nonce, expires = secrets.token_hex(32), int(time.time()) + 120
-        message = f'daochi-device-registration-v1\n{self.account}\n{APP}\n{self.device_id}\n{self.client_id}\n{public}\n{nonce}\n{expires}\n'.encode()
-        body = packed(dict(app_id=APP, device_key_id=self.device_id, client_id=self.client_id,
-                           public_key=public, nonce=nonce, expires_at=expires,
-                           signature=account_sign.sign(self.private, message).hex())).encode()
+        token = result['auth_token']
+        body = sync_account.registration(self.public, self.private, self.device_key,
+                                         self.client_id, int(time.time()))
         self.raw('/api/v1/account/devices', 'POST', body,
-                 {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + self.token})
+                 {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token})
+        self.token = token
 
     def header(self, method, path, body):
         return sync_transaction.header(self.public, self.private, self.device_key,

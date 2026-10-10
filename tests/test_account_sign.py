@@ -81,13 +81,14 @@ class AccountSignTest(unittest.TestCase):
                 before=identity.read_bytes()
                 client=Client(library,dict(node='http://127.0.0.1:18080',node_id='a'*64))
                 account=hashlib.sha256(self.old_public).hexdigest()
-                responses=[dict(nonce='fixture-challenge'),dict(auth_token='fixture-token'),{}]
+                nonce='ab'*32
+                responses=[dict(nonce=nonce),dict(auth_token='fixture-token'),{}]
                 with patch.object(client,'check_node'), patch.object(client,'raw',side_effect=responses) as raw:
                     client.login()
                 login=raw.call_args_list[1]
                 body=login.args[2]
                 message='\n'.join(['daochi-sync-v1','POST','/api/v1/sync/login',
-                                  hashlib.sha256(body).hexdigest(),'fixture-challenge','']).encode()
+                                  hashlib.sha256(body).hexdigest(),nonce,'']).encode()
                 self.assertTrue(ml_dsa_44.verify(self.old_public,message,bytes.fromhex(login.args[3]['X-Daochi-Signature'])))
                 device=json.loads(raw.call_args_list[2].args[2])
                 message=f'daochi-device-registration-v1\n{account}\nphotos\n{client.device_id}\n{client.client_id}\n{device["public_key"]}\n{device["nonce"]}\n{device["expires_at"]}\n'.encode()

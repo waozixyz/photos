@@ -17,6 +17,19 @@ def program():
     return path
 
 
+def run(request):
+    environment = {k: v for k, v in os.environ.items() if k not in
+                   {"DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "SESSION_MANAGER"}}
+    try:
+        result = subprocess.run(["prlimit", "--core=0", "--as=268435456", "--cpu=20", "--", str(program())],
+                                input=request, env=environment, capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        raise ValueError("Daochi request signing is unavailable; existing account and device keys were preserved") from None
+    if result.returncode or result.stderr or not 0 < len(result.stdout) < 12288:
+        raise ValueError("Daochi request signing failed; existing account and device keys were preserved")
+    return result.stdout
+
+
 def header(public, private, seed, method, path, body, expires):
     if (type(public) is not bytes or len(public) != 1312 or type(private) is not bytes or len(private) != 2560
             or type(seed) is not bytes or len(seed) != 32 or method not in METHODS or type(path) is not str
@@ -30,16 +43,10 @@ def header(public, private, seed, method, path, body, expires):
         raise ValueError("Invalid Daochi request path")
     request = (struct.pack("!BBHQ", 1, METHODS[method], len(target), expires)
                + public + private + seed + hashlib.sha256(body).digest() + target)
-    environment = {k: v for k, v in os.environ.items() if k not in
-                   {"DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "SESSION_MANAGER"}}
+    response = run(request)
+    if len(response) >= 8192:
+        raise ValueError("Invalid Daochi signed response")
     try:
-        result = subprocess.run(["prlimit", "--core=0", "--as=268435456", "--cpu=20", "--", str(program())],
-                                input=request, env=environment, capture_output=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
-        raise ValueError("Daochi request signing is unavailable; existing account and device keys were preserved") from None
-    if result.returncode or result.stderr or not 0 < len(result.stdout) < 8192:
-        raise ValueError("Daochi request signing failed; existing account and device keys were preserved")
-    try:
-        return result.stdout.decode("ascii")
+        return response.decode("ascii")
     except UnicodeDecodeError:
         raise ValueError("Invalid Daochi signed response") from None
