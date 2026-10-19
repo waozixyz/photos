@@ -2,46 +2,6 @@
   "format": 1,
   "packages": [
     {
-      "commit": "f01be2f1d5acf2a570e351013221238b7c543760",
-      "dependencies": {"kryon": "p4c51b15b9095d376"},
-      "id": "p03de317562242e4f",
-      "name": "Kss",
-      "ref": "master",
-      "url": "https://github.com/kryonlabs/kss.git"
-    },
-    {
-      "commit": "040c41e9c1c772e553e61d51b08b37f332b06488",
-      "dependencies": {"sqlite3": "pbeb32cf8d2e03b02"},
-      "id": "p450e8db63484350c",
-      "name": "SQLite",
-      "ref": "master",
-      "url": "https://github.com/ziranlang/sqlite.git"
-    },
-    {
-      "commit": "e6832d0c9bd2d7905a81f4b0ef3f3b3e8cd32590",
-      "dependencies": {"raylib": "p5a77c9c35110e925"},
-      "id": "p4c51b15b9095d376",
-      "name": "kryon",
-      "ref": "master",
-      "url": "https://github.com/kryonlabs/kryon.git"
-    },
-    {
-      "commit": "5cc7677b290f0448462410f7c7e85f518664b943",
-      "dependencies": {"liboqs": "pfb3df7cb222b1bdc"},
-      "id": "p55635fc8976895a9",
-      "name": "Oqs",
-      "ref": "master",
-      "url": "https://github.com/ziranlang/oqs.git"
-    },
-    {
-      "commit": "933691600cf10e81b1f53d9919dbcb371c1968e1",
-      "dependencies": {},
-      "id": "p56788fa3dab3e73a",
-      "name": "mingcute",
-      "ref": "master",
-      "url": "https://github.com/kryonlabs/mingcute.git"
-    },
-    {
       "commit": "fafa2cea97d0cb379d832086ba45a989fa6f9c8e",
       "dependencies": {},
       "id": "p5a77c9c35110e925",
@@ -49,6 +9,38 @@
       "ref": "fafa2cea97d0cb379d832086ba45a989fa6f9c8e",
       "source": true,
       "url": "https://github.com/raysan5/raylib.git"
+    },
+    {
+      "commit": "22d2ddbdc236796953c905a05a2cebf5ab1b4ff3",
+      "dependencies": {"liboqs": "pfb3df7cb222b1bdc"},
+      "id": "p7098ac9cd92f7e5f",
+      "name": "Oqs",
+      "ref": "master",
+      "url": "https://github.com/ziranlang/oqs.git"
+    },
+    {
+      "commit": "9e8662bff64af457a93cfd2a588b233e6678d8a4",
+      "dependencies": {"raylib": "p5a77c9c35110e925"},
+      "id": "p87f90114aaaa16c9",
+      "name": "kryon",
+      "ref": "master",
+      "url": "https://github.com/kryonlabs/kryon.git"
+    },
+    {
+      "commit": "7646df81065bffeaf6271d573be3c6ef6f965146",
+      "dependencies": {"kryon": "p87f90114aaaa16c9"},
+      "id": "p88a6b2883469ded9",
+      "name": "Kss",
+      "ref": "master",
+      "url": "https://github.com/kryonlabs/kss.git"
+    },
+    {
+      "commit": "2e1dc925e0ad162ffff61749174c9c5c6f7265cd",
+      "dependencies": {"sqlite3": "pbeb32cf8d2e03b02"},
+      "id": "pa1fc237d0b78c6ed",
+      "name": "SQLite",
+      "ref": "master",
+      "url": "https://github.com/ziranlang/sqlite.git"
     },
     {
       "commit": "b09c88c14082339b66c7b7158d609a771e64ca69",
@@ -60,9 +52,9 @@
       "url": "https://github.com/sqlite/sqlite.git"
     },
     {
-      "commit": "7e4e8396aec46a0039fdabef4c70c2d3636ace31",
-      "dependencies": {"oqs": "p55635fc8976895a9"},
-      "id": "pd5da7a0b570d7e24",
+      "commit": "a67eac2f33e5fe9d403f673a3a087005737b281c",
+      "dependencies": {"oqs": "p7098ac9cd92f7e5f"},
+      "id": "pc480c7f8626f2afd",
       "name": "DaochiClient",
       "ref": "master",
       "url": "https://github.com/ziranlang/daochi-client.git"
@@ -77,6 +69,14 @@
       "url": "https://github.com/jedisct1/libsodium.git"
     },
     {
+      "commit": "9cc6872f75447c3a24c16764f9829d0f58751cb0",
+      "dependencies": {},
+      "id": "pe1027b9d16704793",
+      "name": "mingcute",
+      "ref": "master",
+      "url": "https://github.com/kryonlabs/mingcute.git"
+    },
+    {
       "commit": "fd44469daeffe6b28f031f54f9bb66cbae69a572",
       "dependencies": {},
       "id": "pfb3df7cb222b1bdc",
@@ -87,11 +87,11 @@
     }
   ],
   "root": {
-    "dependencies": {"daochi_client": "pd5da7a0b570d7e24", "kryon": "p4c51b15b9095d376", "kss": "p03de317562242e4f", "libsodium": "pddc9c82431af7bc6", "mingcute": "p56788fa3dab3e73a", "oqs": "p55635fc8976895a9", "sqlite": "p450e8db63484350c"},
+    "dependencies": {"daochi_client": "pc480c7f8626f2afd", "kryon": "p87f90114aaaa16c9", "kss": "p88a6b2883469ded9", "libsodium": "pddc9c82431af7bc6", "mingcute": "pe1027b9d16704793", "oqs": "p7098ac9cd92f7e5f", "sqlite": "pa1fc237d0b78c6ed"},
     "name": "photos"
   },
   "toolchain": {
-    "commit": "f5d3b94de2de4010e97cb70ffcb6f3dd863ff36b",
+    "commit": "b8d0a4386d000a7f5e1d6463462a58a2869f7ac0",
     "ref": "master",
     "url": "https://github.com/ziranlang/ziran.git"
   }
