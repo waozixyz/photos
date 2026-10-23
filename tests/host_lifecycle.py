@@ -55,8 +55,8 @@ def verify(mode, arguments, output):
                        SDL_VIDEODRIVER='x11', LIBGL_ALWAYS_SOFTWARE='1')
     with tempfile.TemporaryDirectory(prefix='photos-host-') as temporary:
         root = Path(temporary)
-        project = root / 'Projects/waozixyz/inbe'
-        executable = project / 'build/bin/linux/inbe-linux-x86_64'
+        project = root / 'Projects/waozixyz/breeze'
+        executable = project / 'build/bin/linux/breeze-linux-x86_64'
         executable.parent.mkdir(parents=True)
         if mode == 'native':
             shutil.copy2(arguments.native, executable)
