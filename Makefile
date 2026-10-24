@@ -26,6 +26,10 @@ build bundle test: local-service
 sync-crypto:
 	LDLIBS='-l:libsodium.so.23' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry sync_crypto:main --exe -o build/sync-crypto src/sync_crypto.zi
 build bundle test: sync-crypto
+.PHONY: entity-crypto
+entity-crypto:
+	LDLIBS='-l:libsodium.so.23' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry entity_crypto:main --exe -o build/entity-crypto src/entity_crypto.zi
+build bundle test: entity-crypto
 .PHONY: sync-transaction
 sync-transaction: build/liboqs/lib/liboqs.a
 	LDLIBS='$(abspath build/liboqs/lib/liboqs.a) -l:libsodium.so.23 -lm' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry sync_transaction:main --exe -o build/sync-transaction src/sync_transaction.zi

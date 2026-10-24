@@ -1,0 +1,79 @@
+// Binary stdin/stdout protocol for the account's shared entity data. The
+// account key, record keys and plaintext never enter arguments, diagnostics or
+// files; DaochiClient derives every key and authenticates before plaintext is
+// emitted.
+Native :: #import "daochi_client/crypto_native";
+Entity :: #import "daochi_client/entity";
+#import "std/byte_text_linux"
+c :: #system_library "c";
+Read :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign c "read";
+Write :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign c "write";
+Allocate :: (bytes: usize) -> *void #foreign c "malloc";
+Release :: (bytes: *void) #foreign c "free";
+Errno :: () -> *s32 #foreign c "__errno_location";
+ReadAll :: (bytes: *u8, count: s64) -> bool {
+    at: s64
+    while at < count {
+        amount := Read(0,*bytes[at],cast(usize)(count-at))
+        if amount < 0 && Errno().* == 4 { continue }
+        if amount <= 0 { return false }; at += amount
+    }
+    return true
+}
+SendAll :: (bytes: *u8, count: s64) -> bool {
+    at: s64
+    while at < count {
+        amount := Write(1,*bytes[at],cast(usize)(count-at))
+        if amount < 0 && Errno().* == 4 { continue }
+        if amount <= 0 { return false }; at += amount
+    }
+    return true
+}
+Number :: (bytes: []u8) -> u64 {
+    value: u64; for byte: bytes { value = (value << 8) | cast(u64)byte }; return value
+}
+Free :: (bytes: *u8, count: s64) {
+    if bytes != null { Native.Clear(BytesFromPointer(bytes,cast(u64)count)); Release(cast(*void)bytes) }
+}
+main :: () -> s32 {
+    if !Native.Initialize() { return 2 }
+    // version, mode, kind length, private key length, chunk index, content
+    // hash, content length and four reserved zero bytes. Modes: 1 record key
+    // of the kind; 2 seal one chunk; 3 open one chunk.
+    header: [88]u8
+    defer { Native.Clear(header[:]) }
+    if !ReadAll(*header[0],88) || header[0] != 1 || header[1] < 1 || header[1] > 3 { return 2 }
+    mode := header[1]; kindCount := cast(s64)Number(header[2:4]); keyCount := cast(s64)Number(header[4:8])
+    index := cast(s64)Number(header[8:16]); contentCount := cast(s64)Number(header[80:84])
+    for at: 84..87 { if header[at] != 0 { return 2 } }
+    if kindCount < 1 || kindCount > Entity.ENTITY_KIND_MAX || keyCount < 1 || keyCount > 8192 ||
+        index < 0 || index >= Entity.ENTITY_CHUNK_MAX || contentCount > Entity.ENTITY_CHUNK_BYTES + 16 ||
+        (mode == 1 && (contentCount != 0 || index != 0)) || (mode != 1 && contentCount < 1) { return 2 }
+    key := cast(*u8)Allocate(cast(usize)keyCount); kind := cast(*u8)Allocate(cast(usize)kindCount)
+    input := cast(*u8)Allocate(cast(usize)(contentCount+1))
+    outputCount := ifx mode == 1 then cast(s64)Entity.ENTITY_KEY_BYTES else contentCount+16
+    output := cast(*u8)Allocate(cast(usize)outputCount)
+    defer { Free(key,keyCount); Free(kind,kindCount); Free(input,contentCount+1); Free(output,outputCount) }
+    if key == null || kind == null || input == null || output == null || !ReadAll(key,keyCount) ||
+        !ReadAll(kind,kindCount) || !ReadAll(input,contentCount) { return 2 }
+    // A second frame or trailing bytes are forbidden in this one-shot helper.
+    extra: u8; amount: s64
+    while true { amount = Read(0,*extra,1); if amount < 0 && Errno().* == 4 { continue }; break }
+    if amount != 0 { return 2 }
+    private := BytesFromPointer(key,cast(u64)keyCount)
+    name := TextFromBytes(BytesFromPointer(kind,cast(u64)kindCount))
+    result := BytesFromPointer(output,cast(u64)outputCount)
+    if !Entity.EntityKindValid(name) { return 2 }
+    if mode == 1 {
+        return ifx Entity.EntityRecordKey(private,name,result) && SendAll(output,outputCount) then 0 else 2
+    }
+    hash := TextFromBytes(header[16:80])
+    content := BytesFromPointer(input,cast(u64)contentCount)
+    if mode == 2 {
+        size := Entity.SealEntityChunk(private,name,hash,index,content,result)
+        return ifx size == contentCount+16 && SendAll(output,size) then 0 else 2
+    }
+    size := Entity.OpenEntityChunk(private,name,hash,index,content,result)
+    if size < 0 { return 1 }
+    return ifx SendAll(output,size) then 0 else 2
+}

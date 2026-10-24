@@ -2,6 +2,23 @@
   "format": 1,
   "packages": [
     {
+      "commit": "9976953053e4d64b70cd555e0faf1975e6ba212f",
+      "dependencies": {"oqs": "p7098ac9cd92f7e5f"},
+      "id": "p129ed20dc955aa54",
+      "name": "DaochiClient",
+      "ref": "master",
+      "url": "https://github.com/ziranlang/daochi-client.git"
+    },
+    {
+      "commit": "e1f480f382d9443c4412133b55948374c77a5c21",
+      "dependencies": {},
+      "id": "p4b0a50b49959e674",
+      "name": "liboqs",
+      "ref": "main",
+      "source": true,
+      "url": "https://github.com/open-quantum-safe/liboqs.git"
+    },
+    {
       "commit": "fafa2cea97d0cb379d832086ba45a989fa6f9c8e",
       "dependencies": {},
       "id": "p5a77c9c35110e925",
@@ -12,7 +29,7 @@
     },
     {
       "commit": "22d2ddbdc236796953c905a05a2cebf5ab1b4ff3",
-      "dependencies": {"liboqs": "pfb3df7cb222b1bdc"},
+      "dependencies": {"liboqs": "p4b0a50b49959e674"},
       "id": "p7098ac9cd92f7e5f",
       "name": "Oqs",
       "ref": "master",
@@ -52,14 +69,6 @@
       "url": "https://github.com/sqlite/sqlite.git"
     },
     {
-      "commit": "a67eac2f33e5fe9d403f673a3a087005737b281c",
-      "dependencies": {"oqs": "p7098ac9cd92f7e5f"},
-      "id": "pc480c7f8626f2afd",
-      "name": "DaochiClient",
-      "ref": "master",
-      "url": "https://github.com/ziranlang/daochi-client.git"
-    },
-    {
       "commit": "a6a93de672b7e2c6c13a02cbbe0e6457fe9306fd",
       "dependencies": {},
       "id": "pddc9c82431af7bc6",
@@ -75,19 +84,10 @@
       "name": "mingcute",
       "ref": "master",
       "url": "https://github.com/kryonlabs/mingcute.git"
-    },
-    {
-      "commit": "fd44469daeffe6b28f031f54f9bb66cbae69a572",
-      "dependencies": {},
-      "id": "pfb3df7cb222b1bdc",
-      "name": "liboqs",
-      "ref": "main",
-      "source": true,
-      "url": "https://github.com/open-quantum-safe/liboqs.git"
     }
   ],
   "root": {
-    "dependencies": {"daochi_client": "pc480c7f8626f2afd", "kryon": "pac3bbc70c330905a", "kss": "p88a6b2883469ded9", "libsodium": "pddc9c82431af7bc6", "mingcute": "pe1027b9d16704793", "oqs": "p7098ac9cd92f7e5f", "sqlite": "pa1fc237d0b78c6ed"},
+    "dependencies": {"daochi_client": "p129ed20dc955aa54", "kryon": "pac3bbc70c330905a", "kss": "p88a6b2883469ded9", "libsodium": "pddc9c82431af7bc6", "mingcute": "pe1027b9d16704793", "oqs": "p7098ac9cd92f7e5f", "sqlite": "pa1fc237d0b78c6ed"},
     "name": "photos"
   },
   "toolchain": {
