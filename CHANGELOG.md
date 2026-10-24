@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.59
+
+- Photos in Harmony now runs as a `.zx` portable app. Harmony updates an installed Photos automatically and keeps your library, albums, edits and settings.
+- The development Android app has a new look: an edge-to-edge grid grouped by day, album covers with counts, a dark viewer with icon controls, grouped settings and a bottom tab bar, following the phone's dark mode.
+
 ## 0.1.58
 
 - Photos' library and sync services now start when Photos opens and stop after a quiet period, and Harmony closes a hidden Photos window after saving pending edits, so Photos no longer uses memory or CPU while you are not viewing it.
