@@ -251,7 +251,7 @@ def main():
     parser.add_argument('--fixture', type=lambda value: Path(value).resolve(), required=True)
     parser.add_argument('--player', type=lambda value: Path(value).resolve(), required=True)
     parser.add_argument('--native', type=lambda value: Path(value).resolve(), default=ROOT / 'build/photos-desktop')
-    parser.add_argument('--bundle', type=lambda value: Path(value).resolve(), default=ROOT / 'build/photos-portable.zib')
+    parser.add_argument('--bundle', type=lambda value: Path(value).resolve(), default=ROOT / 'build/photos-portable.zx')
     arguments = parser.parse_args()
     output = ROOT / 'build/host-lifecycle'
     output.mkdir(parents=True, exist_ok=True)

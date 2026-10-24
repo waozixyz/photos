@@ -70,8 +70,8 @@ def main():
                 flags = [] if (ROOT / "ziran.local.toml").exists() else ["--locked"]
                 kryon = subprocess.check_output(["ziran", "pkg", "path", "kryon", *flags],
                                                cwd=ROOT, text=True).strip()
-                player = str(Path(kryon) / "build/bin/zib")
-            command = [player, os.environ.get("PHOTOS_BUNDLE", str(ROOT / "build/photos-portable.zib"))]
+                player = str(Path(kryon) / "build/bin/zx")
+            command = [player, os.environ.get("PHOTOS_BUNDLE", str(ROOT / "build/photos-portable.zx"))]
         else:
             command = [os.environ.get("PHOTOS_BINARY", str(ROOT / "build/photos-desktop"))]
         with Server(config, folder / "kryon/services/photos.sock") as service:

@@ -45,7 +45,7 @@ with tempfile.TemporaryDirectory() as folder:
     if portable:
         flags=[] if (ROOT/'ziran.local.toml').is_file() else ['--locked']
         kryon=Path(subprocess.check_output(['ziran','pkg','path','kryon',*flags],cwd=ROOT,text=True).strip())
-        command=[str(kryon/'build/bin/zib'),str(ROOT/'build/photos-portable.zib')]
+        command=[str(kryon/'build/bin/zx'),str(ROOT/'build/photos-portable.zx')]
     else:
         command=[str(ROOT/'build/photos-desktop')]
     with Server(dict(root=str(library.root)),folder/'kryon/services/photos.sock') as service:

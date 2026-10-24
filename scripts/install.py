@@ -260,7 +260,7 @@ def main():
     elif args.defer_sync and not args.no_service:
         print('Service activation migration deferred; the running import and current services were preserved')
     print('Photos standalone app and private local service installed; library and keys retained')
-    print('Publish build/photos-portable.zib with Harmony scripts/publish-app.py for the Apps Install action')
+    print('Publish build/photos-portable.zx with Harmony scripts/publish-app.py for the Apps Install action')
 
 
 if __name__=='__main__':

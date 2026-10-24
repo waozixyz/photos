@@ -183,8 +183,8 @@ def main():
     flags = [] if (ROOT / "ziran.local.toml").is_file() else ["--locked"]
     kryon = Path(subprocess.check_output(["ziran", "pkg", "path", "kryon", *flags],
                                        env=env, cwd=ROOT, text=True).strip())
-    player = args.player.resolve() if args.player else kryon / "build/bin/zib"
-    bundle = args.bundle.resolve() if args.bundle else ROOT / "build/photos-portable.zib"
+    player = args.player.resolve() if args.player else kryon / "build/bin/zx"
+    bundle = args.bundle.resolve() if args.bundle else ROOT / "build/photos-portable.zx"
     work = ROOT / "build/scroll-performance"
     work.mkdir(parents=True, exist_ok=True)
     output = ROOT / "backup/scroll-performance/current"

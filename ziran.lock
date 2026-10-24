@@ -19,16 +19,8 @@
       "url": "https://github.com/ziranlang/oqs.git"
     },
     {
-      "commit": "9e8662bff64af457a93cfd2a588b233e6678d8a4",
-      "dependencies": {"raylib": "p5a77c9c35110e925"},
-      "id": "p87f90114aaaa16c9",
-      "name": "kryon",
-      "ref": "master",
-      "url": "https://github.com/kryonlabs/kryon.git"
-    },
-    {
       "commit": "7646df81065bffeaf6271d573be3c6ef6f965146",
-      "dependencies": {"kryon": "p87f90114aaaa16c9"},
+      "dependencies": {"kryon": "pac3bbc70c330905a"},
       "id": "p88a6b2883469ded9",
       "name": "Kss",
       "ref": "master",
@@ -41,6 +33,14 @@
       "name": "SQLite",
       "ref": "master",
       "url": "https://github.com/ziranlang/sqlite.git"
+    },
+    {
+      "commit": "809a0f09d9860fcf3aa37ca4a4b9e29cfe1e116b",
+      "dependencies": {"raylib": "p5a77c9c35110e925"},
+      "id": "pac3bbc70c330905a",
+      "name": "kryon",
+      "ref": "master",
+      "url": "https://github.com/kryonlabs/kryon.git"
     },
     {
       "commit": "b09c88c14082339b66c7b7158d609a771e64ca69",
@@ -87,11 +87,11 @@
     }
   ],
   "root": {
-    "dependencies": {"daochi_client": "pc480c7f8626f2afd", "kryon": "p87f90114aaaa16c9", "kss": "p88a6b2883469ded9", "libsodium": "pddc9c82431af7bc6", "mingcute": "pe1027b9d16704793", "oqs": "p7098ac9cd92f7e5f", "sqlite": "pa1fc237d0b78c6ed"},
+    "dependencies": {"daochi_client": "pc480c7f8626f2afd", "kryon": "pac3bbc70c330905a", "kss": "p88a6b2883469ded9", "libsodium": "pddc9c82431af7bc6", "mingcute": "pe1027b9d16704793", "oqs": "p7098ac9cd92f7e5f", "sqlite": "pa1fc237d0b78c6ed"},
     "name": "photos"
   },
   "toolchain": {
-    "commit": "b8d0a4386d000a7f5e1d6463462a58a2869f7ac0",
+    "commit": "620c4077a801d63984fa4bc6893e857659a5e7e9",
     "ref": "master",
     "url": "https://github.com/ziranlang/ziran.git"
   }

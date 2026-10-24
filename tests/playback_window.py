@@ -68,8 +68,8 @@ with tempfile.TemporaryDirectory() as folder:
     if portable:
         flags = [] if (ROOT/'ziran.local.toml').is_file() else ['--locked']
         kryon = Path(subprocess.check_output(['ziran','pkg','path','kryon',*flags],cwd=ROOT,text=True).strip())
-        player = Path(os.environ.get('PHOTOS_PLAYER', kryon/'build/bin/zib'))
-        bundle = Path(os.environ.get('PHOTOS_BUNDLE', ROOT/'build/photos-portable.zib'))
+        player = Path(os.environ.get('PHOTOS_PLAYER', kryon/'build/bin/zx'))
+        bundle = Path(os.environ.get('PHOTOS_BUNDLE', ROOT/'build/photos-portable.zx'))
         command = [str(player), str(bundle)]
     else:
         command = [os.environ.get('PHOTOS_BINARY', str(ROOT/'build/photos-desktop'))]

@@ -13,8 +13,8 @@ for form in source saved; do
     root=tests
     if test "$form" = saved; then input=$work/ir/gallery_text_probe.zir; root=$work/ir; fi
     "$ziran" bundle --project $flags --root "$root" --entry gallery_text_probe:main \
-        -o "$work/$form.zib" "$input"
-    test "$("$ziran" run "$work/$form.zib")" = 0
+        -o "$work/$form.zx" "$input"
+    test "$("$ziran" run "$work/$form.zx")" = 0
     "$ziran" build --project $flags --root "$root" --target=c --entry gallery_text_probe:main \
         --exe -o "$work/$form" "$input"
     "$work/$form/gallery_text_probe"

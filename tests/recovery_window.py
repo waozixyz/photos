@@ -39,7 +39,7 @@ with tempfile.TemporaryDirectory() as temporary:
     if portable:
         flags=[] if (ROOT/'ziran.local.toml').is_file() else ['--locked']
         kryon=Path(subprocess.check_output(['ziran','pkg','path','kryon',*flags],cwd=ROOT,text=True).strip())
-        command=[os.environ.get('PHOTOS_PLAYER',str(kryon/'build/bin/zib')),os.environ.get('PHOTOS_BUNDLE',str(ROOT/'build/photos-portable.zib'))]
+        command=[os.environ.get('PHOTOS_PLAYER',str(kryon/'build/bin/zx')),os.environ.get('PHOTOS_BUNDLE',str(ROOT/'build/photos-portable.zx'))]
     else:command=[os.environ.get('PHOTOS_BINARY',str(ROOT/'build/photos-desktop'))]
     with Server(config,folder/'kryon/services/photos.sock') as service:
         threading.Thread(target=service.serve_forever,daemon=True).start()

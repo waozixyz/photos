@@ -38,8 +38,8 @@ with tempfile.TemporaryDirectory() as folder:
         threading.Thread(target=service.serve_forever, daemon=True).start()
         locked = [] if (ROOT / 'ziran.local.toml').exists() else ['--locked']
         kryon = Path(subprocess.check_output(['ziran', 'pkg', 'path', 'kryon', *locked], cwd=ROOT, text=True).strip())
-        player = Path(os.environ.get('PHOTOS_PLAYER', kryon / 'build/bin/zib'))
-        process = subprocess.Popen([str(player), os.environ.get('PHOTOS_BUNDLE',str(ROOT / 'build/photos-portable.zib'))], env=env)
+        player = Path(os.environ.get('PHOTOS_PLAYER', kryon / 'build/bin/zx'))
+        process = subprocess.Popen([str(player), os.environ.get('PHOTOS_BUNDLE',str(ROOT / 'build/photos-portable.zx'))], env=env)
         def xdo(*args):
             if args == ('click', '1'):
                 subprocess.check_call(['xdotool', 'mousedown', '1'])

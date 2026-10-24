@@ -67,22 +67,22 @@ recovery-reset-hosted-test: bundle
 app-lock-policy-test:
 	$(ZIRAN) build --project $(PACKAGE_FLAGS) --root tests --target=c --entry app_lock_policy_test:main --exe -o build/app-lock-policy tests/app_lock_policy_test.zi
 	build/app-lock-policy/app_lock_policy_test
-	$(ZIRAN) bundle --project $(PACKAGE_FLAGS) --root tests --entry app_lock_policy_test:Answer -o build/app-lock-policy-test.zib tests/app_lock_policy_test.zi
-	test "$$($(ZIRAN) run build/app-lock-policy-test.zib)" = 42
+	$(ZIRAN) bundle --project $(PACKAGE_FLAGS) --root tests --entry app_lock_policy_test:Answer -o build/app-lock-policy-test.zx tests/app_lock_policy_test.zi
+	test "$$($(ZIRAN) run build/app-lock-policy-test.zx)" = 42
 test: app-lock-policy-test
 .PHONY: selection-drag-test
 selection-drag-test:
 	$(ZIRAN) build --project $(PACKAGE_FLAGS) --root tests --target=c --entry selection_drag_test:main --exe -o build/selection-drag-test tests/selection_drag_test.zi
 	build/selection-drag-test/selection_drag_test
-	$(ZIRAN) bundle --project $(PACKAGE_FLAGS) --root tests --entry selection_drag_test:Answer -o build/selection-drag-test.zib tests/selection_drag_test.zi
-	test "$$($(ZIRAN) run build/selection-drag-test.zib)" = 42
+	$(ZIRAN) bundle --project $(PACKAGE_FLAGS) --root tests --entry selection_drag_test:Answer -o build/selection-drag-test.zx tests/selection_drag_test.zi
+	test "$$($(ZIRAN) run build/selection-drag-test.zx)" = 42
 test: selection-drag-test
 .PHONY: mobile-viewer-test
 mobile-viewer-test:
 	$(ZIRAN) build --project $(PACKAGE_FLAGS) --root tests --target=c --entry mobile_viewer_test:main --exe -o build/mobile-viewer-test tests/mobile_viewer_test.zi
 	build/mobile-viewer-test/mobile_viewer_test
-	$(ZIRAN) bundle --project $(PACKAGE_FLAGS) --root tests --entry mobile_viewer_test:Answer -o build/mobile-viewer-test.zib tests/mobile_viewer_test.zi
-	test "$$($(ZIRAN) run build/mobile-viewer-test.zib)" = 42
+	$(ZIRAN) bundle --project $(PACKAGE_FLAGS) --root tests --entry mobile_viewer_test:Answer -o build/mobile-viewer-test.zx tests/mobile_viewer_test.zi
+	test "$$($(ZIRAN) run build/mobile-viewer-test.zx)" = 42
 test: mobile-viewer-test
 .PHONY: backup-crypto-test
 backup-crypto-test:
@@ -97,8 +97,8 @@ test: backup-identity-test
 backup-queue-test:
 	$(ZIRAN) build --project $(PACKAGE_FLAGS) --root tests --target=c --entry backup_queue_test:main --exe -o build/backup-queue-test tests/backup_queue_test.zi
 	build/backup-queue-test/backup_queue_test
-	$(ZIRAN) bundle --project $(PACKAGE_FLAGS) --root tests --entry backup_queue_test:Answer -o build/backup-queue-test.zib tests/backup_queue_test.zi
-	test "$$($(ZIRAN) run build/backup-queue-test.zib)" = 42
+	$(ZIRAN) bundle --project $(PACKAGE_FLAGS) --root tests --entry backup_queue_test:Answer -o build/backup-queue-test.zx tests/backup_queue_test.zi
+	test "$$($(ZIRAN) run build/backup-queue-test.zx)" = 42
 test: backup-queue-test
 .PHONY: backup-staging-test
 backup-staging-test:

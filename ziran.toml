@@ -18,7 +18,7 @@ library = "X11"
 
 [tool.kryon.profiles.portable]
 backend = "desktop"
-codegen = "zib"
+codegen = "zx"
 
 [tool.kryon.profiles.android]
 backend = "android"

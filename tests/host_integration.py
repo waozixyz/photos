@@ -62,7 +62,7 @@ def verify(mode, args, output):
                SDL_AUDIODRIVER='dummy', SDL_VIDEODRIVER='x11', LIBGL_ALWAYS_SOFTWARE='1',
                HARMONY_PREVIEW_CHAT_BUBBLES='1')
     sys.path.insert(0, str(args.harmony / 'tests'))
-    from app_packages_test import Node, signed_release
+    from app_packages_test import Node, module_file, signed_release
     with tempfile.TemporaryDirectory(prefix='photos-full-host-') as directory:
         root = Path(directory)
         runtime = root / 'runtime'
@@ -77,7 +77,7 @@ def verify(mode, args, output):
         host_dir = root / 'host'
         host_dir.mkdir()
         for source in (args.host, args.host.parent / 'libapp-start.so', args.player, args.updater):
-            name = 'zib' if source == args.player else source.name
+            name = 'zx' if source == args.player else source.name
             shutil.copy2(source, host_dir / name)
         config = dict(app_id='photos', label='Photos', renderer='window',
                       project='waozixyz/photos', executable='photos', build_path='build/photos-desktop')
@@ -113,7 +113,7 @@ def verify(mode, args, output):
                     node = Node('photos')
                     payload = args.bundle.read_bytes()
                     node.latest = signed_release(key, payload, 1, app_id='photos', version='0.1.58')
-                    node.files[node.latest['sha256'] + '.zib'] = payload
+                    node.files[module_file(node.latest)] = payload
                     config.update(bundle_mode='portable', key_id='release',
                                   public_key=key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw).hex())
                     (root / 'apps.json').write_text(json.dumps(dict(node=node.url, apps=[config])))
@@ -346,7 +346,7 @@ def main():
     parser.add_argument('--player', type=Path, required=True)
     parser.add_argument('--fixture', type=Path, required=True)
     parser.add_argument('--native', type=Path, default=ROOT / 'build/photos-desktop')
-    parser.add_argument('--bundle', type=Path, default=ROOT / 'build/photos-portable.zib')
+    parser.add_argument('--bundle', type=Path, default=ROOT / 'build/photos-portable.zx')
     parser.add_argument('--mode', choices=('native', 'portable', 'both'), default='both')
     args = parser.parse_args()
     for name in ('harmony', 'host', 'updater', 'player', 'fixture', 'native', 'bundle'):
