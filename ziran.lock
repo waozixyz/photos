@@ -2,8 +2,8 @@
   "format": 1,
   "packages": [
     {
-      "commit": "9976953053e4d64b70cd555e0faf1975e6ba212f",
-      "dependencies": {"oqs": "p7098ac9cd92f7e5f"},
+      "commit": "19f50275329f2fb6bfdeca64765fd1e57328ede8",
+      "dependencies": {"crypto": "pf039d7a776333200", "oqs": "p7098ac9cd92f7e5f"},
       "id": "p129ed20dc955aa54",
       "name": "DaochiClient",
       "ref": "master",
@@ -84,6 +84,14 @@
       "name": "mingcute",
       "ref": "master",
       "url": "https://github.com/kryonlabs/mingcute.git"
+    },
+    {
+      "commit": "944826f70779a6b6cd53f6b06a75b36f4d8a2558",
+      "dependencies": {},
+      "id": "pf039d7a776333200",
+      "name": "crypto",
+      "ref": "master",
+      "url": "https://github.com/ziranlang/crypto.git"
     }
   ],
   "root": {
