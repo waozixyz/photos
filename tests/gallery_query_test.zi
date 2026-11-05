@@ -1,0 +1,300 @@
+Gallery :: #import "gallery_query";
+Store :: #import "library_store";
+Registry :: #import "access_registry";
+Clock :: #import "std/timer_linux";
+Kit :: #import "kit";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+SQL :: #import "sqlite/SQLite";
+JSON :: #import "std/json_document";
+#import "std/byte_text_linux"
+using Vectors :: #import "std/vec";
+
+Context :: struct {
+    oracle: *JSON.JsonDocument
+    case: s32
+    root: string
+    package: string
+    allow: bool
+    expire: bool
+    authorizations: s32
+    probe_writer: bool
+    writer_blocked: bool
+    invalid_album_request: bool
+    expire_native: bool
+    order: Vec(u8)
+}
+
+Replace :: (text: string, needle: string, replacement: string) -> string {
+    output: Vec(u8); at: s64
+    while at < text.count {
+        if at + needle.count <= text.count && text[at:at + needle.count] == needle {
+            BuilderPrint(*output, "%", replacement); at += needle.count
+        } else { unused VecPush(output, text[at]); at += 1 }
+    }
+    return BuilderFinish(output)
+}
+Text :: (document: *JSON.JsonDocument, object: s32, key: string) -> string {
+    return JSON.JsonString(document, JSON.JsonMember(document, object, key))
+}
+Serialize :: (document: *JSON.JsonDocument, node: s32) -> string {
+    return JSON.JsonWrite(document, node, JSON.JsonCompactStyle(false))
+}
+Expand :: (context: *Context, text: string) -> string {
+    return Replace(Replace(text, "@ROOT@", context.root), "@PACKAGE@", context.package)
+}
+Response :: (context: *Context) -> s32 {
+    return JSON.JsonMember(context.oracle, context.case, "response")
+}
+State :: (context: *Context, names: []string) -> string {
+    document: JSON.JsonDocument; document.root = JSON.JsonNewObject(*document)
+    response := Response(context)
+    for name: names {
+        node := JSON.JsonMember(context.oracle, response, name)
+        if node >= 0 { unused JSON.JsonSet(*document, document.root, name, JSON.JsonCopy(*document, context.oracle, node)) }
+    }
+    return Expand(context, Serialize(*document, document.root))
+}
+Authorize :: (opaque: *void, lib: *Store.Library, request: string) -> bool {
+    context := cast(*Context)opaque
+    context.authorizations += 1
+    if context.probe_writer && context.authorizations > 1 {
+        database: *void
+        if SQL.SqliteOpenText(Tree.JoinPath(lib.root, "library.sqlite"), *database, SQL.SQLITE_OPEN_READWRITE) == SQL.SQLITE_OK {
+            unused SQL.SqliteBusyTimeout(database, 0)
+            code := SQL.SqliteExecText(database, "BEGIN IMMEDIATE")
+            context.writer_blocked = code == SQL.SQLITE_BUSY || code == SQL.SQLITE_LOCKED
+            if code == SQL.SQLITE_OK { unused SQL.SqliteExecText(database, "ROLLBACK") }
+            unused SQL.SqliteClose(database)
+        }
+    }
+    return context.allow
+}
+Access :: (opaque: *void, lib: *Store.Library, request: string) -> string {
+    context := cast(*Context)opaque
+    BuilderPrint(*context.order, "access;")
+    text := ifx context.allow then "{\"vault_configured\":0,\"vault_unlocked\":1,\"guest_configured\":0}" else "{\"vault_configured\":0,\"vault_unlocked\":0,\"guest_configured\":0}"
+    out: Vec(u8); BuilderPrint(*out,"%",text); return BuilderFinish(out)
+}
+SemanticState :: (opaque: *void, lib: *Store.Library, request: string) -> string {
+    context := cast(*Context)opaque
+    BuilderPrint(*context.order, "semantic-state;")
+    names: [7]string = .["semantic_enabled", "semantic_processing", "semantic_working", "semantic_total", "semantic_indexed", "semantic_failed", "semantic_status"]
+    return State(context, names[:])
+}
+PeopleState :: (opaque: *void, lib: *Store.Library, request: string) -> string {
+    context := cast(*Context)opaque
+    BuilderPrint(*context.order, "people-state;")
+    names: [4]string = .["people_enabled", "people_processing", "people_working", "people_status"]
+    return State(context, names[:])
+}
+SemanticKick :: (opaque: *void, lib: *Store.Library) -> string {
+    context := cast(*Context)opaque
+    BuilderPrint(*context.order, "semantic-kick;")
+    if context.expire { context.allow = false }
+    if context.expire_native { unused Clock.SleepMilliseconds(100) }
+    return ""
+}
+PeopleKick :: (opaque: *void, lib: *Store.Library) -> string {
+    context := cast(*Context)opaque
+    BuilderPrint(*context.order, "people-kick;")
+    return ""
+}
+
+// State/inference services remain explicit C26/C27 boundaries. Albums run C17.
+Services :: (context: *Context, result: *Gallery.QueryServices) {
+    result.context = cast(*void)context; result.package_root = context.package
+    result.authorized = Authorize; result.access_state = Access
+    result.semantic_state = SemanticState; result.people_state = PeopleState
+    result.semantic_kick = SemanticKick; result.people_kick = PeopleKick
+}
+
+Equal :: (actual: *JSON.JsonDocument, node: s32, expected: *JSON.JsonDocument, target: s32, context: *Context, path: string) -> bool {
+    kind := JSON.JsonKindOf(actual, node)
+    if kind != JSON.JsonKindOf(expected, target) { print("Different JSON kinds at %\n", path); return false }
+    if kind == JSON.JsonKind.Object {
+        if JSON.JsonCount(actual, node) != JSON.JsonCount(expected, target) {
+            print("Different object fields at %\nActual: ", path)
+            field := JSON.JsonFirst(actual, node)
+            while field >= 0 { print("% ", JSON.JsonKey(actual, field)); field = JSON.JsonNext(actual, field) }
+            print("\nExpected: ")
+            field = JSON.JsonFirst(expected, target)
+            while field >= 0 { print("% ", JSON.JsonKey(expected, field)); field = JSON.JsonNext(expected, field) }
+            print("\n"); return false
+        }
+        child := JSON.JsonFirst(expected, target)
+        while child >= 0 {
+            name := JSON.JsonKey(expected, child)
+            label: Vec(u8); BuilderPrint(*label, "%.%", path, name)
+            if !Equal(actual, JSON.JsonMember(actual, node, name), expected, child, context, BuilderFinish(label)) { return false }
+            child = JSON.JsonNext(expected, child)
+        }
+    } else if kind == JSON.JsonKind.Array {
+        if JSON.JsonCount(actual, node) != JSON.JsonCount(expected, target) { print("Different array sizes at %\n", path); return false }
+        for index: 0..JSON.JsonCount(actual, node) - 1 {
+            label: Vec(u8); BuilderPrint(*label, "%[%]", path, index)
+            if !Equal(actual, JSON.JsonElement(actual, node, index), expected, JSON.JsonElement(expected, target, index), context, BuilderFinish(label)) { return false }
+        }
+    } else if kind == JSON.JsonKind.Number {
+        a, a_valid := JSON.JsonInteger(actual, node); b, b_valid := JSON.JsonInteger(expected, target)
+        if a_valid && b_valid {
+            if a != b { print("Different integer at %: % != %\n", path, a, b); return false }
+            return true
+        }
+        if JSON.JsonNumberText(actual, node) != JSON.JsonNumberText(expected, target) {
+            print("Different number at %: % != %\n", path, JSON.JsonNumberText(actual, node), JSON.JsonNumberText(expected, target)); return false
+        }
+        return true
+    } else if kind == JSON.JsonKind.String {
+        a := Replace(Replace(JSON.JsonString(actual, node), context.root, "@ROOT@"), context.package, "@PACKAGE@")
+        b := JSON.JsonString(expected, target)
+        if a != b { print("Different text at %: % != %\n", path, a, b); return false }
+    }
+    return true
+}
+
+Cases :: (lib: *Store.Library, oracle: *JSON.JsonDocument, package: string) -> bool {
+    cases := JSON.JsonMember(oracle, oracle.root, "cases")
+    index: s32
+    item := JSON.JsonFirst(oracle, cases)
+    while item >= 0 {
+        context: Context
+        context.oracle = oracle; context.case = item; context.root = lib.root; context.package = package
+        kind := Text(oracle, item, "kind")
+        context.allow = kind != "ui"
+        services: Gallery.QueryServices
+        Services(*context, *services)
+        request_node := JSON.JsonMember(oracle, item, "request")
+        request := Serialize(oracle, request_node)
+        response: string
+        if kind == "page" { response = Gallery.Page(lib, request) }
+        else if kind == "validate" {
+            response = Gallery.Validate(lib, JSON.JsonString(oracle, request_node))
+            if lib.error.count == 0 && response != JSON.JsonString(oracle, JSON.JsonMember(oracle, item, "response")) { return false }
+        } else if kind == "library" { response = Gallery.LibraryQuery(lib, request, *services) }
+        else { response = Gallery.UiQuery(lib, request, *services) }
+        error := JSON.JsonMember(oracle, item, "error")
+        if error >= 0 {
+            if !Kit.Equal(lib.error, JSON.JsonString(oracle, error), "baseline gallery error") { print("Case % (%)\n", index, kind); return false }
+        } else if lib.error.count > 0 {
+            print("Case % (%) failed: %\n", index, kind, lib.error); return false
+        } else if kind != "validate" {
+            actual: JSON.JsonDocument
+            if !JSON.JsonRead(*actual, response) || !Equal(*actual, actual.root, oracle, JSON.JsonMember(oracle, item, "response"), *context, "$result") {
+                print("Case % (%) did not match baseline\n", index, kind); return false
+            }
+        }
+        if context.invalid_album_request { return false }
+        if kind == "ui" && !Kit.Equal(BuilderFinish(context.order), "access;semantic-state;semantic-kick;people-state;people-kick;", "service state and kick order") { return false }
+        index += 1; item = JSON.JsonNext(oracle, item)
+    }
+    return true
+}
+
+Boundaries :: (lib: *Store.Library, oracle: *JSON.JsonDocument, package: string) -> bool {
+    cases := JSON.JsonMember(oracle, oracle.root, "cases")
+    ui_case: s32 = -1; large_case: s32 = -1; similar_case: s32 = -1
+    item := JSON.JsonFirst(oracle, cases)
+    while item >= 0 {
+        request := JSON.JsonMember(oracle, item, "request")
+        if ui_case < 0 && Text(oracle, item, "kind") == "ui" { ui_case = item }
+        if large_case < 0 && Text(oracle, item, "kind") == "library" && Text(oracle, request, "view") == "large" { large_case = item }
+        if similar_case < 0 && Text(oracle, item, "kind") == "page" && Text(oracle, request, "view") == "similar" { similar_case = item }
+        item = JSON.JsonNext(oracle, item)
+    }
+    context: Context
+    context.oracle = oracle; context.case = large_case; context.root = lib.root; context.package = package
+    context.allow = true; context.probe_writer = true
+    services: Gallery.QueryServices
+    Services(*context, *services)
+    for repeat: 0..2 {
+        similar_request := JSON.JsonMember(oracle, similar_case, "request")
+        similar_response := Gallery.Page(lib, Serialize(oracle, similar_request))
+        actual: JSON.JsonDocument
+        if lib.error.count > 0 || !JSON.JsonRead(*actual, similar_response) ||
+            !Equal(*actual, actual.root, oracle, JSON.JsonMember(oracle, similar_case, "response"), *context, "$repeated-similar") { return false }
+    }
+    unused Gallery.LibraryQuery(lib, "{\"view\":\"large\"}", *services)
+    if !Kit.Expect(lib.error.count == 0 && context.writer_blocked, "derived hydration reserves writer snapshot") { return false }
+    context.case = ui_case; context.probe_writer = false; context.expire = true; context.authorizations = 0
+    response := Gallery.UiQuery(lib, "{\"view\":\"hidden\",\"gallery_format\":2}", *services)
+    document: JSON.JsonDocument
+    if !JSON.JsonRead(*document, response) || lib.error.count > 0 { return false }
+    count, count_ok := JSON.JsonInteger(*document, JSON.JsonMember(*document, document.root, "count"))
+    unlocked, unlocked_ok := JSON.JsonInteger(*document, JSON.JsonMember(*document, document.root, "vault_unlocked"))
+    if !Kit.Expect(context.authorizations >= 4 && count_ok && count == 0 && unlocked_ok && unlocked == 0 &&
+        JSON.JsonCount(*document, JSON.JsonMember(*document, document.root, "photos")) == 0,
+        "expiry during provider work removes Hidden paths before publication") { return false }
+    // Exercise real C20 authorization and state. Only C26/C27 job boundaries
+    // remain fixture providers; there is no success/authentication stub here.
+    native_registry: Registry.Registry
+    if !Registry.Initialize(*native_registry,80,80) { return false }
+    defer { Registry.Close(*native_registry) }
+    native: Gallery.QueryServices
+    native.context = cast(*void)*context; native.package_root = package; native.access_registry = *native_registry
+    native.semantic_state = SemanticState; native.people_state = PeopleState
+    native.semantic_kick = SemanticKick; native.people_kick = PeopleKick
+    context.expire = false
+    native_token,native_error := Registry.Grant(lib.root,Registry.HIDDEN,"",*native_registry)
+    native_request: Vec(u8); BuilderPrint(*native_request,"{\"view\":\"hidden\",\"gallery_format\":2,\"vault_token\":%}",JSON.JsonQuote(native_token))
+    native_request_text := BuilderFinish(native_request)
+    if native_error.count > 0 { return false }
+    visible := Gallery.UiQuery(lib,native_request_text,*native)
+    if !JSON.JsonRead(*document,visible) || lib.error.count > 0 || JSON.JsonCount(*document,JSON.JsonMember(*document,document.root,"photos")) == 0 { return false }
+    context.expire_native = true
+    response = Gallery.UiQuery(lib,native_request_text,*native)
+    context.expire_native = false
+    if !JSON.JsonRead(*document,response) || lib.error.count > 0 { return false }
+    native_count,native_count_ok := JSON.JsonInteger(*document,JSON.JsonMember(*document,document.root,"count"))
+    native_unlocked,native_unlocked_ok := JSON.JsonInteger(*document,JSON.JsonMember(*document,document.root,"vault_unlocked"))
+    if !Kit.Expect(native_count_ok && native_count == 0 && native_unlocked_ok && native_unlocked == 0 &&
+        JSON.JsonCount(*document,JSON.JsonMember(*document,document.root,"photos")) == 0,"real Hidden expiry before UI serialization removes every path") { return false }
+    unused Gallery.UiQuery(lib, "{}")
+    if !Kit.Equal(lib.error, "Photos gallery services are not ready", "missing providers fail explicitly") { return false }
+    context.expire = false; context.allow = true
+    unused Gallery.LibraryQuery(lib, "{\"view\":\"semantic\",\"search\":\"beach\"}", *services)
+    if !Kit.Equal(lib.error, "Photos semantic queries are not ready", "missing semantic provider never fabricates results") { return false }
+    // An inner native page must not commit or roll back the caller's writes.
+    if SQL.SqliteExecText(lib.db, "BEGIN IMMEDIATE; INSERT INTO settings VALUES('gallery_outer_transaction','42')") != SQL.SQLITE_OK { return false }
+    unused Gallery.Page(lib, "{\"view\":\"photos\",\"sort\":\"newest\"}")
+    value, found := Store.LookupSetting(lib, "gallery_outer_transaction")
+    preserved := lib.error.count == 0 && found && value == "42"
+    if SQL.SqliteExecText(lib.db, "ROLLBACK") != SQL.SQLITE_OK { return false }
+    absent, still_found := Store.LookupSetting(lib, "gallery_outer_transaction")
+    return Kit.Expect(preserved && !still_found, "native page preserves caller-owned transaction")
+}
+
+#program_export
+main :: () -> s32 {
+    root := Kit.TempDirectory("gallery-query")
+    if root.count == 0 { return 1 }
+    defer { unused Kit.Cleanup(root) }
+    fixture, read := Files.ReadEntireFile("tests/fixtures/golden/gallery-baseline.json")
+    oracle: JSON.JsonDocument
+    if !read || !JSON.JsonRead(*oracle, fixture) { return 2 }
+    sql := JSON.JsonString(*oracle, JSON.JsonMember(*oracle, oracle.root, "sql"))
+    dump := Tree.JoinPath(root, "gallery.sql")
+    if !Files.WriteEntireFile(dump, sql) { return 3 }
+    package := Tree.WorkingDirectory()
+    for legacy: 0..1 {
+        path := Kit.Library(Tree.JoinPath(root, ifx legacy == 0 then "current" else "legacy"))
+        database: *void
+        if path.count == 0 || SQL.SqliteOpenText(Tree.JoinPath(path, "library.sqlite"), *database, SQL.SQLITE_OPEN_READWRITE | SQL.SQLITE_OPEN_CREATE) != SQL.SQLITE_OK { return 4 }
+        if !Kit.LoadSql(database, dump) { unused SQL.SqliteClose(database); return 5 }
+        if legacy == 1 && SQL.SqliteExecText(database, "ALTER TABLE photos DROP COLUMN edits") != SQL.SQLITE_OK { unused SQL.SqliteClose(database); return 6 }
+        unused SQL.SqliteClose(database)
+        file := JSON.JsonFirst(*oracle, JSON.JsonMember(*oracle, oracle.root, "files"))
+        while file >= 0 {
+            target := Tree.JoinPath(path, JSON.JsonString(*oracle, file))
+            if !Files.CreatePrivateDirectory(Tree.PathParent(target)) || !Files.WriteEntireFile(target, "synthetic-gallery-asset") { return 7 }
+            file = JSON.JsonNext(*oracle, file)
+        }
+        lib, error := Store.Open(path)
+        if lib == null || error.count > 0 { return 8 }
+        valid := Boundaries(lib, *oracle, package) && Cases(lib, *oracle, package)
+        Store.Close(lib)
+        if !valid { return 9 }
+    }
+    print("Photos gallery query: real paging, albums, access expiry and hydration match current/legacy baselines; C26/C27 job boundaries remain explicit\n")
+    return 0
+}

@@ -1,0 +1,176 @@
+Albums :: #import "library_albums";
+Store :: #import "library_store";
+LibraryFiles :: #import "library_files";
+Kit :: #import "kit";
+SQL :: #import "sqlite/SQLite";
+JSON :: #import "std/json_document";
+Tree :: #import "std/file_tree_linux";
+#import "std/text_buffer"
+#import "std/byte_text_linux"
+
+#scope_file
+Id :: "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a";
+
+OpenFixture :: (root: string) -> *Store.Library {
+    if !Tree.CreateDirectories(root, 448) { return null }
+    db: *void
+    if SQL.SqliteOpenText(Kit.Join(root, "library.sqlite"), *db, SQL.SQLITE_OPEN_READWRITE | SQL.SQLITE_OPEN_CREATE) != SQL.SQLITE_OK { return null }
+    loaded := Kit.LoadSql(db, "tests/fixtures/golden/library-v0.1.59.sql")
+    unused SQL.SqliteClose(db)
+    if !loaded { return null }
+    lib, error := Store.Open(root)
+    unused error
+    return lib
+}
+
+Count :: (document: *JSON.JsonDocument, node: s32, key: string) -> s64 {
+    number, valid := JSON.JsonInteger(document, JSON.JsonMember(document, node, key))
+    return ifx valid then number else -1
+}
+
+ArrayCount :: (lib: *Store.Library, request: string, count: s32) -> bool {
+    result: JSON.JsonDocument
+    return JSON.JsonRead(*result, Albums.AlbumList(lib, request)) && lib.error == "" &&
+        JSON.JsonKindOf(*result, result.root) == JSON.JsonKind.Array && JSON.JsonCount(*result, result.root) == count
+}
+
+ReadCases :: (lib: *Store.Library) -> bool {
+    preview := LibraryFiles.Thumbnail(lib, Id)
+    if !Tree.CreateDirectories(Tree.PathParent(preview), 448) || !Kit.Jpeg(preview, 17, 9, 0xa05030) { return false }
+    result: JSON.JsonDocument
+    raw := Albums.AlbumList(lib, "{}")
+    if !JSON.JsonRead(*result, raw) || lib.error != "" || JSON.JsonCount(*result, result.root) != 2 {
+        print("initial album list: %; error=%\n", raw, lib.error)
+        return false
+    }
+    first := JSON.JsonElement(*result, result.root, 0)
+    if JSON.JsonString(*result, JSON.JsonMember(*result, first, "name")) != "Fixture album" ||
+        Count(*result, first, "count") != 1 || Count(*result, first, "smart") != 1 || Count(*result, first, "place") != 0 ||
+        JSON.JsonString(*result, JSON.JsonMember(*result, first, "thumbnail")) != preview ||
+        JSON.JsonMember(*result, first, "record") >= 0 || JSON.JsonMember(*result, first, "entity") >= 0 {
+        print("initial album projection: %\n", raw)
+        return false
+    }
+    detail, error := Albums.AlbumDetails(lib, "Fixture album")
+    details: JSON.JsonDocument
+    if error != "" || !JSON.JsonRead(*details, detail) ||
+        JSON.JsonString(*details, JSON.JsonMember(*details, details.root, "description")) != "Synthetic preserved description" ||
+        JSON.JsonMember(*details, details.root, "record") >= 0 { return false }
+    missing, missingError := Albums.AlbumDetails(lib, "absent' OR 1=1 --")
+    if missing != "" || missingError != "Album not found" { return false }
+    if !ArrayCount(lib, "{\"album_mode\":\"all\",\"search\":\"fixture\"}", 1) ||
+        !ArrayCount(lib, "{\"album_mode\":\"empty\"}", 0) ||
+        !ArrayCount(lib, "{\"album_mode\":\"archived\"}", 0) { return false }
+    if SQL.SqliteExecText(lib.db, "UPDATE photos SET hidden=1") != SQL.SQLITE_OK { return false }
+    if !ArrayCount(lib, "{\"album_mode\":\"empty\"}", 2) { return false }
+    if SQL.SqliteExecText(lib.db, "UPDATE photos SET hidden=0; UPDATE albums SET archived=1 WHERE name='Fixture album'") != SQL.SQLITE_OK { return false }
+    if !ArrayCount(lib, "{}", 1) || !ArrayCount(lib, "{\"album_mode\":\"archived\"}", 1) { return false }
+    if SQL.SqliteExecText(lib.db, "UPDATE albums SET archived=0") != SQL.SQLITE_OK { return false }
+    return true
+}
+
+UnicodeCases :: (lib: *Store.Library) -> bool {
+    if Albums.AlbumName("  旅行　") != "旅行" || Albums.AlbumName("bad\nname") != "" { return false }
+    if !Store.EnsureAlbum(lib, "Straße", 0) || !Store.EnsureAlbum(lib, "STRASSE", 0) ||
+        !Store.EnsureAlbum(lib, "ΟΣ", 0) { return false }
+    if !ArrayCount(lib, "{\"search\":\"strasse\"}", 2) || !ArrayCount(lib, "{\"search\":\"ος\"}", 1) { return false }
+    if !ArrayCount(lib, "{\"search\":\"\\u0000\"}", 0) { return false }
+    // Created ordering is distinct from name ordering and retains pinned first.
+    if SQL.SqliteExecText(lib.db, "UPDATE albums SET created=10 WHERE name='Straße'; UPDATE albums SET created=20 WHERE name='STRASSE'") != SQL.SQLITE_OK { return false }
+    newest: JSON.JsonDocument
+    if !JSON.JsonRead(*newest, Albums.AlbumList(lib, "{\"search\":\"strasse\",\"album_sort\":\"newest\"}")) { return false }
+    first := JSON.JsonElement(*newest, newest.root, 0)
+    if JSON.JsonString(*newest, JSON.JsonMember(*newest, first, "name")) != "STRASSE" { return false }
+    oldest: JSON.JsonDocument
+    if !JSON.JsonRead(*oldest, Albums.AlbumList(lib, "{\"search\":\"strasse\",\"album_sort\":\"oldest\"}")) { return false }
+    first = JSON.JsonElement(*oldest, oldest.root, 0)
+    return JSON.JsonString(*oldest, JSON.JsonMember(*oldest, first, "name")) == "Straße"
+}
+
+SmartCases :: (lib: *Store.Library) -> bool {
+    if SQL.SqliteExecText(lib.db, "UPDATE albums SET filter='is:favorite' WHERE name='Fixture album'") != SQL.SQLITE_OK { return false }
+    result: JSON.JsonDocument
+    if !JSON.JsonRead(*result, Albums.AlbumList(lib, "{\"search\":\"Fixture\"}")) || lib.error != "" { return false }
+    first := JSON.JsonElement(*result, result.root, 0)
+    if Count(*result, first, "count") != 1 || Count(*result, first, "smart") != 1 { return false }
+    // A saved filter never grants access to its hidden matching photo.
+    if SQL.SqliteExecText(lib.db, "UPDATE photos SET hidden=1") != SQL.SQLITE_OK { return false }
+    private: JSON.JsonDocument
+    if !JSON.JsonRead(*private, Albums.AlbumList(lib, "{\"search\":\"Fixture\"}")) || lib.error != "" { return false }
+    first = JSON.JsonElement(*private, private.root, 0)
+    if Count(*private, first, "count") != 0 ||
+        JSON.JsonString(*private, JSON.JsonMember(*private, first, "thumbnail")) != "" { return false }
+    if SQL.SqliteExecText(lib.db, "UPDATE photos SET hidden=0") != SQL.SQLITE_OK { return false }
+    if SQL.SqliteExecText(lib.db, "UPDATE albums SET filter='near:1,2,3' WHERE name='Fixture album'") != SQL.SQLITE_OK { return false }
+    if !ArrayCount(lib, "{\"album_mode\":\"places\"}", 1) { return false }
+    if SQL.SqliteExecText(lib.db, "UPDATE albums SET filter='near:1.0,2,3' WHERE name='Fixture album'") != SQL.SQLITE_OK { return false }
+    if !ArrayCount(lib, "{\"album_mode\":\"places\"}", 0) { return false }
+    if SQL.SqliteExecText(lib.db, "UPDATE albums SET filter='near:bad' WHERE name='Fixture album'") != SQL.SQLITE_OK { return false }
+    invalid := Albums.AlbumList(lib, "{}")
+    if invalid != "[]" || lib.error == "" { return false }
+    if SQL.SqliteExecText(lib.db, "BEGIN") != SQL.SQLITE_OK { return false }
+    unused SQL.SqliteExecText(lib.db, "ROLLBACK")
+    if SQL.SqliteExecText(lib.db, "UPDATE albums SET filter='' WHERE name='Fixture album'; BEGIN; INSERT INTO settings VALUES('outer_album_test','true')") != SQL.SQLITE_OK { return false }
+    if !ArrayCount(lib, "{}", 5) { unused SQL.SqliteExecText(lib.db, "ROLLBACK"); return false }
+    unused SQL.SqliteExecText(lib.db, "ROLLBACK")
+    return Store.Setting(lib, "outer_album_test") == ""
+}
+
+EditCases :: (lib: *Store.Library) -> bool {
+    created, error := Albums.EditAlbum(lib, "ignored", "create", "  新しい album　")
+    if error != "" || created != "新しい album" { return false }
+    original, originalError := Albums.AlbumDetails(lib, created)
+    definition: JSON.JsonDocument
+    if originalError != "" || !JSON.JsonRead(*definition, original) { return false }
+    identity := JSON.JsonString(*definition, JSON.JsonMember(*definition, definition.root, "id"))
+    if Albums.RenameAlbum(lib, created, "Changed") != "" { return false }
+    renamed, renamedError := Albums.AlbumDetails(lib, "Changed")
+    saved: JSON.JsonDocument
+    if renamedError != "" || !JSON.JsonRead(*saved, renamed) ||
+        JSON.JsonString(*saved, JSON.JsonMember(*saved, saved.root, "id")) != identity { return false }
+    selected, descriptionError := Albums.EditAlbum(lib, "Changed", "description", "Quoted \"日本語\"\ntext")
+    if selected != "Changed" || descriptionError != "" { return false }
+    selected, descriptionError = Albums.EditAlbum(lib, "Changed", "pinned")
+    if descriptionError != "" { return false }
+    detail, detailError := Albums.AlbumDetails(lib, "Changed")
+    if detailError != "" || !JSON.JsonRead(*saved, detail) || Count(*saved, saved.root, "pinned") != 1 ||
+        JSON.JsonString(*saved, JSON.JsonMember(*saved, saved.root, "description")) != "Quoted \"日本語\"\ntext" { return false }
+    smart, smartError := Albums.EditAlbum(lib, "", "smart_create", "Smart edit", "  is:favorite  ")
+    if smartError != "" || smart != "Smart edit" { return false }
+    detail, detailError = Albums.AlbumDetails(lib, smart)
+    if detailError != "" || !JSON.JsonRead(*saved, detail) ||
+        JSON.JsonString(*saved, JSON.JsonMember(*saved, saved.root, "filter")) != "is:favorite" { return false }
+    unusedValue, invalidError := Albums.EditAlbum(lib, "", "smart_create", "Invalid rule", "near:bad")
+    unused unusedValue
+    missing, missingError := Albums.AlbumDetails(lib, "Invalid rule")
+    if invalidError == "" || missing != "" || missingError != "Album not found" { return false }
+    if SQL.SqliteExecText(lib.db, "BEGIN; INSERT INTO settings VALUES('edit_outer','true')") != SQL.SQLITE_OK { return false }
+    selected, error = Albums.EditAlbum(lib, "Changed", "pinned")
+    if error != "Finish the current library operation before editing albums" || SQL.SqliteGetAutocommit(lib.db) { return false }
+    unused SQL.SqliteExecText(lib.db, "ROLLBACK")
+    if Store.Setting(lib, "edit_outer") != "" { return false }
+    // A failed write rolls back its own snapshot and leaves the catalog usable.
+    if SQL.SqliteExecText(lib.db, "CREATE TRIGGER deny_album BEFORE UPDATE ON albums BEGIN SELECT RAISE(ABORT,'fixture denial'); END") != SQL.SQLITE_OK { return false }
+    selected, error = Albums.EditAlbum(lib, "Changed", "description", "must rollback")
+    if error == "" || !SQL.SqliteGetAutocommit(lib.db) { return false }
+    unused SQL.SqliteExecText(lib.db, "DROP TRIGGER deny_album")
+    detail, detailError = Albums.AlbumDetails(lib, "Changed")
+    return detailError == "" && JSON.JsonRead(*saved, detail) &&
+        JSON.JsonString(*saved, JSON.JsonMember(*saved, saved.root, "description")) == "Quoted \"日本語\"\ntext"
+}
+
+#program_export
+main :: () -> s32 {
+    root := Kit.TempDirectory("library-albums")
+    if root == "" { return 1 }
+    defer { unused Kit.Cleanup(root) }
+    lib := OpenFixture(root)
+    if lib == null { return 2 }
+    defer { Store.Close(lib) }
+    if !Kit.Expect(ReadCases(lib), "album fields, stable pinned ordering, thumbnails and privacy modes") { return 3 }
+    if !Kit.Expect(UnicodeCases(lib), "Unicode casefold search, names and created ordering") { return 4 }
+    if !Kit.Expect(SmartCases(lib), "in-process smart/place counts, malformed filters and outer transaction preservation") { return 5 }
+    if !Kit.Expect(EditCases(lib), "shared album writer, stable identity, normalized search and transaction rollback") { return 6 }
+    print("Photos album catalog: fields/privacy/order/Unicode/smart/place and transaction cases passed\n")
+    return 0
+}

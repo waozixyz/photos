@@ -1,0 +1,118 @@
+// Synthetic backup fixtures. Production owns every crypto/staging operation.
+Stage :: #import "backup_staging";
+Wire :: #import "sync_crypto";
+Native :: #import "daochi_client/crypto_native";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+JSON :: #import "std/json_document";
+#import "std/byte_text_linux"
+#import "std/c_string"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+c :: #system_library "c";
+Release :: (data: *void) #foreign c "free";
+sodium :: #system_library "sodium";
+DecodeRaw :: (out: *u8,capacity: usize,text: *u8,length: usize,ignore: *u8,count: *usize,end: **u8,variant: s32) -> s32 #foreign sodium "sodium_base642bin";
+LinkRaw :: (target: *u8,path: *u8) -> s32 #foreign c "symlink";
+Link :: (target: string,path: string) -> bool {
+    first: [4096]u8; second: [4096]u8
+    return CopyCString(target,first[:]) && CopyCString(path,second[:]) && LinkRaw(*first[0],*second[0])==0
+}
+
+Bytes :: (text: string) -> []u8 {
+    descriptor:=cast(*TextDescriptor)*text
+    return BytesFromPointer(descriptor.data,cast(u64)text.count)
+}
+Text :: (bytes: *Vec(u8)) -> string { return TextFromBytes(Wire.OutputBytes(bytes)) }
+Equal :: (a: []u8,b: []u8) -> bool {
+    if a.count!=b.count { return false }
+    for index: 0..a.count-1 { if a[index]!=b[index] { return false } }
+    return true
+}
+Hex :: (bytes: []u8,out: *Vec(u8)) -> bool {
+    if !Wire.PrepareOutput(out,bytes.count*2) { return false }
+    digits:="0123456789abcdef"; result:=Wire.OutputBytes(out)
+    for index: 0..bytes.count-1 { result[index*2]=digits[bytes[index]>>4]; result[index*2+1]=digits[bytes[index]&15] }
+    return true
+}
+Hash :: (bytes: []u8,out: *Vec(u8)) -> bool {
+    digest: [32]u8; defer { Native.Clear(digest[:]) }
+    return Native.Digest(bytes,digest[:]) && Hex(digest[:],out)
+}
+Decode :: (text: string,out: *Vec(u8)) -> bool {
+    count:=text.count
+    while count>0 && text[count-1]==61 { count-=1 }
+    if !Wire.PrepareOutput(out,(count/4+1)*3) { return false }
+    input:=Bytes(text[:count]); output:=Wire.OutputBytes(out); length: usize; end: *u8
+    if DecodeRaw(*output[0],cast(usize)output.count,ifx count>0 then *input[0] else null,cast(usize)count,null,*length,*end,7)!=0 { return false }
+    return VecResize(<<out,cast(s64)length)
+}
+Erase :: (context: *void,bytes: []u8) { unused context; Native.Clear(bytes) }
+HashFile :: (path: string,out: *Vec(u8)) -> bool {
+    file:=Files.OpenRead(path)
+    if !file.valid { return false }; defer { unused Files.CloseFile(file) }
+    state: Vec(u8); defer { Wire.ClearOutput(*state) }
+    if !Wire.PrepareOutput(*state,cast(s64)Native.DigestStateBytes()) || !Native.DigestStart(Wire.OutputBytes(*state)) { return false }
+    buffer: [65536]u8; digest: [32]u8; offset: s64
+    defer { Native.Clear(buffer[:]); Native.Clear(digest[:]) }
+    while true {
+        count:=Files.ReadAt(file,buffer[:],offset)
+        if count<0 { return false }; if count==0 { break }
+        if !Native.DigestUpdate(Wire.OutputBytes(*state),buffer[:count]) { return false }; offset+=count
+    }
+    return Native.DigestFinish(Wire.OutputBytes(*state),digest[:]) && Hex(digest[:],out)
+}
+Field :: (document: *JSON.JsonDocument,node: s32,name: string,out: *Vec(u8)) -> bool {
+    Wire.ClearOutput(out)
+    return JSON.JsonStringInto(document,JSON.JsonMember(document,node,name),out)
+}
+Integer :: (document: *JSON.JsonDocument,node: s32,name: string) -> s64 {
+    value,valid:=JSON.JsonInteger(document,JSON.JsonMember(document,node,name))
+    return ifx valid then value else -1
+}
+Manifest :: struct { text: string }
+// Stage returns one detached, owned manifest. This typed wrapper releases
+// only that exact production result, never an arbitrary or borrowed string.
+Close :: (manifest: *Manifest) {
+    if manifest==null { return }
+    if manifest.text.count>0 {
+        descriptor:=cast(*TextDescriptor)*manifest.text
+        Native.Clear(Bytes(manifest.text)); Release(cast(*void)descriptor.data)
+    }
+    manifest.text=""
+}
+Prepare :: (fd: s32,size: s64,root: string,account: []u8,key: []u8) -> Manifest {
+    return PrepareWithCallback(fd,size,root,account,key,null,Always)
+}
+Always :: (context: *void) -> bool { unused context; return true }
+PrepareWithCallback :: (fd: s32,size: s64,root: string,account: []u8,key: []u8,context: *void,current: Stage.Current) -> Manifest {
+    result: Manifest; result.text=Stage.Stage(fd,size,root,account,key,context,current)
+    return result
+}
+Directory :: (root: string) -> string {
+    if !Tree.CreateDirectories(root,448) { return "" }
+    return Tree.ResolvePath(root)
+}
+Count :: (root: string) -> s64 {
+    cursor:=Files.OpenDirectory(root)
+    if !cursor.valid { return -1 }; defer { unused Files.CloseDirectory(*cursor) }
+    count: s64
+    while true {
+        entry:=Files.NextDirectoryEntry(*cursor)
+        if !entry.valid { break }
+        name:=TextUntilNul(entry.name[:])
+        if name!="." && name!=".." { count+=1 }
+    }
+    return ifx cursor.failed then -1 else count
+}
+Permission :: struct { calls: s32; limit: s32; cancel: bool; change: string }
+Current :: (context: *void) -> bool {
+    permission:=cast(*Permission)context; permission.calls+=1
+    if permission.change!="" && permission.calls==3 {
+        file:=Files.OpenUpdate(permission.change)
+        if !file.valid { return false }; defer { unused Files.CloseFile(file) }
+        byte: [1]u8=.{255}
+        if Files.WriteAt(file,byte[:],0)!=1 || !Files.SyncFile(file) { return false }
+    }
+    return !permission.cancel || permission.calls<permission.limit
+}

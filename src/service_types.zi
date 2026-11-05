@@ -1,0 +1,18 @@
+// Persisted configuration names match the existing Photos config.json.
+using Vectors :: #import "std/vec";
+
+NodePin :: struct {
+    origin: string
+    id: string
+}
+
+Config :: struct {
+    root: string
+    sources: Vec(string)
+    node: NodePin
+    legacy_node: NodePin
+    account_database: string
+    retire_legacy_chunks: bool
+    // Retain unknown fields when configuration is rewritten by later ports.
+    raw: string
+}

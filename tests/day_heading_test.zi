@@ -1,0 +1,78 @@
+Headings :: #import "day_heading";
+Kit :: #import "kit";
+Files :: #import "std/file";
+#import "std/json_scan"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+Heading :: (day: s32, today: s32, locale: string, expected: string) -> bool {
+    actual := Headings.DayHeading(day, today, locale)
+    valid := Kit.Equal(actual, expected, "localized civil-day heading")
+    Headings.Release(actual)
+    return valid
+}
+
+CatalogField :: (json: string, key: string, expected: string) -> bool {
+    value: [256]u8
+    unused ReadStringText(json, FieldAt(json, 0, key), value[:])
+    return Kit.Equal(TextUntilNul(value[:]), expected, key)
+}
+
+Catalogs :: () -> bool {
+    codes: [12]string = .["en", "es", "cs", "de", "fr", "id", "it", "pt", "ru", "ja", "ko", "zh"]
+    for code: codes {
+        path: Vec(u8); BuilderPrint(*path, "assets/locales/%.json", code)
+        text, read := Files.ReadEntireFile(BuilderFinish(path))
+        if !Kit.Expect(read && ValueEnd(text, 0, 0) > 0, "shipped locale JSON is readable") { return false }
+        data := Headings.LocaleData(code)
+        if !CatalogField(text, "photos_today", data.today) ||
+            !CatalogField(text, "photos_yesterday", data.yesterday) ||
+            !CatalogField(text, "photos_date", data.template) { return false }
+        if !Heading(20260301, 20260301, code, data.today) ||
+            !Heading(20260228, 20260301, code, data.yesterday) { return false }
+        for month: 1..12 {
+            key: Vec(u8); BuilderPrint(*key, "photos_month_%", month)
+            if !CatalogField(text, BuilderFinish(key), data.months[month - 1]) { return false }
+        }
+    }
+    return true
+}
+
+#program_export
+main :: () -> s32 {
+    if !Heading(20261017, 20261017, "en", "Today") ||
+        !Heading(20261016, 20261017, "en", "Yesterday") ||
+        !Heading(20261015, 20261017, "en", "October 15, 2026") { return 1 }
+    if !Heading(20260309, 20260310, "de", "Gestern") ||
+        !Heading(20260307, 20260310, "de_DE.UTF-8", "7. März 2026") ||
+        !Heading(20260307, 20260310, "ja-JP", "2026年3月7日") ||
+        !Heading(20260307, 20260310, "ru_RU", "07.03.2026") { return 2 }
+    // Yesterday crosses months, leap days, centuries and years as civil dates.
+    if !Heading(20240229, 20240301, "ja", "昨日") ||
+        !Heading(20240228, 20240229, "de", "Gestern") ||
+        !Heading(20260228, 20260301, "ru", "Вчера") ||
+        !Heading(19000228, 19000301, "en", "Yesterday") ||
+        !Heading(20000229, 20000301, "en", "Yesterday") ||
+        !Heading(20251231, 20260101, "de", "Gestern") ||
+        !Heading(10101, 10102, "en", "Yesterday") { return 3 }
+    if Headings.DayBefore(10101) != 0 || Headings.DayBefore(20260101) != 20251231 ||
+        Headings.DayBefore(20000301) != 20000229 || Headings.DayBefore(19000301) != 19000228 { return 4 }
+    // Unknown today must not produce a relative label; small years keep four digits.
+    if !Heading(10101, 0, "en", "January 1, 0001") ||
+        !Heading(99991231, 0, "ja", "9999年12月31日") ||
+        !Heading(20240229, 20260229, "ru", "29.02.2024") ||
+        !Heading(20260307, 0, "xx", "March 7, 2026") ||
+        !Heading(20260310, 20260310, "DE-de", "Heute") { return 5 }
+    invalid: [10]s32 = .[0, -1, 10000, 20260001, 20261301, 20260229, 19000229, 20260431, 20260100, 100000101]
+    for day: invalid {
+        if !Heading(day, day, "de", "") || Headings.DayBefore(day) != 0 { return 6 }
+    }
+    if Headings.DayNumber("2024-02-29") != 20240229 ||
+        Headings.DayNumber("0001-01-01") != 10101 ||
+        Headings.DayNumber("9999-12-31") != 99991231 { return 7 }
+    bad: [10]string = .["", "2026-2-03", "20260203", "2026/02/03", "202x-02-03", "2026-02-29", "1900-02-29", "2026-04-31", "0000-01-01", "2026-01-01T12:00:00Z"]
+    for day: bad { if Headings.DayNumber(day) != 0 { return 8 } }
+    if !Catalogs() { return 9 }
+    print("Photos day headings: 12 locale catalogs, relative/calendar dates, leap/year boundaries and invalid input passed\n")
+    return 0
+}

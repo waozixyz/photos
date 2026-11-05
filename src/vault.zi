@@ -1,0 +1,253 @@
+// Local Hidden access. Passwords and tokens are never process arguments.
+Store :: #import "library_store";
+LibraryFiles :: #import "library_files";
+Access :: #import "access_registry";
+Auth :: #import "vault_auth";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+JSON :: #import "std/json_document";
+UTF8 :: #import "std/utf8";
+Mutex :: #import "std/mutex_linux";
+#import "std/byte_text_linux"
+#import "std/c_string"
+using Vectors :: #import "std/vec";
+
+#scope_file
+c :: #system_library "c";
+Flock :: (fd: s32, operation: s32) -> s32 #foreign c "flock";
+Fchmod :: (fd: s32, mode: u32) -> s32 #foreign c "fchmod";
+OpenRaw :: (path: *u8, flags: s32, mode: s32) -> s32 #foreign c "open";
+Initializer :: #type () #c_call;
+Once :: (control: *s32, initialize: Initializer) -> s32 #foreign c "pthread_once";
+once: s32;
+guard: Mutex.Mutex;
+ready: bool;
+Initialize :: () { ready = Mutex.Open(*guard) }
+Enter :: () -> bool { callback: Initializer = Initialize; return Once(*once,callback) == 0 && ready && Mutex.Lock(*guard) }
+Leave :: () { unused Mutex.Unlock(*guard) }
+
+#scope_export
+Path :: (lib: *Store.Library) -> string { return Tree.JoinPath(lib.root,"private/hidden-password.json") }
+Configured :: (lib: *Store.Library) -> bool {
+    if lib == null { return false }
+    path := Path(lib); defer { Auth.ReleaseOwned(path,false) }
+    return Tree.IsFile(path)
+}
+PasswordError :: (password: []u8, pin: bool = false) -> string {
+    if pin { return ifx Auth.Valid(password,true) then "" else "Use an app PIN of 4 through 12 digits" }
+    if password.count > 1024 { return "Use at least 8 characters and a password under 1024 bytes" }
+    text := TextFromBytes(password); at: s32; count: s32
+    while at < text.count {
+        point := UTF8.Decode(text,at)
+        if !point.valid || point.value == 0 { return "Use at least 8 characters and a password under 1024 bytes" }
+        at = point.after; count += 1
+    }
+    return ifx count >= 8 then "" else "Use at least 8 characters and a password under 1024 bytes"
+}
+VerifierValid :: (verifier: string) -> bool {
+    if verifier.count < 10 || verifier.count >= 128 || verifier[0:10] != "$argon2id$" { return false }
+    for byte: verifier { if byte > 127 { return false } }
+    return true
+}
+HashPassword :: (password: []u8, pin: bool = false) -> string,string {
+    error := PasswordError(password,pin)
+    if error.count > 0 { return "",error }
+    verifier,code := Auth.NativeHash(password,pin)
+    if code != 0 || !VerifierValid(verifier) { Auth.ReleaseOwned(verifier); return "","Hidden authentication could not finish" }
+    return verifier,""
+}
+HashPasswordInto :: (password: []u8, out: *Vec(u8), pin: bool = false) -> string {
+    Auth.WipeOwned(out)
+    error := PasswordError(password,pin)
+    if error.count > 0 { return error }
+    if Auth.NativeHashInto(password,out,pin) != 0 { return "Hidden authentication could not finish" }
+    verifier := TextFromBytes(BytesFromPointer(*(<<out)[0],cast(u64)out.count))
+    if !VerifierValid(verifier) { Auth.WipeOwned(out); return "Hidden authentication could not finish" }
+    return ""
+}
+// NOFOLLOW + a descriptor kind check prevent replacing the lock with a link
+// or FIFO. The descriptor remains owned until UnlockCredential.
+LockCredential :: (path: string, wait: bool = true) -> s32 {
+    name: [4096]u8
+    if !CopyCString(path,name[:]) { return -1 }
+    fd := OpenRaw(*name[0],2|64|131072|2048|524288,384)
+    if fd < 0 { return -1 }
+    handle: Files.FileHandle; handle.fd = fd; handle.valid = true
+    link: Vec(u8); BuilderPrint(*link,"/proc/self/fd/%",fd)
+    if Tree.PathStatus(TextView(VecSlice(link,0,link.count))).kind != Tree.PathKind.File || Fchmod(fd,384) != 0 || Flock(fd,ifx wait then 2 else 6) != 0 {
+        unused Files.CloseFile(handle); return -1
+    }
+    return fd
+}
+UnlockCredential :: (fd: s32) {
+    if fd >= 0 { handle: Files.FileHandle; handle.fd = fd; handle.valid = true; unused Files.CloseFile(handle) }
+}
+// Read using the descriptor and reject size changes/truncated reads. App lock
+// bounds its marker at 1024 bytes; Hidden preserves its existing JSON format.
+ReadMarker :: (path: string, maximum: s64 = 1024, no_link: bool = true) -> string,bool {
+    bytes: Vec(u8)
+    if !ReadMarkerInto(path,*bytes,maximum,no_link) { return "",false }
+    return BuilderFinish(bytes),true
+}
+ReadMarkerInto :: (path: string, bytes: *Vec(u8), maximum: s64 = 1024, no_link: bool = true) -> bool {
+    Auth.WipeOwned(bytes)
+    name: [4096]u8
+    if !CopyCString(path,name[:]) { return false }
+    file: Files.FileHandle
+    file.fd = OpenRaw(*name[0],2048|524288|(ifx no_link then 131072 else 0),0)
+    file.valid = file.fd >= 0
+    if !file.valid { return false }
+    defer { unused Files.CloseFile(file) }
+    descriptor_path: Vec(u8); BuilderPrint(*descriptor_path,"/proc/self/fd/%",file.fd)
+    if Tree.PathStatus(TextView(VecSlice(descriptor_path,0,descriptor_path.count))).kind != Tree.PathKind.File { return false }
+    size := Files.FileSize(file)
+    if size < 0 || size > maximum || !VecResize(<<bytes,size) { return false }
+    if size > 0 && Files.ReadAt(file,BytesFromPointer(*(<<bytes)[0],cast(u64)size),0) != size { Auth.WipeOwned(bytes); return false }
+    extra: [1]u8
+    if Files.ReadAt(file,extra[:],size) != 0 { Auth.WipeOwned(bytes); return false }
+    return true
+}
+Unlocked :: (lib: *Store.Library, token: string, registry: *Access.Registry = null) -> bool {
+    if lib == null || !Enter() { return false }
+    defer { Leave() }
+    return Access.Deadline(lib.root,Access.HIDDEN,token,"",false,registry) > 0
+}
+Deadline :: (lib: *Store.Library, token: string, registry: *Access.Registry = null) -> s64 {
+    if lib == null || !Enter() { return 0 }
+    defer { Leave() }
+    return Access.Deadline(lib.root,Access.HIDDEN,token,"",false,registry)
+}
+Lock :: (lib: *Store.Library, token: string, registry: *Access.Registry = null) {
+    if lib == null || !Enter() { return }
+    defer { Leave() }
+    Access.Lock(lib.root,Access.HIDDEN,token,registry)
+}
+RevokeAll :: (lib: *Store.Library, registry: *Access.Registry = null) {
+    if lib == null || !Enter() { return }
+    defer { Leave() }
+    Access.Revoke(lib.root,Access.HIDDEN,registry)
+}
+State :: (lib: *Store.Library, token: string = "", registry: *Access.Registry = null) -> string {
+    out: Vec(u8); BuilderPrint(*out,"{\"vault_configured\":%,\"vault_unlocked\":%}",
+        ifx Configured(lib) then 1 else 0,ifx Unlocked(lib,token,registry) then 1 else 0)
+    return BuilderFinish(out)
+}
+// A writer keeps this lease until its transaction commits or rolls back.
+// Hidden locks and credential replacement share the guard; deadline checks
+// during the transaction still stop a naturally expiring lease.
+Authorization :: struct { held: bool; until: s64; error: string }
+BeginAuthorization :: (lib: *Store.Library, token: string, hidden: bool, registry: *Access.Registry = null) -> Authorization {
+    result: Authorization
+    if !Enter() { result.error = "Photos access sessions are unavailable; unlock again when the service returns"; return result }
+    result.held = true
+    if hidden {
+        if lib != null { result.until = Access.Deadline(lib.root,Access.HIDDEN,token,"",false,registry) }
+        if result.until == 0 { result.error = "Unlock Hidden before changing these photos" }
+    }
+    return result
+}
+EndAuthorization :: (authorization: *Authorization) {
+    if authorization.held { authorization.held = false; Leave() }
+}
+VaultAuthenticate :: (lib: *Store.Library, password: []u8, setup: bool = false, registry: *Access.Registry = null) -> string,string {
+    error := PasswordError(password)
+    if error.count > 0 { return "",error }
+    if lib == null { return "","Photo library is not open" }
+    private := Tree.JoinPath(lib.root,"private")
+    defer { Auth.ReleaseOwned(private,false) }
+    if !Tree.CreateDirectories(private,448) { return "","Local password settings cannot be replaced safely" }
+    lock := Tree.JoinPath(private,".hidden-password.lock"); defer { Auth.ReleaseOwned(lock,false) }
+    fd := LockCredential(lock)
+    if fd < 0 { return "","Local password settings cannot be replaced safely" }
+    defer { UnlockCredential(fd) }
+    error = Access.CheckAttempts(lib.root,Access.HIDDEN,registry)
+    if error.count > 0 { return "",error }
+    path := Path(lib); defer { Auth.ReleaseOwned(path,false) }
+    if setup && Files.PathExists(path) { return "","Hidden already has a password; unlock with the existing password" }
+    if !setup && !Configured(lib) { return "","Create a Hidden password first" }
+    verifier_bytes: Vec(u8); defer { Auth.WipeOwned(*verifier_bytes) }
+    code: s32
+    if setup { code = Auth.NativeHashInto(password,*verifier_bytes) }
+    else {
+        raw: Vec(u8); defer { Auth.WipeOwned(*raw) }
+        document: JSON.JsonDocument; defer { JSON.JsonReset(*document) }; JSON.JsonSetEraser(*document,Auth.JsonErase)
+        if !ReadMarkerInto(path,*raw,1048576,false) ||
+            !JSON.JsonRead(*document,TextView(VecSlice(raw,0,raw.count)),Auth.JsonErase) ||
+            !JSON.JsonStringInto(*document,JSON.JsonMember(*document,document.root,"verifier"),*verifier_bytes) {
+            return "","Hidden password settings need recovery; your originals and backup keys remain intact"
+        }
+        if !VerifierValid(TextView(VecSlice(verifier_bytes,0,verifier_bytes.count))) { return "","Hidden password settings need recovery; your originals and backup keys remain intact" }
+        code = Auth.NativeVerify(password,TextView(VecSlice(verifier_bytes,0,verifier_bytes.count)))
+    }
+    verifier := TextView(VecSlice(verifier_bytes,0,verifier_bytes.count))
+    if code != 0 || (setup && !VerifierValid(verifier)) {
+        attempt_error := Access.FailedAttempt(lib.root,Access.HIDDEN,registry)
+        if attempt_error.count > 0 { return "",attempt_error }
+        return "",ifx !setup && code == 1 then "Incorrect password" else "Hidden authentication could not finish"
+    }
+    if setup && !WriteVerifier(lib,verifier) { return "","Local password settings cannot be replaced safely" }
+    if !Enter() { return "","Photos access sessions are unavailable; unlock again when the service returns" }
+    defer { Leave() }
+    error = Access.ClearAttempts(lib.root,Access.HIDDEN,registry)
+    if error.count > 0 { return "",error }
+    token,grant_error := Access.Grant(lib.root,Access.HIDDEN,"",registry)
+    return token,grant_error
+}
+
+#scope_file
+WriteVerifier :: (lib: *Store.Library, verifier: string) -> bool {
+    out: Vec(u8); defer { Auth.WipeOwned(*out) }
+    if !VecReserve(out,256) { return false }
+    BuilderPrint(*out,"{\"verifier\":")
+    if !JSON.JsonQuoteInto(*out,verifier,false) { return false }
+    BuilderPrint(*out,"}")
+    path := Path(lib); defer { Auth.ReleaseOwned(path,false) }
+    return LibraryFiles.Atomic(path,VecSlice(out,0,out.count))
+}
+
+#scope_export
+ChangePassword :: (lib: *Store.Library, token: string, password: []u8, registry: *Access.Registry = null) -> string {
+    error := PasswordError(password)
+    if error.count > 0 { return error }
+    if !Configured(lib) || !Unlocked(lib,token,registry) { return "Unlock Hidden before changing its password" }
+    lock := Tree.JoinPath(lib.root,"private/.hidden-password.lock"); defer { Auth.ReleaseOwned(lock,false) }
+    fd := LockCredential(lock)
+    if fd < 0 { return "Local password settings cannot be replaced safely" }
+    defer { UnlockCredential(fd) }
+    verifier: Vec(u8); defer { Auth.WipeOwned(*verifier) }
+    hash_error := HashPasswordInto(password,*verifier)
+    if hash_error.count > 0 { return hash_error }
+    if !Enter() { return "Photos access sessions are unavailable; unlock again when the service returns" }
+    defer { Leave() }
+    if Access.Deadline(lib.root,Access.HIDDEN,token,"",false,registry) == 0 { return "Unlock Hidden before changing its password" }
+    if !WriteVerifier(lib,TextView(VecSlice(verifier,0,verifier.count))) { return "Local password settings cannot be replaced safely" }
+    Access.Revoke(lib.root,Access.HIDDEN,registry)
+    return Access.ClearAttempts(lib.root,Access.HIDDEN,registry)
+}
+Protected :: (lib: *Store.Library, request: string, registry: *Access.Registry = null) -> bool,string {
+    input: JSON.JsonDocument; defer { JSON.JsonReset(*input) }; JSON.JsonSetEraser(*input,Auth.JsonErase)
+    if !JSON.JsonRead(*input,request,Auth.JsonErase) || JSON.JsonKindOf(*input,input.root) != JSON.JsonKind.Object { return false,"Choose a valid Photos request" }
+    token := JSON.JsonString(*input,JSON.JsonMember(*input,input.root,"vault_token"))
+    defer { Auth.ReleaseOwned(token) }
+    if Unlocked(lib,token,registry) { return false,"" }
+    ids := JSON.JsonMember(*input,input.root,"ids")
+    if ids < 0 || JSON.JsonKindOf(*input,ids) == JSON.JsonKind.Null {
+        id := JSON.JsonString(*input,JSON.JsonMember(*input,input.root,"id"))
+        defer { Auth.ReleaseOwned(id,false) }
+        if id.count == 0 { return false,"" }
+        row,error := LibraryFiles.Photo(lib,id)
+        defer { LibraryFiles.ClearPhoto(*row) }
+        return row.hidden,error
+    }
+    if JSON.JsonKindOf(*input,ids) != JSON.JsonKind.Array || JSON.JsonCount(*input,ids) > 1000 { return false,"Select at most 1000 photos" }
+    id := JSON.JsonFirst(*input,ids)
+    while id >= 0 {
+        identity := JSON.JsonString(*input,id); defer { Auth.ReleaseOwned(identity,false) }
+        row,error := LibraryFiles.Photo(lib,identity)
+        defer { LibraryFiles.ClearPhoto(*row) }
+        if error.count > 0 { return false,error }
+        if row.hidden { return true,"" }
+        id = JSON.JsonNext(*input,id)
+    }
+    return false,""
+}

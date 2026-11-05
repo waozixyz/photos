@@ -214,6 +214,58 @@ MergeAnnotation :: (database: *void) -> string {
     return ""
 }
 
+ApplyPageError :: (database: *void, page: []u8, cursor: string) -> string {
+    if database==null || page.count < 2 || page.count > 134217728 || cursor.count<0 || cursor.count>134217728 { return "Sync page exceeds its safe limit" }
+    json:=TextFromBytes(page)
+    if !UTF8.Valid(json) || json[0]!=123 || Space(json,ValueEnd(json,0,0))!=cast(s32)page.count { return "Invalid sync page" }
+    names: [5]string=.{"since","cursor","limit","response","decoded"}; positions: [5]s32
+    if !Policy.Fields(json,0,names[:],positions[:]) { return "Invalid sync page fields" }
+    // Never replace caller temporary tables or roll back a caller transaction.
+    if Integer(database,"SELECT count(*) FROM sqlite_temp_master WHERE name IN ('page','incoming','records','face_index','face_input','person_input')")!=0 {
+        return "Finish the current library edit before syncing; the cursor was retained"
+    }
+    if Integer(database,"PRAGMA temp_store")!=2 {
+        if Integer(database,"SELECT count(*) FROM sqlite_temp_master")!=0 || !Execute(database,"PRAGMA temp_store=MEMORY") {
+            return "Cannot isolate sync page temporary storage; the cursor was retained"
+        }
+    }
+    if !Execute(database,"BEGIN IMMEDIATE") { return "The library is busy; the cursor was retained" }
+    committed:=false
+    defer {
+        if !committed { unused Execute(database,"ROLLBACK") }
+        unused Execute(database,"DROP TABLE IF EXISTS temp.face_index; DROP TABLE IF EXISTS temp.face_input; DROP TABLE IF EXISTS temp.person_input; DROP TABLE IF EXISTS temp.records; DROP TABLE IF EXISTS temp.incoming; DROP TABLE IF EXISTS temp.page")
+    }
+    if !Execute(database,"CREATE TEMP TABLE page(data TEXT NOT NULL CHECK(json_valid(data))); CREATE TEMP TABLE incoming(data TEXT NOT NULL)") || !Put(database,"page",json) { return ("Invalid sync page") }
+    expected:=ifx cursor=="" then "null" else cursor
+    statement: *void
+    if SqlitePrepareText(database,"SELECT json(coalesce(json_extract(data,'$.cursor'),'null')) IS json(?) FROM page",-1,*statement,null)!=SQLITE_OK { return "Invalid sync cursor" }
+    matches:=Bind(statement,1,expected) && SqliteStep(statement)==SQLITE_ROW && SqliteColumnInt64(statement,0)==1
+    unused SqliteFinalize(statement)
+    if !matches { return "Invalid or stale sync page; the cursor was retained" }
+    if !Execute(database,"UPDATE page SET data=json_set(data,'$.response.changes.encrypted_records',json('[]')) WHERE json_type(data,'$.response.changes')='object' AND (json_type(data,'$.response.changes.encrypted_records') IS NULL OR json_type(data,'$.response.changes.encrypted_records')='null')") { return ("Invalid metadata page") }
+    if !ValidatePage(database) { return ("Invalid or stale sync page; the cursor was retained") }
+    amount := Integer(database,"SELECT count(*) FROM records")
+    if amount < 0 || amount > 200 { return ("Invalid metadata page") }
+    for i: 0..amount-1 {
+        sql: Vec(u8); BuilderPrint(*sql,"DELETE FROM incoming; INSERT INTO incoming SELECT data FROM records WHERE ordinal=% AND json_type(data)='object'",i)
+        if !Execute(database,BuilderFinish(sql)) { return ("Cannot stage the photo record") }
+        if Integer(database,"SELECT count(*) FROM incoming") == 0 { continue }
+        lookup: Vec(u8); BuilderPrint(*lookup,"SELECT CASE json_extract(record,'$.collection') WHEN 'private.entity.v1.photos' THEN 1 WHEN 'private.entity.v1.albums' THEN 2 WHEN 'private.photos.v1.records.annotations' THEN 3 ELSE 0 END FROM records WHERE ordinal=%",i)
+        kind := Integer(database,BuilderFinish(lookup)); if kind < 1 || kind > 3 { return ("Invalid photo collection") }
+        error := ""
+        if kind == 1 { error = MergePhoto(database) } else if kind == 2 { error = MergeAlbum(database) } else { error = MergeAnnotation(database) }
+        if error != "" { return (error) }
+        if !Execute(database,"DROP TABLE IF EXISTS face_index; DROP TABLE IF EXISTS face_input; DROP TABLE IF EXISTS person_input") { return ("Cannot finish the private face index") }
+    }
+    if !Execute(database,"INSERT OR REPLACE INTO settings(key,value) SELECT 'server_version',CAST(CASE WHEN json_type(data,'$.response.changes_complete')='true' THEN json_extract(data,'$.response.server_version') ELSE json_extract(data,'$.since') END AS TEXT) FROM page; INSERT OR REPLACE INTO settings(key,value) SELECT 'record_cursor',CASE WHEN json_type(data,'$.response.changes_complete')='true' THEN 'null' ELSE json_extract(data,'$.response.record_cursor') END FROM page") { return ("Cannot retain the sync checkpoint") }
+    if !Execute(database,"COMMIT") { return ("Cannot save the sync page; the cursor was retained") }
+    committed=true; return ""
+}
+
+ApplyPage :: (database: *void, page: []u8, cursor: string) -> bool {
+    return ApplyPageError(database,page,cursor)==""
+}
+
 main :: (argc: s32, argv: **u8) -> s32 {
     if argc != 2 { return Failure("Supply the private library database") }
     length: [4]u8; if !Wire.ReadAll(*length[0],4) { return Failure("Sync page was interrupted; the cursor was retained") }
@@ -232,26 +284,10 @@ main :: (argc: s32, argv: **u8) -> s32 {
     }
     defer { unused SqliteClose(database) }
     unused SqliteBusyTimeout(database,5000)
-    if !Execute(database,"PRAGMA temp_store=MEMORY; CREATE TEMP TABLE page(data TEXT NOT NULL CHECK(json_valid(data))); CREATE TEMP TABLE incoming(data TEXT NOT NULL)") || !Put(database,"page",json) { return Failure("Invalid sync page") }
-    if !Execute(database,"UPDATE page SET data=json_set(data,'$.response.changes.encrypted_records',json('[]')) WHERE json_type(data,'$.response.changes')='object' AND (json_type(data,'$.response.changes.encrypted_records') IS NULL OR json_type(data,'$.response.changes.encrypted_records')='null')") { return Failure("Invalid metadata page") }
-    if !Execute(database,"BEGIN IMMEDIATE") { return Failure("The library is busy; the cursor was retained") }
-    defer { unused Execute(database,"ROLLBACK") }
-    if !ValidatePage(database) { return Failure("Invalid or stale sync page; the cursor was retained") }
-    amount := Integer(database,"SELECT count(*) FROM records")
-    if amount < 0 || amount > 200 { return Failure("Invalid metadata page") }
-    for i: 0..amount-1 {
-        sql: Vec(u8); BuilderPrint(*sql,"DELETE FROM incoming; INSERT INTO incoming SELECT data FROM records WHERE ordinal=% AND json_type(data)='object'",i)
-        if !Execute(database,BuilderFinish(sql)) { return Failure("Cannot stage the photo record") }
-        if Integer(database,"SELECT count(*) FROM incoming") == 0 { continue }
-        lookup: Vec(u8); BuilderPrint(*lookup,"SELECT CASE json_extract(record,'$.collection') WHEN 'private.entity.v1.photos' THEN 1 WHEN 'private.entity.v1.albums' THEN 2 WHEN 'private.photos.v1.records.annotations' THEN 3 ELSE 0 END FROM records WHERE ordinal=%",i)
-        kind := Integer(database,BuilderFinish(lookup)); if kind < 1 || kind > 3 { return Failure("Invalid photo collection") }
-        error := ""
-        if kind == 1 { error = MergePhoto(database) } else if kind == 2 { error = MergeAlbum(database) } else { error = MergeAnnotation(database) }
-        if error != "" { return Failure(error) }
-        if !Execute(database,"DROP TABLE IF EXISTS face_index; DROP TABLE IF EXISTS face_input; DROP TABLE IF EXISTS person_input") { return Failure("Cannot finish the private face index") }
-    }
-    if !Execute(database,"INSERT OR REPLACE INTO settings(key,value) SELECT 'server_version',CAST(CASE WHEN json_type(data,'$.response.changes_complete')='true' THEN json_extract(data,'$.response.server_version') ELSE json_extract(data,'$.since') END AS TEXT) FROM page; INSERT OR REPLACE INTO settings(key,value) SELECT 'record_cursor',CASE WHEN json_type(data,'$.response.changes_complete')='true' THEN 'null' ELSE json_extract(data,'$.response.record_cursor') END FROM page") { return Failure("Cannot retain the sync checkpoint") }
-    if !Execute(database,"COMMIT") { return Failure("Cannot save the sync page; the cursor was retained") }
+    cursor: string = "null"
+    if positions[1]>=0 { cursor=json[positions[1]:ValueEnd(json,positions[1],0)] }
+    error:=ApplyPageError(database,BytesFromPointer(input,cast(u64)count),cursor)
+    if error!="" { return Failure(error) }
     reply: [11]u8 = .{123,34,115,97,118,101,100,34,58,49,125}
     return ifx Wire.SendAll(*reply[0],11) then 0 else 1
 }

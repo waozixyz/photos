@@ -7,6 +7,27 @@
 Collage :: #import "collage";
 using UI :: #import "kryon/Widgets";
 using Model :: #import "model";
+Headings :: #import "day_heading";
+Calendar :: #import "std/date_parse";
+#if #defined(POSIX_THREADS) {
+    HeadingClock :: #import "std/date_time_linux";
+    Environment :: #import "std/environment_linux";
+} else {
+    HeadingClock :: #import "std/date_time";
+}
+HeadingToday :: () -> s32 {
+    // The library groups capture dates in UTC.
+    now := Calendar.CivilFromUnix(HeadingClock.UnixNow())
+    return now.year * 10000 + now.month * 100 + now.day
+}
+HeadingLocale :: () -> string {
+    #if #defined(POSIX_THREADS) {
+        locale := Environment.EnvironmentText("LC_ALL")
+        if locale.count == 0 { locale = Environment.EnvironmentText("LC_TIME") }
+        if locale.count == 0 { locale = Environment.EnvironmentText("LANG") }
+        return locale
+    } else { return "en" }
+}
 #import "std/date_parse"
 #import "std/text"
 Playback :: #import "playback";
@@ -1076,8 +1097,10 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
             by := body.y + (ifx Model.CatalogView() then cast(float32)i * height else item_y[i]) - cast(float32)Model.scroll
             if by - 42.0 > body.y + body.height { break }
             if !Model.CatalogView() && group_start[i] && by - 42.0 < body.y + body.height && by > body.y {
-                Record(3000000 + i, TextView(Model.photos[i].date[:Model.photos[i].date_size]), .{x + 4.0, by - 34.0, width - 12.0, 28.0}, false)
-                Label(session, cast(u64)(3000000 + i), TextView(Model.photos[i].date[:Model.photos[i].date_size]), .{x + 4.0, by - 34.0, width - 12.0, 28.0}, 19)
+                heading := Headings.DayHeading(Headings.DayNumber(TextView(Model.photos[i].date[:Model.photos[i].date_size])), HeadingToday(), HeadingLocale())
+                Record(3000000 + i, heading, .{x + 4.0, by - 34.0, width - 12.0, 28.0}, false)
+                Label(session, cast(u64)(3000000 + i), heading, .{x + 4.0, by - 34.0, width - 12.0, 28.0}, 19)
+                Headings.Release(heading)
             }
             if by + height < body.y || by > body.y + body.height { continue }
             if Model.CatalogView() {

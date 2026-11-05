@@ -1,0 +1,87 @@
+Crypto :: #import "sync_crypto";
+Files :: #import "std/file";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+Expect :: (condition: bool, label: string) -> bool {
+    if !condition { print("FAIL: %\n", label) }
+    return condition
+}
+Fixture :: (name: string, out: *Vec(u8)) -> bool {
+    path: Vec(u8); BuilderPrint(*path, "tests/fixtures/golden/crypto-%", name)
+    return Files.ReadFileInto(BuilderFinish(path), out)
+}
+Save :: (name: string, out: *Vec(u8)) -> bool {
+    path: Vec(u8); BuilderPrint(*path, "build/tests/crypto-%-ziran.bin", name)
+    return Files.WriteEntireFile(BuilderFinish(path), TextFromBytes(Crypto.OutputBytes(out)))
+}
+Equal :: (a: []u8, b: []u8) -> bool {
+    if a.count != b.count { return false }
+    for i: 0..a.count-1 { if a[i] != b[i] { return false } }
+    return true
+}
+// Inspect retained capacity too: a failed call must leave no previous result.
+Wiped :: (out: *Vec(u8)) -> bool {
+    if out.count != 0 || !VecResize(<<out, out.capacity) { return false }
+    ok := true
+    for byte: Crypto.OutputBytes(out) { if byte != 0 { ok = false } }
+    unused VecResize(<<out, 0)
+    return ok
+}
+
+main :: () -> s32 {
+    key: Vec(u8); nonce: Vec(u8); plain: Vec(u8); aad: Vec(u8); reference: Vec(u8); blob: Vec(u8)
+    out: Vec(u8); opened: Vec(u8); retry: Vec(u8)
+    defer { Crypto.ClearOutput(*out); Crypto.ClearOutput(*opened); Crypto.ClearOutput(*retry) }
+    if !Expect(Fixture("key.bin", *key) && Fixture("nonce.bin", *nonce) && Fixture("plain.bin", *plain) &&
+        Fixture("aad.bin", *aad) && Fixture("sync.bin", *reference) && Fixture("blob.bin", *blob), "Python sync fixtures") { return 1 }
+    k := VecSlice(key,0,key.count); n := VecSlice(nonce,0,nonce.count)
+    p := VecSlice(plain,0,plain.count); a := VecSlice(aad,0,aad.count)
+    if !Expect(Crypto.SyncEncrypt(k,p,a,n,*out) && Equal(VecSlice(out,0,out.count),VecSlice(reference,0,reference.count)) &&
+        Save("sync",*out), "fixed nonce Python encryption equality") { return 1 }
+    if !Expect(Crypto.SyncDecrypt(k,VecSlice(out,0,out.count),a,n,*opened) && Equal(VecSlice(opened,0,opened.count),p),
+        "Python ciphertext opens") { return 1 }
+    // Authentication errors must wipe both the new destination and old tail.
+    for mode: 0..4 {
+        unused VecResize(opened,1024)
+        for i: 0..opened.count-1 { opened[i] = 165 }
+        key[0] ^= ifx mode==0 then cast(u8)1 else cast(u8)0
+        nonce[0] ^= ifx mode==1 then cast(u8)1 else cast(u8)0
+        aad[0] ^= ifx mode==2 then cast(u8)1 else cast(u8)0
+        out[out.count-1] ^= ifx mode==3 then cast(u8)1 else cast(u8)0
+        size := out.count - ifx mode==4 then 1 else 0
+        failed := !Crypto.SyncDecrypt(k,VecSlice(out,0,size),a,n,*opened)
+        key[0] ^= ifx mode==0 then cast(u8)1 else cast(u8)0
+        nonce[0] ^= ifx mode==1 then cast(u8)1 else cast(u8)0
+        aad[0] ^= ifx mode==2 then cast(u8)1 else cast(u8)0
+        out[out.count-1] ^= ifx mode==3 then cast(u8)1 else cast(u8)0
+        if !Expect(failed && Wiped(*opened), "wrong key/nonce/AAD, tamper and truncation wipe output") { return 1 }
+    }
+    oversizedKey: [33]u8; oversizedNonce: [25]u8
+    if !Expect(!Crypto.SyncEncrypt(k[:31],p,a,n,*opened) && Wiped(*opened) &&
+        !Crypto.SyncEncrypt(oversizedKey[:],p,a,n,*opened) && Wiped(*opened) &&
+        !Crypto.SyncDecrypt(k,VecSlice(out,0,15),a,n,*opened) && Wiped(*opened) &&
+        !Crypto.SyncEncrypt(k,p,a,n[:23],*opened) && Wiped(*opened) &&
+        !Crypto.SyncEncrypt(k,p,a,oversizedNonce[:],*opened) && Wiped(*opened) &&
+        !Crypto.SyncEncrypt(k,p,a,n,null), "invalid key/nonce sizes and null destination") { return 1 }
+    if !Expect(Crypto.SyncSeal(k,p,a,true,*out) && Equal(VecSlice(out,0,out.count),VecSlice(blob,0,blob.count)) &&
+        Save("blob",*out) && Crypto.SyncSeal(k,p,a,true,*retry) && Equal(VecSlice(out,0,out.count),VecSlice(retry,0,retry.count)),
+        "resumable blob preserves Python HMAC nonce") { return 1 }
+    if !Expect(Crypto.SyncOpen(k,VecSlice(out,0,out.count),a,*opened) && Equal(VecSlice(opened,0,opened.count),p) &&
+        !Crypto.SyncOpen(k,VecSlice(out,0,39),a,*opened) && Wiped(*opened), "nonce-prefixed open and truncation") { return 1 }
+    if !Expect(Crypto.SyncSeal(k,p,a,false,*out) && Crypto.SyncSeal(k,p,a,false,*retry) &&
+        !Equal(VecSlice(out,0,24),VecSlice(retry,0,24)), "records get fresh nonces") { return 1 }
+    empty: [0]u8
+    if !Expect(Crypto.SyncEncrypt(k,empty[:],empty[:],n,*out) && out.count==16 &&
+        Crypto.SyncDecrypt(k,VecSlice(out,0,out.count),empty[:],n,*opened) && opened.count==0 &&
+        Crypto.SyncCrypt(k,p,true,*out) && Crypto.SyncCrypt(k,VecSlice(out,0,out.count),false,*opened) &&
+        Equal(VecSlice(opened,0,opened.count),p), "empty plaintext and simple framed API") { return 1 }
+    if !Expect(Crypto.DeviceSignature(k,p,*out) && out.count==64 && Save("device",*out) &&
+        Crypto.DevicePublic(k,*out) && out.count==32 && Save("device-public",*out) &&
+        !Crypto.DeviceSignature(k[:31],p,*out) && Wiped(*out) &&
+        !Crypto.DevicePublic(oversizedKey[:],*out) && Wiped(*out) &&
+        Crypto.DeviceSeed(*out) && Crypto.DeviceSeed(*retry) && !Equal(VecSlice(out,0,out.count),VecSlice(retry,0,retry.count)),
+        "Ed25519 signatures, exact seed bounds and random seeds") { return 1 }
+    print("sync_crypto: local tests passed\n"); return 0
+}

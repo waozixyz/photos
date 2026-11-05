@@ -1,0 +1,17 @@
+{
+  "photos_today": "오늘",
+  "photos_yesterday": "어제",
+  "photos_date": "{y}년 {m}월 {d}일",
+  "photos_month_1": "1월",
+  "photos_month_2": "2월",
+  "photos_month_3": "3월",
+  "photos_month_4": "4월",
+  "photos_month_5": "5월",
+  "photos_month_6": "6월",
+  "photos_month_7": "7월",
+  "photos_month_8": "8월",
+  "photos_month_9": "9월",
+  "photos_month_10": "10월",
+  "photos_month_11": "11월",
+  "photos_month_12": "12월"
+}

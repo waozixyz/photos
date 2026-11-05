@@ -4,6 +4,7 @@ Http :: #import "std/net_http";
 Curl :: #import "std/net_http_curl_linux";
 Wire :: #import "sync_crypto";
 NodePolicy :: #import "node_policy";
+Frames :: #import "sync_frame";
 #import "std/byte_text_linux"
 #import "std/text_buffer"
 c :: #system_library "c";
@@ -21,17 +22,84 @@ HashSuffix :: (text: string, prefix: string) -> bool {
     return true
 }
 Route :: (path: string, method: u8) -> bool {
-    if method == 1 && (path == "/api/v1/node" ||
+    if method == 1 && (path == "/api/v1/node" || path == "/api/v1/apps/photos" ||
         HashSuffix(path,"/api/v1/sync/challenge?user_id=")) { return true }
     if method == 2 && (path == "/api/v1/sync/login" ||
-        path == "/api/v1/account/devices" || path == "/api/v1/sync") { return true }
+        path == "/api/v1/account/devices" || path == "/api/v1/sync" || path == "/api/v1/apps") { return true }
     // Photos' own blobs, and the account's shared entity chunks.
     return method != 2 && (HashSuffix(path,"/api/v1/blobs/photos/") ||
         HashSuffix(path,"/api/v1/blobs/entity/"))
 }
 Header :: (name: string) -> bool {
     return name == "Content-Type" || name == "Authorization" ||
-        name == "X-Daochi-User" || name == "X-Daochi-Tx" || name == "X-Daochi-Signature"
+        name == "X-Daochi-User" || name == "X-Daochi-Tx" || name == "X-Daochi-Signature" || name == "X-Daochi-Admin"
+}
+// Operator authorization is useful only for creating the app registration.
+// Never let it accompany sync/blob, challenge, policy or registry reads.
+HeaderForRoute :: (name: string,path: string,method: u8) -> bool {
+    return Header(name) && (name!="X-Daochi-Admin" || (path=="/api/v1/apps" && method==2))
+}
+
+// Response copies borrow one allocation. The caller releases it exactly once;
+// clearing also wipes capacity beyond the received bytes, including on errors.
+ClearResponse :: (response: *Frames.SyncResponse) {
+    if response==null { return }
+    Wire.Free(response.storage,response.capacity)
+    response.storage=null; response.capacity=0
+    empty: []u8; response.body=empty
+}
+
+// Same validation and codes as the released private frame CLI. Headers and
+// bodies are borrowed for this call; release the result with ClearResponse.
+HttpRequest :: (frame: Frames.SyncFrame) -> Frames.SyncResponse, string {
+    response: Frames.SyncResponse
+    response.code = 2
+    if (frame.version != 1 && frame.version != 2) || frame.method < 1 || frame.method > 5 ||
+        frame.port == 0 || frame.path.count < 1 || frame.path.count > 1024 ||
+        frame.headers.count < 0 || frame.headers.count > 5 || frame.body.count < 0 || frame.body.count > 134217728 ||
+        frame.response_limit < 0 || frame.response_limit > 134217728 || frame.timeout_ms < 1 || frame.timeout_ms > 60000 ||
+        (frame.method != 2 && frame.method != 3 && frame.body.count != 0) || !Route(frame.path, frame.method) ||
+        (frame.version == 1 && frame.pin.count != 0) || (frame.version == 2 && (frame.pin.count != 32 ||
+        frame.path != "/api/v1/node" || frame.method != 1 || frame.headers.count != 0 || frame.response_limit > 1048576)) {
+        return response, "Invalid Photos loopback sync request"
+    }
+    for i: 0..frame.headers.count-1 {
+        item := frame.headers[i]
+        if !HeaderForRoute(item.name,frame.path,frame.method) || item.value.count >= 8192 { return response, "Invalid Photos loopback sync request" }
+        for j: 0..i-1 { if frame.headers[j].name == item.name { return response, "Invalid Photos loopback sync request" } }
+        for byte: item.value { if byte < 32 || byte > 126 { return response, "Invalid Photos loopback sync request" } }
+    }
+    request: Http.HttpRequest
+    methods: [5]string = .{"GET","POST","PUT","HEAD","DELETE"}
+    request.method = methods[frame.method-1]
+    url: Vec(u8); BuilderPrint(*url,"http://127.0.0.1:%",frame.port); BuilderPrint(*url,"%",frame.path)
+    request.url = TextFromBytes(Wire.OutputBytes(*url)); request.headers = frame.headers
+    request.body = TextFromBytes(frame.body)
+    response.capacity=frame.response_limit+1
+    response.storage=cast(*u8)Allocate(cast(usize)response.capacity)
+    if response.storage==null {
+        response.code=4; ClearResponse(*response); return response, "Photos local transport could not finish; originals and keys were preserved"
+    }
+    response.body=BytesFromPointer(response.storage,cast(u64)response.capacity)
+    result := Curl.SendCurlDirectWithin(request,response.body,frame.timeout_ms)
+    if result.truncated { response.code=3; ClearResponse(*response); return response, "Local node response exceeded its safe limit" }
+    if result.code != 0 || result.status < 100 || result.status > 599 {
+        response.code=4; ClearResponse(*response); return response, "Photos local transport could not finish; originals and keys were preserved"
+    }
+    if frame.version == 2 && result.status < 200 {
+        response.code=5; ClearResponse(*response); return response, "Malformed ThinkPad node policy; Photos refuses to sync"
+    }
+    if frame.version == 2 && result.status >= 200 && result.status < 300 {
+        response.code=NodePolicy.Check(TextFromBytes(response.body[:result.length]),frame.pin)
+        if response.code==5 { ClearResponse(*response); return response, "Malformed ThinkPad node policy; Photos refuses to sync" }
+        if response.code==6 { ClearResponse(*response); return response, "Node identity mismatch: Photos refuses to sync" }
+        if response.code==7 { ClearResponse(*response); return response, "Node has outward Photos replication; local-only sync refused" }
+    }
+    response.body=response.body[:result.length]
+    response.status=result.status; response.code=0
+    if result.status>=300 && result.status<400 { return response, "Photos forbids redirects outside its pinned local node" }
+    if result.status>=400 { return response, "Local Photos node request failed" }
+    return response, ""
 }
 main :: () -> s32 {
     // version, method, port, path bytes, header count, body bytes, response
@@ -58,7 +126,7 @@ main :: () -> s32 {
         nameCount := cast(s64)Wire.Number(sizes[0:2]); valueCount := cast(s64)Wire.Number(sizes[2:4])
         if nameCount < 1 || nameCount >= 256 || valueCount >= 8192 ||
             !Wire.ReadAll(*names[index][0],nameCount) || !Wire.ReadAll(*values[index][0],valueCount) { return 2 }
-        name := TextFromBytes(names[index][0:nameCount]); if !Header(name) { return 2 }
+        name := TextFromBytes(names[index][0:nameCount]); if !HeaderForRoute(name,path,method) { return 2 }
         for previous: 0..index-1 { if headers[previous].name == name { return 2 } }
         offset: s64
         while offset < valueCount {
@@ -67,27 +135,25 @@ main :: () -> s32 {
         headers[index].name = name; headers[index].value = TextFromBytes(values[index][0:valueCount])
         index += 1
     }
-    body := cast(*u8)Allocate(cast(usize)(bodyCount+1)); output := cast(*u8)Allocate(cast(usize)(limit+1))
-    defer { Wire.Free(body,bodyCount+1); Wire.Free(output,limit+1) }
-    if body == null || output == null || !Wire.ReadAll(body,bodyCount) { return 2 }
+    body := cast(*u8)Allocate(cast(usize)(bodyCount+1))
+    defer { Wire.Free(body,bodyCount+1) }
+    if body == null || !Wire.ReadAll(body,bodyCount) { return 2 }
     extra: u8; amount: s64
     while true { amount = Read(0,*extra,1); if amount < 0 && Errno().* == 4 { continue }; break }
     if amount != 0 { return 2 }
-    request: Http.HttpRequest
-    methods: [5]string = .{"GET","POST","PUT","HEAD","DELETE"}; request.method = methods[method-1]
-    url: Vec(u8); BuilderPrint(*url,"http://127.0.0.1:%",port); BuilderPrint(*url,"%",path); request.url = BuilderFinish(url)
-    request.headers = headers[0:count]; request.body = TextFromBytes(BytesFromPointer(body,cast(u64)bodyCount))
-    result := Curl.SendCurlDirectWithin(request,BytesFromPointer(output,cast(u64)(limit+1)),timeout)
-    if result.truncated { return 3 }
-    if result.code != 0 || result.status < 100 || result.status > 599 { return 4 }
-    if frame[0] == 2 && result.status < 200 { return 5 }
-    if frame[0] == 2 && result.status >= 200 && result.status < 300 {
-        policy := NodePolicy.Check(TextFromBytes(BytesFromPointer(output,cast(u64)result.length)),pin[:])
-        if policy != 0 { return policy }
-    }
+    request: Frames.SyncFrame
+    request.version=frame[0]; request.method=method; request.port=cast(u16)port; request.path=path
+    request.headers=headers[:count]; request.body=BytesFromPointer(body,cast(u64)bodyCount)
+    request.response_limit=limit; request.timeout_ms=timeout
+    if frame[0]==2 { request.pin=pin[:] }
+    result,error := HttpRequest(request); unused error
+    defer { ClearResponse(*result) }
+    if result.code != 0 { return result.code }
+    size := result.body.count
     reply: [6]u8
     reply[0] = cast(u8)(result.status >> 8); reply[1] = cast(u8)result.status
-    reply[2] = cast(u8)(result.length >> 24); reply[3] = cast(u8)(result.length >> 16)
-    reply[4] = cast(u8)(result.length >> 8); reply[5] = cast(u8)result.length
-    return ifx Wire.SendAll(*reply[0],6) && Wire.SendAll(output,result.length) then 0 else 4
+    reply[2] = cast(u8)(size >> 24); reply[3] = cast(u8)(size >> 16)
+    reply[4] = cast(u8)(size >> 8); reply[5] = cast(u8)size
+    bytes := result.body
+    return ifx Wire.SendAll(*reply[0],6) && (size==0 || Wire.SendAll(*bytes[0],size)) then 0 else 4
 }

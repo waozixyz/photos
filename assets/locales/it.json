@@ -1,0 +1,17 @@
+{
+  "photos_today": "Oggi",
+  "photos_yesterday": "Ieri",
+  "photos_date": "{d} {M} {y}",
+  "photos_month_1": "gennaio",
+  "photos_month_2": "febbraio",
+  "photos_month_3": "marzo",
+  "photos_month_4": "aprile",
+  "photos_month_5": "maggio",
+  "photos_month_6": "giugno",
+  "photos_month_7": "luglio",
+  "photos_month_8": "agosto",
+  "photos_month_9": "settembre",
+  "photos_month_10": "ottobre",
+  "photos_month_11": "novembre",
+  "photos_month_12": "dicembre"
+}

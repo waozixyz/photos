@@ -1,0 +1,152 @@
+Map :: #import "map_image";
+Kit :: #import "kit";
+PNG :: #import "std/png_linux";
+Raster :: #import "std/image";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+#import "std/c_string"
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+// Made with Natural Earth; public-domain 1:110m land, v4.1.0 GeoJSON.
+// https://www.naturalearthdata.com/about/terms-of-use/
+// https://github.com/nvkelso/natural-earth-vector/blob/693f11422f4e08d2da4566b854dda53eb7c39fb3/geojson/ne_110m_land.geojson
+// Fixture SHA256:9e0729ee253ca7d7a5c4ae9395fb1902264c5377c52e224d13dd85010e2835d9
+// world-baseline.png was rendered once by scripts/map_image.py/Pillow12.3.0;
+// SHA256:0087024872e86a8827e74904153b1eacd3632873be38a0c97312b13f7f9b3921
+// It is byte-identical to the preserved bundled world.png. Native tests need
+// neither Python nor a network connection.
+WORLD :: "tests/fixtures/map-image/ne_110m_land.geojson";
+SEA :: 0x183440;
+LAND :: 0x56766d;
+GRID :: 0x385256;
+Shape :: "{\"type\":\"FeatureCollection\",\"features\":[{\"type\":\"Feature\",\"geometry\":{\"type\":\"Polygon\",\"coordinates\":[[[-100,20],[-40,20],[-40,70],[-100,70],[-100,20]],[[-90,30],[-60,30],[-60,50],[-90,50],[-90,30]]]}}]}";
+
+Color :: (image: *Raster.Image,x: s32,y: s32) -> u32 {
+    if !Raster.ImageValid(image) || x<0 || y<0 || x>=image.width || y>=image.height { return 0 }
+    at:=(cast(s64)y*image.width+x)*4
+    return (cast(u32)image.pixels[at]<<16)|(cast(u32)image.pixels[at+1]<<8)|cast(u32)image.pixels[at+2]
+}
+Same :: (first: string,second: string) -> bool {
+    a: Vec(u8); b: Vec(u8)
+    if !Files.ReadFileInto(first,*a) || !Files.ReadFileInto(second,*b) || a.count!=b.count { return false }
+    for index: 0..a.count-1 { if a[index]!=b[index] { return false } }
+    return true
+}
+LandCount :: (image: *Raster.Image) -> s64 {
+    count: s64
+    for y: 0..image.height-1 { for x: 0..image.width-1 { if Color(image,cast(s32)x,cast(s32)y)==LAND { count+=1 } } }
+    return count
+}
+Document :: (kind: string,coordinates: string) -> string {
+    bytes: Vec(u8)
+    BuilderPrint(*bytes,"{\"type\":\"FeatureCollection\",\"features\":[{\"type\":\"Feature\",\"geometry\":{\"type\":\"%\",\"coordinates\":%}}]}",kind,coordinates)
+    return BuilderFinish(bytes)
+}
+Preserved :: (source: string,output: string,text: string) -> bool {
+    if !Files.WriteEntireFile(source,text) || Map.Render(source,output,360,180) { return false }
+    value,ok:=Files.ReadEntireFile(output)
+    return ok && value=="existing destination"
+}
+Args :: () -> bool {
+    program: [16]u8; source: [64]u8; option: [32]u8; output: [64]u8
+    if !CopyCString("map_image",program[:]) || !CopyCString("public.geojson",source[:]) || !CopyCString("--output",option[:]) || !CopyCString("synthetic/map.png",output[:]) { return false }
+    argv: [4]*u8=.{*program[0],*source[0],*option[0],*output[0]}; options: Map.Options
+    if !Kit.Expect(!Map.ParseArgs(1,*argv[0],*options),"CLI requires GeoJSON source") { return false }
+    if !Kit.Expect(Map.ParseArgs(2,*argv[0],*options) && options.geojson=="public.geojson" && options.output=="assets/world.png","CLI default destination and positional source") { return false }
+    if !Kit.Expect(Map.ParseArgs(4,*argv[0],*options) && options.output=="synthetic/map.png","CLI output override") { return false }
+    if !Kit.Expect(!Map.ParseArgs(3,*argv[0],*options),"CLI missing output rejected") { return false }
+    if !CopyCString("--help",source[:]) { return false }
+    if !Kit.Expect(Map.ParseArgs(2,*argv[0],*options) && options.help,"CLI help needs no data") { return false }
+    if !CopyCString("--bad-option",source[:]) { return false }
+    return Kit.Expect(!Map.ParseArgs(2,*argv[0],*options),"unknown option rejected")
+}
+Run :: (root: string) -> s32 {
+    if !Args() { return 1 }
+    source:=Kit.Join(root,"input.geojson"); output:=Kit.Join(root,"map.png"); duplicate:=Kit.Join(root,"repeat.png")
+    if !Files.WriteEntireFile(source,Shape) || !Map.Render(source,output,360,180) { return 2 }
+    image:=PNG.ReadPNGFile(output)
+    if !Kit.Expect(Raster.ImageValid(*image) && image.width==360 && image.height==180 && Color(*image,85,25)==LAND && Color(*image,105,45)==SEA && Color(*image,145,25)==SEA,"projected polygon exterior, hole and background") { return 3 }
+    if !Kit.Expect(Color(*image,90,25)==GRID && Color(*image,85,30)==GRID && Color(*image,0,17)==GRID && Color(*image,17,0)==GRID && Color(*image,359,179)==SEA,"one-pixel grid overlays land and clips right/bottom boundary") { return 4 }
+    if !Map.Render(source,duplicate,360,180) || !Kit.Expect(Same(output,duplicate),"repeated render has identical PNG bytes") { return 5 }
+    multi:=Document("MultiPolygon","[[[[-170,-80],[-140,-80],[-140,-50],[-170,-50],[-170,-80]]],[[[40,10],[70,10],[70,40],[40,40],[40,10]]]]")
+    if !Files.WriteEntireFile(source,multi) || !Map.Render(source,output,360,180) { return 6 }
+    islands:=PNG.ReadPNGFile(output)
+    if !Kit.Expect(Color(*islands,15,155)==LAND && Color(*islands,225,65)==LAND && Color(*islands,200,65)==SEA,"MultiPolygon preserves independent islands") { return 7 }
+    // As in the original renderer, edges use literal equirectangular
+    // coordinates; crossing the dateline does not invent wrapped geometry.
+    crossing:=Document("Polygon","[[[170,-80],[-170,-80],[-170,-50],[170,-50],[170,-80]]]")
+    if !Files.WriteEntireFile(source,crossing) || !Map.Render(source,output,360,180) { return 8 }
+    dateline:=PNG.ReadPNGFile(output)
+    if !Kit.Expect(Color(*dateline,175,155)==LAND && Color(*dateline,5,155)==SEA && Color(*dateline,355,155)==SEA,"literal dateline projection matches baseline") { return 9 }
+    clipped:=Document("Polygon","[[[-180,-90],[180,-90],[180,90],[-180,90],[-180,-90]]]")
+    if !Files.WriteEntireFile(source,clipped) || !Map.Render(source,output,360,180) { return 10 }
+    boundary:=PNG.ReadPNGFile(output)
+    if !Kit.Expect(Color(*boundary,359,179)==LAND && Color(*boundary,1,1)==LAND && Color(*boundary,0,1)==GRID,"pole and dateline bounds clip safely") { return 11 }
+    if !Files.WriteEntireFile(output,"existing destination") { return 12 }
+    malformed: [12]string=.{"{}","[]","{\"type\":\"FeatureCollection\",\"features\":null}","{\"type\":\"FeatureCollection\",\"features\":[null]}",Document("Point","[0,0]"),Document("Polygon","[]"),Document("Polygon","[[[0,0],[10,0],[0,10]]]"),Document("Polygon","[[[0,0],[181,0],[0,10],[0,0]]]"),Document("Polygon","[[[0,0],[10,0],[0,91],[0,0]]]"),Document("Polygon","[[[0,0],[1e9999,0],[0,10],[0,0]]]"),Document("Polygon","[[[0,0],[NaN,0],[0,10],[0,0]]]"),Document("Polygon","[[[0,0],[\"10\",0],[0,10],[0,0]]]")}
+    for text: malformed { if !Kit.Expect(Preserved(source,output,text),"malformed/nonfinite/out-of-range input preserves destination") { return 13 } }
+    if !Files.WriteEntireFile(source,Shape) { return 14 }
+    dimensions: [6][2]s32=.{.{0,180},.{360,0},.{-1,180},.{8193,1},.{1,4097},.{8192,4096}}
+    for size: dimensions { if !Kit.Expect(!Map.Render(source,output,size[0],size[1]),"invalid/oversized dimensions rejected") { return 15 } }
+    for mode: 0..2 {
+        text: Vec(u8)
+        if mode==2 {
+            BuilderAppend(text,"{\"type\":\"FeatureCollection\",\"features\":[")
+            for index: 0..4096 {
+                if index>0 { BuilderAppend(text,",") }
+                BuilderAppend(text,"{\"type\":\"Feature\",\"geometry\":{\"type\":\"Polygon\",\"coordinates\":[[[0,0],[1,0],[0,1],[0,0]]]}}")
+            }
+            BuilderAppend(text,"]}")
+        } else {
+            BuilderAppend(text,"{\"type\":\"FeatureCollection\",\"features\":[{\"type\":\"Feature\",\"geometry\":{\"type\":\"Polygon\",\"coordinates\":[")
+            if mode==0 {
+                BuilderAppend(text,"[")
+                for index: 0..16384 { if index>0 { BuilderAppend(text,",") }; BuilderAppend(text,"[0,0]") }
+                BuilderAppend(text,"]")
+            } else {
+                for index: 0..8192 { if index>0 { BuilderAppend(text,",") }; BuilderAppend(text,"[[0,0],[1,0],[0,1],[0,0]]") }
+            }
+            BuilderAppend(text,"]}}]}")
+        }
+        if !Kit.Expect(Preserved(source,output,TextFromBytes(VecSlice(text,0,text.count))),"ring/point/feature counts are bounded") { return 23 }
+    }
+    if !Files.WriteEntireFile(source,Shape) { return 24 }
+    // Sparse file proves the input bound before a whole-file allocation.
+    large:=Files.OpenExclusivePrivate(Kit.Join(root,"oversize.geojson"))
+    if !large.valid { return 16 }
+    end: [1]u8=.{32}; wrote:=Files.WriteAt(large,end[:],2097152); closed:=Files.CloseFile(large)
+    if !Kit.Expect(wrote==1 && closed && !Map.Render(Kit.Join(root,"oversize.geojson"),output,360,180),"input size bound") { return 17 }
+    if !Kit.Expect(!Map.Render(source,root,360,180),"directory destination fails without replacing data") { return 18 }
+    untouched,ok:=Files.ReadEntireFile(output)
+    if !Kit.Expect(ok && untouched=="existing destination","all failed outputs preserve existing destination") { return 19 }
+    // Input is closed and bounds are checked before any output directories.
+    if !Kit.Expect(!Map.Render(Kit.Join(root,"missing"),Kit.Join(root,"absent/map.png"),360,180) && !Files.PathExists(Kit.Join(root,"absent")),"missing input has no output side effects") { return 20 }
+    // This pinned public fixture is available offline; never rewrite the
+    // bundled assets/world.png. Full raster parity is recorded separately.
+    if !Kit.Expect(Map.Render(WORLD,Kit.Join(root,"world.png")),"full public world fixture renders at default dimensions") { return 21 }
+    world:=PNG.ReadPNGFile(Kit.Join(root,"world.png"))
+    if !Kit.Expect(world.width==4096 && world.height==2048 && Color(*world,1024,0)==GRID,"default output dimensions and grid") { return 22 }
+    baseline:=PNG.ReadPNGFile("tests/fixtures/map-image/world-baseline.png")
+    bundled:=PNG.ReadPNGFile("assets/world.png")
+    if !Kit.Expect(Raster.ImageValid(*baseline) && Raster.ImageValid(*bundled) && baseline.width==world.width && baseline.height==world.height && bundled.width==world.width && bundled.height==world.height,"one-time Python baseline and bundled map dimensions") { return 25 }
+    nativeLand:=LandCount(*world); baselineLand:=LandCount(*baseline); bundledLand:=LandCount(*bundled)
+    baselineDelta:=ifx nativeLand>baselineLand then nativeLand-baselineLand else baselineLand-nativeLand
+    bundledDelta:=ifx nativeLand>bundledLand then nativeLand-bundledLand else bundledLand-nativeLand
+    different: s64
+    for y: 0..world.height-1 { for x: 0..world.width-1 { if Color(*world,cast(s32)x,cast(s32)y)!=Color(*baseline,cast(s32)x,cast(s32)y) { different+=1 } } }
+    print("World raster: native land %, Python land %, bundled land %, differing pixels %/%\n",nativeLand,baselineLand,bundledLand,different,cast(s64)world.width*world.height)
+    if !Kit.Expect(nativeLand>0 && baselineDelta*200<=baselineLand && bundledDelta*200<=bundledLand && different*200<=cast(s64)world.width*world.height,"world land counts and pixel parity stay within 0.5 percent") { return 26 }
+    return 0
+}
+
+#program_export
+main :: () -> s32 {
+    root:=Kit.TempDirectory("map-image")
+    if root=="" { return 100 }; defer { unused Kit.Cleanup(root) }
+    code:=Run(root)
+    if code==0 { print("map_image: local tests passed\n") }
+    return code
+}

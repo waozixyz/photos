@@ -1,0 +1,274 @@
+// Local app access is separate from Hidden access and tied to credential bytes.
+Store :: #import "library_store";
+LibraryFiles :: #import "library_files";
+Vault :: #import "vault";
+Auth :: #import "vault_auth";
+Access :: #import "access_registry";
+Tree :: #import "std/file_tree_linux";
+JSON :: #import "std/json_document";
+Crypto :: #import "crypto/sha256";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_export
+Config :: struct { version: s32; enabled: bool; method: string; verifier: string; auto_lock: s64; owned_verifier: bool }
+// Settings owns only verifier; method always names a borrowed constant.
+ClearConfig :: (config: *Config) {
+    if config.owned_verifier { Auth.ReleaseOwned(config.verifier); config.owned_verifier = false; config.verifier = "" }
+}
+Path :: (lib: *Store.Library) -> string { return Tree.JoinPath(lib.root,"private/app-lock.json") }
+AllowedDelay :: (delay: s64) -> bool { return delay == 0 || delay == 5 || delay == 15 || delay == 60 || delay == 300 || delay == 1800 }
+
+#scope_file
+Text :: (document: *JSON.JsonDocument, object: s32, key: string) -> string { return JSON.JsonString(document,JSON.JsonMember(document,object,key)) }
+Put :: (document: *JSON.JsonDocument, key: string, value: s64) { unused JSON.JsonSet(document,document.root,key,JSON.JsonNewInteger(document,value)) }
+PutText :: (document: *JSON.JsonDocument, key: string, value: string) { unused JSON.JsonSet(document,document.root,key,JSON.JsonNewStringCopy(document,value)) }
+Serialize :: (document: *JSON.JsonDocument) -> string {
+    if document.error.count > 0 { return "" }
+    output: Vec(u8)
+    if !JSON.JsonWriteInto(*output,document,document.root,JSON.JsonCompactStyle(false)) { Auth.WipeOwned(*output); return "" }
+    return BuilderFinish(output)
+}
+ConfigJSON :: (config: Config) -> string {
+    out: Vec(u8)
+    if !ConfigInto(config,*out) { Auth.WipeOwned(*out); return "" }
+    return BuilderFinish(out)
+}
+ConfigInto :: (config: Config, out: *Vec(u8)) -> bool {
+    if !VecReserve(<<out,512) { return false }
+    BuilderPrint(out,"{\"auto_lock\":%,\"enabled\":%,\"method\":",config.auto_lock,ifx config.enabled then "true" else "false")
+    if !JSON.JsonQuoteInto(out,config.method,false) { return false }
+    BuilderPrint(out,",\"verifier\":")
+    if !JSON.JsonQuoteInto(out,config.verifier,false) { return false }
+    if config.version != 0 { BuilderPrint(out,",\"version\":%",config.version) }
+    BuilderPrint(out,"}")
+    return true
+}
+Damaged :: () -> Config { result: Config; result.method = "hidden"; result.enabled = true; return result }
+
+#scope_export
+Settings :: (lib: *Store.Library) -> Config {
+    config: Config; config.method = "hidden"
+    path := Path(lib); defer { Auth.ReleaseOwned(path,false) }
+    if Tree.PathStatus(path,false).kind == Tree.PathKind.Missing { return config }
+    raw: Vec(u8); defer { Auth.WipeOwned(*raw) }
+    input: JSON.JsonDocument; defer { JSON.JsonReset(*input) }; JSON.JsonSetEraser(*input,Auth.JsonErase)
+    if !Vault.ReadMarkerInto(path,*raw) || !JSON.JsonRead(*input,TextView(VecSlice(raw,0,raw.count)),Auth.JsonErase) ||
+        JSON.JsonKindOf(*input,input.root) != JSON.JsonKind.Object { return Damaged() }
+    version,version_ok := JSON.JsonInteger(*input,JSON.JsonMember(*input,input.root,"version"))
+    enabled,enabled_ok := JSON.JsonBool(*input,JSON.JsonMember(*input,input.root,"enabled"))
+    if !version_ok || !enabled_ok { return Damaged() }
+    config.enabled = enabled
+    if version == 1 && JSON.JsonCount(*input,input.root) == 2 { return config }
+    if (version != 2 && version != 3) || JSON.JsonCount(*input,input.root) != (ifx version == 3 then 5 else 4) { return Damaged() }
+    method := Text(*input,input.root,"method"); defer { Auth.ReleaseOwned(method) }
+    verifier_node := JSON.JsonMember(*input,input.root,"verifier")
+    verifier_bytes: Vec(u8); defer { Auth.WipeOwned(*verifier_bytes) }
+    if !JSON.JsonStringInto(*input,verifier_node,*verifier_bytes) { return Damaged() }
+    verifier := TextView(VecSlice(verifier_bytes,0,verifier_bytes.count))
+    if (method != "hidden" && method != "pin" && method != "password") || JSON.JsonKindOf(*input,verifier_node) != JSON.JsonKind.String { return Damaged() }
+    if (method == "hidden" && verifier.count != 0) || (method != "hidden" && !Vault.VerifierValid(verifier)) { return Damaged() }
+    delay: s64
+    if version == 3 {
+        value,valid := JSON.JsonInteger(*input,JSON.JsonMember(*input,input.root,"auto_lock"))
+        if !valid || !AllowedDelay(value) { return Damaged() }
+        delay = value
+    }
+    config.version = cast(s32)version
+    config.method = ifx method == "pin" then "pin" else (ifx method == "password" then "password" else "hidden")
+    config.verifier = JSON.JsonString(*input,verifier_node)
+    if verifier.count > 0 && config.verifier.count == 0 { return Damaged() }
+    config.owned_verifier = config.verifier.count > 0; config.auto_lock = delay
+    return config
+}
+Enabled :: (lib: *Store.Library) -> bool { config := Settings(lib); defer { ClearConfig(*config) }; return config.enabled }
+Fingerprint :: (lib: *Store.Library) -> string {
+    config := Settings(lib); defer { ClearConfig(*config) }
+    marker := ifx config.method == "hidden" then Vault.Path(lib) else Path(lib)
+    defer { Auth.ReleaseOwned(marker,false) }
+    raw: Vec(u8); text: Vec(u8)
+    defer { Auth.WipeOwned(*raw); Auth.WipeOwned(*text) }
+    if !Vault.ReadMarkerInto(marker,*raw) || !VecReserve(text,raw.count+512) || !ConfigInto(config,*text) { return "" }
+    BuilderPrint(*text,"%",TextView(VecSlice(raw,0,raw.count)))
+    digest := Crypto.Sha256Of(TextView(VecSlice(text,0,text.count)))
+    bytes: [65]u8; unused Crypto.BytesToHex(*digest[0],32,*bytes[0],65)
+    out: Vec(u8); BuilderPrint(*out,"%",TextUntilNul(bytes[:]))
+    return BuilderFinish(out)
+}
+Unlocked :: (lib: *Store.Library, token: string, renew: bool = false, registry: *Access.Registry = null) -> bool {
+    if lib == null { return false }
+    stamp := Fingerprint(lib)
+    defer { Auth.ReleaseOwned(stamp,false) }
+    return stamp.count > 0 && Access.Deadline(lib.root,Access.APP,token,stamp,renew,registry) > 0
+}
+Grant :: (lib: *Store.Library, registry: *Access.Registry = null) -> string,string {
+    stamp := Fingerprint(lib)
+    defer { Auth.ReleaseOwned(stamp,false) }
+    if stamp.count == 0 { return "","Local password settings need recovery; originals and backup keys remain intact" }
+    token,error := Access.Grant(lib.root,Access.APP,stamp,registry)
+    return token,error
+}
+Revoke :: (lib: *Store.Library, registry: *Access.Registry = null) { Access.Revoke(lib.root,Access.APP,registry) }
+State :: (lib: *Store.Library, token: string = "", renew: bool = false, registry: *Access.Registry = null) -> string {
+    config := Settings(lib); defer { ClearConfig(*config) }
+    document: JSON.JsonDocument; defer { JSON.JsonReset(*document) }; JSON.JsonSetEraser(*document,Auth.JsonErase); document.root = JSON.JsonNewObject(*document)
+    Put(*document,"app_lock_enabled",ifx config.enabled then 1 else 0)
+    Put(*document,"app_locked",ifx config.enabled && !Unlocked(lib,token,renew,registry) then 1 else 0)
+    Put(*document,"app_lock_configured",ifx Vault.Configured(lib) then 1 else 0)
+    Put(*document,"app_lock_delay",config.auto_lock)
+    Put(*document,"app_lock_method",ifx config.method == "pin" then 1 else (ifx config.method == "password" then 2 else 0))
+    return Serialize(*document)
+}
+Empty :: (lib: *Store.Library, message: string = "Photos is locked", registry: *Access.Registry = null) -> string {
+    state := State(lib,"",false,registry); defer { Auth.ReleaseOwned(state) }
+    document: JSON.JsonDocument; defer { JSON.JsonReset(*document) }; JSON.JsonSetEraser(*document,Auth.JsonErase); unused JSON.JsonRead(*document,state,Auth.JsonErase)
+    unused JSON.JsonSet(*document,document.root,"photos",JSON.JsonNewArray(*document))
+    unused JSON.JsonSet(*document,document.root,"albums",JSON.JsonNewArray(*document))
+    Put(*document,"count",0); Put(*document,"total",0); Put(*document,"pending",0); Put(*document,"vault_unlocked",0)
+    PutText(*document,"vault_token",""); PutText(*document,"status",message)
+    return Serialize(*document)
+}
+Authenticate :: (lib: *Store.Library, password: []u8, registry: *Access.Registry = null) -> string {
+    config := Settings(lib); defer { ClearConfig(*config) }
+    if config.method == "hidden" {
+        token,error := Vault.VaultAuthenticate(lib,password,false,registry)
+        defer { Auth.ReleaseOwned(token) }
+        if error.count == 0 { Vault.Lock(lib,token,registry) }
+        return error
+    }
+    error := Access.CheckAttempts(lib.root,Access.APP,registry)
+    if error.count > 0 { return error }
+    error = Vault.PasswordError(password,config.method == "pin")
+    code: s32 = 2
+    if error.count == 0 { code = Auth.NativeVerify(password,config.verifier,config.method == "pin") }
+    if error.count > 0 || code != 0 {
+        attempt_error := Access.FailedAttempt(lib.root,Access.APP,registry)
+        if attempt_error.count > 0 { return attempt_error }
+        if error.count > 0 { return error }
+        if code == 1 { return ifx config.method == "pin" then "Incorrect PIN" else "Incorrect password" }
+        return "App authentication could not finish"
+    }
+    return Access.ClearAttempts(lib.root,Access.APP,registry)
+}
+
+#scope_file
+Save :: (lib: *Store.Library, text: string) -> bool {
+    path := Path(lib); defer { Auth.ReleaseOwned(path,false) }
+    descriptor := cast(*TextDescriptor)*text
+    return text.count > 0 && LibraryFiles.Atomic(path,BytesFromPointer(descriptor.data,cast(u64)text.count))
+}
+Error :: (response: string, error: string, checked: bool = false) -> string {
+    defer { Auth.ReleaseOwned(response) }
+    document: JSON.JsonDocument; defer { JSON.JsonReset(*document) }; JSON.JsonSetEraser(*document,Auth.JsonErase); unused JSON.JsonRead(*document,response,Auth.JsonErase)
+    PutText(*document,"error",error)
+    if checked { Put(*document,"app_lock_checked",1) }
+    return Serialize(*document)
+}
+Decorate :: (response: string, key: string, token: string = "", status: string = "") -> string {
+    defer { Auth.ReleaseOwned(response) }
+    document: JSON.JsonDocument; defer { JSON.JsonReset(*document) }; JSON.JsonSetEraser(*document,Auth.JsonErase); unused JSON.JsonRead(*document,response,Auth.JsonErase)
+    Put(*document,key,1)
+    if token.count > 0 { PutText(*document,"app_lock_token",token) }
+    if status.count > 0 { PutText(*document,"status",status) }
+    return Serialize(*document)
+}
+RouteInside :: (lib: *Store.Library, input: *JSON.JsonDocument, registry: *Access.Registry) -> string,bool {
+    action := Text(input,input.root,"action"); defer { Auth.ReleaseOwned(action) }; token := Text(input,input.root,"app_lock_token"); defer { Auth.ReleaseOwned(token) }
+    active := Enabled(lib)
+    // The document and this owned copy both wipe their decoded secret bytes.
+    // C39 remains responsible for the original request's lifetime.
+    value_bytes: Vec(u8); defer { Auth.WipeOwned(*value_bytes) }
+    value_node := JSON.JsonMember(input,input.root,"value")
+    if JSON.JsonKindOf(input,value_node) == JSON.JsonKind.String &&
+        !JSON.JsonStringInto(input,value_node,*value_bytes) {
+        return Error(Empty(lib,"Photos is locked",registry),"App authentication could not finish"),true
+    }
+    value := TextView(VecSlice(value_bytes,0,value_bytes.count))
+    password: []u8
+    if value_bytes.count <= 1024 { password = VecSlice(value_bytes,0,value_bytes.count) }
+    if action == "app_lock_unlock" {
+        if !active { return Error(Empty(lib,"Photos is locked",registry),"App lock is not enabled"),true }
+        stamp := Fingerprint(lib)
+        defer { Auth.ReleaseOwned(stamp,false) }
+        error := Authenticate(lib,password,registry)
+        if error.count > 0 { return Error(Empty(lib,"Photos is locked",registry),error),true }
+        current := Fingerprint(lib); defer { Auth.ReleaseOwned(current,false) }
+        if stamp.count == 0 || stamp != current { return Error(Empty(lib,"Photos is locked",registry),"Local password settings need recovery; originals and backup keys remain intact"),true }
+        fresh,grant_error := Access.Grant(lib.root,Access.APP,stamp,registry)
+        defer { Auth.ReleaseOwned(fresh) }
+        if grant_error.count > 0 { return Error(Empty(lib,"Photos is locked",registry),grant_error),true }
+        return Decorate(State(lib,fresh,false,registry),"app_lock_authorized",fresh),true
+    }
+    if action == "app_lock_lock" { Revoke(lib,registry); Vault.RevokeAll(lib,registry); return Empty(lib,"Photos is locked",registry),true }
+    if active && !Unlocked(lib,token,false,registry) { return Empty(lib,"Photos is locked",registry),true }
+    if action == "app_lock_delay" {
+        error: string
+        if !active { error = "Enable App lock before choosing its background delay" }
+        delay: s64 = -1
+        if value == "0" { delay = 0 } else if value == "5" { delay = 5 } else if value == "15" { delay = 15 }
+        else if value == "60" { delay = 60 } else if value == "300" { delay = 300 } else if value == "1800" { delay = 1800 }
+        if error.count == 0 && delay < 0 { error = "Choose Immediately, 5 seconds, 15 seconds, 1 minute, 5 minutes or 30 minutes" }
+        if error.count == 0 {
+            config := Settings(lib); defer { ClearConfig(*config) }; config.version = 3; config.auto_lock = delay
+            payload := ConfigJSON(config); defer { Auth.ReleaseOwned(payload) }
+            if !Save(lib,payload) { error = "Local password settings cannot be replaced safely" }
+        }
+        if error.count == 0 {
+            Revoke(lib,registry); fresh,grant_error := Grant(lib,registry)
+            defer { Auth.ReleaseOwned(fresh) }
+            if grant_error.count == 0 { return Decorate(State(lib,fresh,false,registry),"app_lock_checked",fresh,"Background lock delay saved on this device"),true }
+            error = grant_error
+        }
+        return Error(State(lib,token,false,registry),error,true),true
+    }
+    if action == "app_lock_enable" || action == "app_lock_disable" || action == "app_lock_pin" || action == "app_lock_password" {
+        config: Config; config.method = "hidden"; error: string
+        verifier: Vec(u8); defer { Auth.WipeOwned(*verifier) }
+        if action == "app_lock_pin" || action == "app_lock_password" {
+            error = Vault.HashPasswordInto(password,*verifier,action == "app_lock_pin")
+            previous := Settings(lib); defer { ClearConfig(*previous) }; config.version = 3; config.enabled = true
+            config.method = ifx action == "app_lock_pin" then "pin" else "password"
+            config.verifier = TextView(VecSlice(verifier,0,verifier.count)); config.auto_lock = previous.auto_lock
+        } else {
+            if action == "app_lock_enable" {
+                hidden_token,auth_error := Vault.VaultAuthenticate(lib,password,false,registry); error = auth_error
+                defer { Auth.ReleaseOwned(hidden_token) }
+                if error.count == 0 { Vault.Lock(lib,hidden_token,registry) }
+                previous := Settings(lib); defer { ClearConfig(*previous) }; config.version = 3; config.enabled = true; config.auto_lock = previous.auto_lock
+            } else { error = Authenticate(lib,password,registry); config.version = 1 }
+        }
+        if error.count == 0 && active && !Unlocked(lib,token,false,registry) { error = "App access ended; unlock before changing its settings" }
+        payload: Vec(u8); defer { Auth.WipeOwned(*payload) }
+        if action == "app_lock_disable" { BuilderPrint(*payload,"{\"version\":1,\"enabled\":false}") }
+        else if !ConfigInto(config,*payload) { error = "Local password settings cannot be replaced safely" }
+        if error.count == 0 && !Save(lib,TextView(VecSlice(payload,0,payload.count))) { error = "Local password settings cannot be replaced safely" }
+        if error.count > 0 { return Error(ifx active then Empty(lib,"Photos is locked",registry) else State(lib,token,false,registry),error),true }
+        Revoke(lib,registry); Vault.RevokeAll(lib,registry)
+        error = Access.ClearAttempts(lib.root,Access.APP,registry)
+        if error.count > 0 { return Error(Empty(lib,"Photos is locked",registry),error),true }
+        return Decorate(Empty(lib,ifx action == "app_lock_disable" then "App lock disabled" else "App lock enabled",registry),"app_lock_changed"),true
+    }
+    if action == "app_lock_check" { return Decorate(State(lib,token,true,registry),"app_lock_checked"),true }
+    return "",false
+}
+
+#scope_export
+AppLockRoute :: (lib: *Store.Library, request: string, registry: *Access.Registry = null) -> string,bool {
+    if lib == null { return Auth.CloneOwned("{\"error\":\"Photo library is not open\"}"),true }
+    input: JSON.JsonDocument
+    defer { JSON.JsonReset(*input) }
+    if !JSON.JsonRead(*input,request,Auth.JsonErase) || JSON.JsonKindOf(*input,input.root) != JSON.JsonKind.Object { return Error(Empty(lib,"Photos is locked",registry),"Choose a valid Photos request"),true }
+    action := Text(*input,input.root,"action"); defer { Auth.ReleaseOwned(action) }
+    changing := action == "app_lock_delay" || action == "app_lock_enable" || action == "app_lock_disable" || action == "app_lock_pin" || action == "app_lock_password"
+    if changing || action == "app_lock_unlock" {
+        private := Tree.JoinPath(lib.root,"private"); defer { Auth.ReleaseOwned(private,false) }
+        lock := Tree.JoinPath(private,".app-lock.lock"); defer { Auth.ReleaseOwned(lock,false) }
+        if !Tree.CreateDirectories(private,448) { return Error(Empty(lib,"Photos is locked",registry),"Local password settings cannot be replaced safely"),true }
+        fd := Vault.LockCredential(lock)
+        if fd < 0 { return Error(Empty(lib,"Photos is locked",registry),"Local password settings cannot be replaced safely"),true }
+        defer { Vault.UnlockCredential(fd) }
+        return RouteInside(lib,*input,registry)
+    }
+    return RouteInside(lib,*input,registry)
+}

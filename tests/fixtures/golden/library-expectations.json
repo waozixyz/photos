@@ -1,0 +1,718 @@
+{
+  "current": {
+    "albums": {
+      "columns": [
+        "id",
+        "name",
+        "description",
+        "cover",
+        "pinned",
+        "archived",
+        "deleted",
+        "created",
+        "updated",
+        "dirty",
+        "filter",
+        "auto_people",
+        "entity",
+        "record"
+      ],
+      "rows": [
+        {
+          "archived": 0,
+          "auto_people": "[\"37471b356aba3c12a3479285ca89e098\"]",
+          "cover": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a",
+          "created": 1700000000.125,
+          "deleted": 0,
+          "description": "Synthetic preserved description",
+          "dirty": 1,
+          "entity": "0123456789abcdef0123456789abcdef",
+          "filter": "tag:fixture",
+          "id": "c49255fdfc524508a0b1f0695ed7afd2ceeafe3d95d16eb6a015f2ad935b9fb4",
+          "name": "Fixture album",
+          "pinned": 1,
+          "record": "{\"unknown\":{\"keep\":[null,\"旅行\"]}}",
+          "updated": 1700000000.125
+        },
+        {
+          "archived": 0,
+          "auto_people": "[]",
+          "cover": "",
+          "created": 1700000000.125,
+          "deleted": 0,
+          "description": "",
+          "dirty": 1,
+          "entity": "",
+          "filter": "",
+          "id": "83d6ecbb59b72e391b681791b33ccf26434f5e2579991c5a253bf6b229bb0dfc",
+          "name": "Imported only",
+          "pinned": 0,
+          "record": "{}",
+          "updated": 1700000000.125
+        }
+      ]
+    },
+    "face_scans": {
+      "columns": [
+        "photo_id",
+        "model",
+        "error"
+      ],
+      "rows": [
+        {
+          "error": "",
+          "model": "synthetic-face",
+          "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a"
+        }
+      ]
+    },
+    "faces": {
+      "columns": [
+        "id",
+        "photo_id",
+        "person_id",
+        "rect",
+        "embedding",
+        "excluded"
+      ],
+      "rows": [
+        {
+          "embedding": {
+            "blob_hex": "0000803f0000003f000080bf00000000"
+          },
+          "excluded": "[\"synthetic-excluded-person\"]",
+          "id": "synthetic-face",
+          "person_id": "37471b356aba3c12a3479285ca89e098",
+          "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a",
+          "rect": "[0.1,0.2,0.3,0.4]"
+        }
+      ]
+    },
+    "motion_scans": {
+      "columns": [
+        "photo_id",
+        "reader_version"
+      ],
+      "rows": [
+        {
+          "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a",
+          "reader_version": 1
+        }
+      ]
+    },
+    "people": {
+      "columns": [
+        "id",
+        "name",
+        "ignored",
+        "updated",
+        "birth"
+      ],
+      "rows": [
+        {
+          "birth": "1962-02-03",
+          "id": "37471b356aba3c12a3479285ca89e098",
+          "ignored": 0,
+          "name": "Synthetic person",
+          "updated": 1700000000.125
+        }
+      ]
+    },
+    "person_tag_edits": {
+      "columns": [
+        "photo_id"
+      ],
+      "rows": [
+        {
+          "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a"
+        }
+      ]
+    },
+    "person_tags": {
+      "columns": [
+        "photo_id",
+        "person_id"
+      ],
+      "rows": [
+        {
+          "person_id": "37471b356aba3c12a3479285ca89e098",
+          "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a"
+        }
+      ]
+    },
+    "photos": {
+      "columns": [
+        "id",
+        "name",
+        "extension",
+        "kind",
+        "size",
+        "taken",
+        "width",
+        "height",
+        "metadata",
+        "albums",
+        "favorite",
+        "hidden",
+        "archived",
+        "trashed",
+        "caption",
+        "tags",
+        "updated",
+        "dirty",
+        "manifest",
+        "edits"
+      ],
+      "rows": [
+        {
+          "albums": "[\"Fixture album\",\"Imported only\"]",
+          "archived": 1,
+          "caption": "Synthetic caption with 'quotes' and sí",
+          "dirty": 1,
+          "edits": "{\"rotate\":90,\"unknown\":{\"keep\":true}}",
+          "extension": ".jpg",
+          "favorite": 1,
+          "height": 9,
+          "hidden": 0,
+          "id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a",
+          "kind": "photo",
+          "manifest": "{\"unknown\":{\"preserve\":[null,1152921504606846983]}}",
+          "metadata": "{\"camera_date\":\"1965:02:03 04:05:06\",\"unknown\":{\"label\":\"Synthetic: sí 旅行\",\"large_integer\":1152921504606846979,\"list\":[true,2],\"null\":null}}",
+          "name": "Synthetic 'trip' 旅行.jpg",
+          "size": 128,
+          "tags": "fixture,旅行",
+          "taken": -154641294.5,
+          "trashed": 0,
+          "updated": 1700000000.125,
+          "width": 17
+        }
+      ]
+    },
+    "semantic_embeddings": {
+      "columns": [
+        "photo_id",
+        "model",
+        "embedding",
+        "error"
+      ],
+      "rows": [
+        {
+          "embedding": {
+            "blob_hex": "0000803f0000003f000080bf00000000"
+          },
+          "error": "",
+          "model": "synthetic-clip",
+          "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a"
+        }
+      ]
+    },
+    "settings": {
+      "columns": [
+        "key",
+        "value"
+      ],
+      "rows": [
+        {
+          "key": "album_catalog_migrated",
+          "value": "true"
+        },
+        {
+          "key": "fixture_unknown",
+          "value": "{\"enabled\":false,\"large_integer\":1152921504606846987,\"nested\":{\"null\":null},\"unicode\":\"旅行\"}"
+        }
+      ]
+    },
+    "sources": {
+      "columns": [
+        "path",
+        "size",
+        "mtime",
+        "meta_stamp",
+        "photo_id"
+      ],
+      "rows": [
+        {
+          "meta_stamp": "synthetic-stamp",
+          "mtime": 1700000000000000000,
+          "path": "/synthetic/photos/trip.jpg",
+          "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a",
+          "size": 128
+        }
+      ]
+    }
+  },
+  "fixture_time": 1700000000.125,
+  "legacy": {
+    "albums": {
+      "columns": [
+        "id",
+        "name",
+        "description",
+        "cover",
+        "pinned",
+        "archived",
+        "deleted",
+        "created",
+        "updated",
+        "dirty"
+      ],
+      "rows": [
+        {
+          "archived": 0,
+          "cover": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a",
+          "created": 1700000000.125,
+          "deleted": 0,
+          "description": "Synthetic preserved description",
+          "dirty": 1,
+          "id": "c49255fdfc524508a0b1f0695ed7afd2ceeafe3d95d16eb6a015f2ad935b9fb4",
+          "name": "Fixture album",
+          "pinned": 1,
+          "updated": 1700000000.125
+        }
+      ]
+    },
+    "face_scans": {
+      "columns": [
+        "photo_id",
+        "model",
+        "error"
+      ],
+      "rows": [
+        {
+          "error": "",
+          "model": "synthetic-face",
+          "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a"
+        }
+      ]
+    },
+    "faces": {
+      "columns": [
+        "id",
+        "photo_id",
+        "person_id",
+        "rect",
+        "embedding",
+        "excluded"
+      ],
+      "rows": [
+        {
+          "embedding": {
+            "blob_hex": "0000803f0000003f000080bf00000000"
+          },
+          "excluded": "[\"synthetic-excluded-person\"]",
+          "id": "synthetic-face",
+          "person_id": "37471b356aba3c12a3479285ca89e098",
+          "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a",
+          "rect": "[0.1,0.2,0.3,0.4]"
+        }
+      ]
+    },
+    "motion_scans": {
+      "columns": [
+        "photo_id",
+        "reader_version"
+      ],
+      "rows": [
+        {
+          "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a",
+          "reader_version": 1
+        }
+      ]
+    },
+    "people": {
+      "columns": [
+        "id",
+        "name",
+        "ignored",
+        "updated"
+      ],
+      "rows": [
+        {
+          "id": "37471b356aba3c12a3479285ca89e098",
+          "ignored": 0,
+          "name": "Synthetic person",
+          "updated": 1700000000.125
+        }
+      ]
+    },
+    "person_tag_edits": {
+      "columns": [
+        "photo_id"
+      ],
+      "rows": [
+        {
+          "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a"
+        }
+      ]
+    },
+    "person_tags": {
+      "columns": [
+        "photo_id",
+        "person_id"
+      ],
+      "rows": [
+        {
+          "person_id": "37471b356aba3c12a3479285ca89e098",
+          "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a"
+        }
+      ]
+    },
+    "photos": {
+      "columns": [
+        "id",
+        "name",
+        "extension",
+        "kind",
+        "size",
+        "taken",
+        "width",
+        "height",
+        "metadata",
+        "albums",
+        "favorite",
+        "hidden",
+        "trashed",
+        "caption",
+        "tags",
+        "updated",
+        "dirty",
+        "manifest"
+      ],
+      "rows": [
+        {
+          "albums": "[\"Fixture album\",\"Imported only\"]",
+          "caption": "Synthetic caption with 'quotes' and sí",
+          "dirty": 1,
+          "extension": ".jpg",
+          "favorite": 1,
+          "height": 9,
+          "hidden": 0,
+          "id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a",
+          "kind": "photo",
+          "manifest": "{\"unknown\":{\"preserve\":[null,1152921504606846983]}}",
+          "metadata": "{\"camera_date\":\"1965:02:03 04:05:06\",\"unknown\":{\"label\":\"Synthetic: sí 旅行\",\"large_integer\":1152921504606846979,\"list\":[true,2],\"null\":null}}",
+          "name": "Synthetic 'trip' 旅行.jpg",
+          "size": 128,
+          "tags": "fixture,旅行",
+          "taken": -154641294.5,
+          "trashed": 0,
+          "updated": 1700000000.125,
+          "width": 17
+        }
+      ]
+    },
+    "semantic_embeddings": {
+      "columns": [
+        "photo_id",
+        "model",
+        "embedding",
+        "error"
+      ],
+      "rows": [
+        {
+          "embedding": {
+            "blob_hex": "0000803f0000003f000080bf00000000"
+          },
+          "error": "",
+          "model": "synthetic-clip",
+          "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a"
+        }
+      ]
+    },
+    "settings": {
+      "columns": [
+        "key",
+        "value"
+      ],
+      "rows": [
+        {
+          "key": "fixture_unknown",
+          "value": "{\"enabled\":false,\"large_integer\":1152921504606846987,\"nested\":{\"null\":null},\"unicode\":\"旅行\"}"
+        }
+      ]
+    },
+    "sources": {
+      "columns": [
+        "path",
+        "size",
+        "mtime",
+        "meta_stamp",
+        "photo_id"
+      ],
+      "rows": [
+        {
+          "meta_stamp": "synthetic-stamp",
+          "mtime": 1700000000000000000,
+          "path": "/synthetic/photos/trip.jpg",
+          "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a",
+          "size": 128
+        }
+      ]
+    }
+  },
+  "legacy_migrated": {
+    "albums": {
+      "columns": [
+        "id",
+        "name",
+        "description",
+        "cover",
+        "pinned",
+        "archived",
+        "deleted",
+        "created",
+        "updated",
+        "dirty",
+        "filter",
+        "auto_people",
+        "entity",
+        "record"
+      ],
+      "rows": [
+        {
+          "archived": 0,
+          "auto_people": "[]",
+          "cover": "",
+          "created": 1700000000.125,
+          "deleted": 0,
+          "description": "",
+          "dirty": 1,
+          "entity": "",
+          "filter": "",
+          "id": "83d6ecbb59b72e391b681791b33ccf26434f5e2579991c5a253bf6b229bb0dfc",
+          "name": "Imported only",
+          "pinned": 0,
+          "record": "{}",
+          "updated": 1700000000.125
+        },
+        {
+          "archived": 0,
+          "auto_people": "[]",
+          "cover": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a",
+          "created": 1700000000.125,
+          "deleted": 0,
+          "description": "Synthetic preserved description",
+          "dirty": 1,
+          "entity": "",
+          "filter": "",
+          "id": "c49255fdfc524508a0b1f0695ed7afd2ceeafe3d95d16eb6a015f2ad935b9fb4",
+          "name": "Fixture album",
+          "pinned": 1,
+          "record": "{}",
+          "updated": 1700000000.125
+        }
+      ]
+    },
+    "face_scans": {
+      "columns": [
+        "photo_id",
+        "model",
+        "error"
+      ],
+      "rows": [
+        {
+          "error": "",
+          "model": "synthetic-face",
+          "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a"
+        }
+      ]
+    },
+    "faces": {
+      "columns": [
+        "id",
+        "photo_id",
+        "person_id",
+        "rect",
+        "embedding",
+        "excluded"
+      ],
+      "rows": [
+        {
+          "embedding": {
+            "blob_hex": "0000803f0000003f000080bf00000000"
+          },
+          "excluded": "[\"synthetic-excluded-person\"]",
+          "id": "synthetic-face",
+          "person_id": "37471b356aba3c12a3479285ca89e098",
+          "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a",
+          "rect": "[0.1,0.2,0.3,0.4]"
+        }
+      ]
+    },
+    "motion_scans": {
+      "columns": [
+        "photo_id",
+        "reader_version"
+      ],
+      "rows": [
+        {
+          "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a",
+          "reader_version": 1
+        }
+      ]
+    },
+    "people": {
+      "columns": [
+        "id",
+        "name",
+        "ignored",
+        "updated",
+        "birth"
+      ],
+      "rows": [
+        {
+          "birth": "",
+          "id": "37471b356aba3c12a3479285ca89e098",
+          "ignored": 0,
+          "name": "Synthetic person",
+          "updated": 1700000000.125
+        }
+      ]
+    },
+    "person_tag_edits": {
+      "columns": [
+        "photo_id"
+      ],
+      "rows": [
+        {
+          "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a"
+        }
+      ]
+    },
+    "person_tags": {
+      "columns": [
+        "photo_id",
+        "person_id"
+      ],
+      "rows": [
+        {
+          "person_id": "37471b356aba3c12a3479285ca89e098",
+          "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a"
+        }
+      ]
+    },
+    "photos": {
+      "columns": [
+        "id",
+        "name",
+        "extension",
+        "kind",
+        "size",
+        "taken",
+        "width",
+        "height",
+        "metadata",
+        "albums",
+        "favorite",
+        "hidden",
+        "trashed",
+        "caption",
+        "tags",
+        "updated",
+        "dirty",
+        "manifest",
+        "edits",
+        "archived"
+      ],
+      "rows": [
+        {
+          "albums": "[\"Fixture album\",\"Imported only\"]",
+          "archived": 0,
+          "caption": "Synthetic caption with 'quotes' and sí",
+          "dirty": 1,
+          "edits": "{}",
+          "extension": ".jpg",
+          "favorite": 1,
+          "height": 9,
+          "hidden": 0,
+          "id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a",
+          "kind": "photo",
+          "manifest": "{\"unknown\":{\"preserve\":[null,1152921504606846983]}}",
+          "metadata": "{\"camera_date\":\"1965:02:03 04:05:06\",\"unknown\":{\"label\":\"Synthetic: sí 旅行\",\"large_integer\":1152921504606846979,\"list\":[true,2],\"null\":null}}",
+          "name": "Synthetic 'trip' 旅行.jpg",
+          "size": 128,
+          "tags": "fixture,旅行",
+          "taken": -154641294.5,
+          "trashed": 0,
+          "updated": 1700000000.125,
+          "width": 17
+        }
+      ]
+    },
+    "semantic_embeddings": {
+      "columns": [
+        "photo_id",
+        "model",
+        "embedding",
+        "error"
+      ],
+      "rows": [
+        {
+          "embedding": {
+            "blob_hex": "0000803f0000003f000080bf00000000"
+          },
+          "error": "",
+          "model": "synthetic-clip",
+          "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a"
+        }
+      ]
+    },
+    "settings": {
+      "columns": [
+        "key",
+        "value"
+      ],
+      "rows": [
+        {
+          "key": "album_catalog_migrated",
+          "value": "true"
+        },
+        {
+          "key": "fixture_unknown",
+          "value": "{\"enabled\":false,\"large_integer\":1152921504606846987,\"nested\":{\"null\":null},\"unicode\":\"旅行\"}"
+        }
+      ]
+    },
+    "sources": {
+      "columns": [
+        "path",
+        "size",
+        "mtime",
+        "meta_stamp",
+        "photo_id"
+      ],
+      "rows": [
+        {
+          "meta_stamp": "synthetic-stamp",
+          "mtime": 1700000000000000000,
+          "path": "/synthetic/photos/trip.jpg",
+          "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a",
+          "size": 128
+        }
+      ]
+    }
+  },
+  "legacy_missing_columns": {
+    "albums": [
+      "filter",
+      "auto_people",
+      "entity",
+      "record"
+    ],
+    "people": [
+      "birth"
+    ],
+    "photos": [
+      "edits",
+      "archived"
+    ]
+  },
+  "notes": [
+    "Legacy album catalog marker and one album row are absent.",
+    "Missing fields receive defaults; existing IDs and other values remain.",
+    "Protocol, encryption and recovery fixtures remain pending."
+  ],
+  "person_id": "37471b356aba3c12a3479285ca89e098",
+  "photo_id": "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a",
+  "synthetic_only": true
+}

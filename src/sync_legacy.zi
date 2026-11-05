@@ -1,0 +1,524 @@
+// Read copies made by Photos' earlier account. Existing local photos always
+// win; each validated page and its checkpoint enter the library atomically.
+#scope_module
+using Client :: #import "sync_client";
+Store :: #import "library_store";
+Types :: #import "service_types";
+Wire :: #import "sync_crypto";
+Native :: #import "daochi_client/crypto_native";
+Transport :: #import "sync_http";
+SQL :: #import "sqlite/SQLite";
+JSON :: #import "std/json_document";
+UTF8 :: #import "std/utf8";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+sodium :: #system_library "sodium";
+DecodeRaw :: (out: *u8,capacity: usize,text: *u8,length: usize,ignore: *u8,count: *usize,end: **u8,variant: s32) -> s32 #foreign sodium "sodium_base642bin";
+
+Media :: "private.photos.v1.records.media";
+Albums :: "private.photos.v1.records.albums";
+Bytes :: (text: string) -> []u8 {
+    descriptor:=cast(*TextDescriptor)*text
+    return BytesFromPointer(descriptor.data,cast(u64)text.count)
+}
+Text :: (out: *Vec(u8)) -> string { return TextFromBytes(Wire.OutputBytes(out)) }
+Fail :: (client: *Client.SyncClient,message: string) -> string {
+    if client!=null { Store.SetError(client.library,message) }; return message
+}
+Exec :: (db: *void,sql: string) -> bool { return SQL.SqliteExecText(db,sql)==SQL.SQLITE_OK }
+Bind :: (statement: *void,index: s32,text: string) -> bool {
+    return SQL.SqliteBindTextString(statement,index,text,cast(s32)text.count)==SQL.SQLITE_OK
+}
+Column :: (statement: *void,index: s32,out: *Vec(u8)) -> bool {
+    count:=cast(s64)SQL.SqliteColumnBytes(statement,index)
+    if !Wire.PrepareOutput(out,count) { return false }
+    source:=SQL.SqliteColumnText(statement,index); target:=Wire.OutputBytes(out)
+    if count>0 && source==null { return false }
+    for i: 0..count-1 { target[i]=source[i] }; return true
+}
+Integer :: (db: *void,query: string) -> s64 {
+    statement: *void
+    if SQL.SqlitePrepareText(db,query,-1,*statement,null)!=SQL.SQLITE_OK { return -1 }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if SQL.SqliteStep(statement)!=SQL.SQLITE_ROW { return -1 }
+    return SQL.SqliteColumnInt64(statement,0)
+}
+Check :: (db: *void,query: string) -> bool { return Integer(db,query)==1 }
+Memory :: () -> *void {
+    db: *void
+    if SQL.SqliteOpenText(":memory:",*db,SQL.SQLITE_OPEN_READWRITE|SQL.SQLITE_OPEN_CREATE)!=SQL.SQLITE_OK {
+        if db!=null { unused SQL.SqliteClose(db) }; return null
+    }
+    if !Exec(db,"PRAGMA temp_store=MEMORY; PRAGMA secure_delete=ON") { unused SQL.SqliteClose(db); return null }
+    return db
+}
+Put :: (db: *void,table: string,json: string) -> bool {
+    query: Vec(u8); BuilderPrint(*query,"INSERT INTO %(data) VALUES(?)",table)
+    statement: *void
+    if SQL.SqlitePrepareText(db,Text(*query),-1,*statement,null)!=SQL.SQLITE_OK { return false }
+    defer { unused SQL.SqliteFinalize(statement) }
+    return Bind(statement,1,json) && SQL.SqliteStep(statement)==SQL.SQLITE_DONE
+}
+Setting :: (lib: *Store.Library,key: string,fallback: string,out: *Vec(u8)) -> bool {
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,"SELECT value,json_valid(value) FROM settings WHERE key=?",-1,*statement,null)!=SQL.SQLITE_OK { return false }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if !Bind(statement,1,key) { return false }
+    code:=SQL.SqliteStep(statement)
+    if code==SQL.SQLITE_DONE {
+        Wire.ClearOutput(out); return BuilderAppend(<<out,fallback)
+    }
+    return code==SQL.SQLITE_ROW && SQL.SqliteColumnInt64(statement,1)==1 && Column(statement,0,out)
+}
+Checkpoint :: (lib: *Store.Library,key: string,expected: string,fallback: string) -> bool {
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,"SELECT json(?) IS json(coalesce((SELECT value FROM settings WHERE key=?),?))",-1,*statement,null)!=SQL.SQLITE_OK { return false }
+    defer { unused SQL.SqliteFinalize(statement) }
+    return Bind(statement,1,expected) && Bind(statement,2,key) && Bind(statement,3,fallback) &&
+        SQL.SqliteStep(statement)==SQL.SQLITE_ROW && SQL.SqliteColumnInt64(statement,0)==1
+}
+SaveSetting :: (lib: *Store.Library,key: string,value: string) -> bool {
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,"INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",-1,*statement,null)!=SQL.SQLITE_OK { return false }
+    defer { unused SQL.SqliteFinalize(statement) }
+    return Bind(statement,1,key) && Bind(statement,2,value) && SQL.SqliteStep(statement)==SQL.SQLITE_DONE
+}
+QueryText :: (db: *void,query: string,out: *Vec(u8)) -> bool {
+    statement: *void
+    if SQL.SqlitePrepareText(db,query,-1,*statement,null)!=SQL.SQLITE_OK { return false }
+    defer { unused SQL.SqliteFinalize(statement) }
+    return SQL.SqliteStep(statement)==SQL.SQLITE_ROW && Column(statement,0,out)
+}
+Decode :: (text: string,out: *Vec(u8)) -> bool {
+    Wire.ClearOutput(out)
+    count:=text.count
+    // Both padded and unpadded base64url are emitted by existing apps.
+    while count>0 && text[count-1]==61 { count-=1 }
+    if text.count-count>2 || count%4==1 || !Wire.PrepareOutput(out,(count/4+1)*3) { return false }
+    input:=Bytes(text[:count]); decoded:=Wire.OutputBytes(out); length: usize; end: *u8
+    if DecodeRaw(ifx decoded.count>0 then *decoded[0] else null,cast(usize)decoded.count,
+        ifx input.count>0 then *input[0] else null,cast(usize)input.count,null,*length,*end,7)!=0 ||
+        cast(usize)end-cast(usize)(ifx input.count>0 then *input[0] else null)!=cast(usize)input.count {
+        Wire.ClearOutput(out); return false
+    }
+    unused VecResize(<<out,cast(s64)length); return true
+}
+
+#scope_export
+// PLAINTEXT is caller owned and must not alias RECORD. A tombstone returns
+// kind zero and an empty output. Failure always wipes previous output/tail.
+LegacyRecord :: (client: *Client.SyncClient,record: []u8,plaintext: *Vec(u8)) -> s32,string {
+    Wire.ClearOutput(plaintext)
+    if client==null || !client.legacy.valid || plaintext==null { return 0,Fail(client,"Earlier Photos account is unavailable") }
+    if record.count<2 || record.count>134217728 { return 0,Fail(client,"Node returned an unsupported earlier photo record; the cursor was retained") }
+    db:=Memory()
+    if db==null { return 0,Fail(client,"Cannot stage the earlier encrypted record") }
+    defer { unused SQL.SqliteClose(db) }
+    if !UTF8.Valid(TextFromBytes(record)) || !Exec(db,"CREATE TABLE record(data TEXT CHECK(json_valid(data))); CREATE TABLE envelope(data TEXT CHECK(json_valid(data))); CREATE TABLE plain(data TEXT CHECK(json_valid(data)))") ||
+        !Put(db,"record",TextFromBytes(record)) || !Check(db,"SELECT coalesce(json_type(data)='object' AND json_type(data,'$.collection')='text' AND json_extract(data,'$.collection') IN ('private.photos.v1.records.media','private.photos.v1.records.albums') AND json_type(data,'$.id')='text' AND length(CAST(json_extract(data,'$.id') AS BLOB))=64 AND json_extract(data,'$.id') NOT GLOB '*[^0-9a-f]*',0) FROM record") {
+        return 0,Fail(client,"Node returned an unsupported earlier photo record; the cursor was retained")
+    }
+    deleted:=Integer(db,"SELECT CASE json_type(data,'$.deleted_at') WHEN 'null' THEN 0 WHEN 'false' THEN 0 WHEN 'true' THEN 1 WHEN 'integer' THEN json_extract(data,'$.deleted_at')<>0 WHEN 'real' THEN json_extract(data,'$.deleted_at')<>0 WHEN 'text' THEN length(json_extract(data,'$.deleted_at'))>0 WHEN 'array' THEN json_array_length(data,'$.deleted_at')>0 WHEN 'object' THEN (SELECT count(*) FROM json_each(record.data,'$.deleted_at'))>0 ELSE 0 END FROM record")
+    if deleted==1 { return 0,"" }
+    kind:=Integer(db,"SELECT CASE json_extract(data,'$.collection') WHEN 'private.photos.v1.records.media' THEN 1 ELSE 2 END FROM record")
+    encoded: Vec(u8); envelope: Vec(u8); nonce: Vec(u8); sealed: Vec(u8); aad: Vec(u8); id: Vec(u8)
+    defer { Wire.ClearOutput(*encoded); Wire.ClearOutput(*envelope); Wire.ClearOutput(*nonce); Wire.ClearOutput(*sealed); Wire.ClearOutput(*aad); Wire.ClearOutput(*id) }
+    invalid:="Earlier encrypted record was moved or altered; the cursor was retained"
+    if !Check(db,"SELECT json_type(data,'$.ciphertext')='text' AND json_type(data,'$.nonce')='text' AND json_extract(data,'$.key_id')='main' FROM record") ||
+        !QueryText(db,"SELECT json_extract(data,'$.ciphertext') FROM record",*encoded) || !Decode(Text(*encoded),*envelope) ||
+        !UTF8.Valid(Text(*envelope)) || !Put(db,"envelope",Text(*envelope)) ||
+        !Check(db,"SELECT coalesce(json_type(e.data)='object' AND json_extract(e.data,'$.nonce')=json_extract(r.data,'$.nonce') AND json_extract(e.data,'$.key_id')='main' AND json_extract(e.data,'$.alg')='xchacha20poly1305' AND json_type(e.data,'$.aad')='object' AND (SELECT count(*) FROM json_each(e.data,'$.aad'))=5 AND json_extract(e.data,'$.aad.app_id')='photos' AND json_extract(e.data,'$.aad.collection')=json_extract(r.data,'$.collection') AND json_extract(e.data,'$.aad.id')=json_extract(r.data,'$.id') AND json_extract(e.data,'$.aad.schema')=CASE json_extract(r.data,'$.collection') WHEN 'private.photos.v1.records.media' THEN 'photos.media.v1' ELSE 'photos.album.v1' END,0) FROM envelope e,record r") {
+        return 0,Fail(client,invalid)
+    }
+    statement: *void
+    if SQL.SqlitePrepareText(db,"SELECT json_extract(data,'$.aad.account_id')=? FROM envelope",-1,*statement,null)!=SQL.SQLITE_OK { return 0,Fail(client,invalid) }
+    accountMatches:=Bind(statement,1,TextUntilNul(client.legacy.account_id[:])) && SQL.SqliteStep(statement)==SQL.SQLITE_ROW && SQL.SqliteColumnInt64(statement,0)==1
+    unused SQL.SqliteFinalize(statement)
+    if !accountMatches || !QueryText(db,"SELECT json_extract(data,'$.nonce') FROM envelope",*encoded) || !Decode(Text(*encoded),*nonce) ||
+        !QueryText(db,"SELECT json_extract(data,'$.ciphertext') FROM envelope",*encoded) || !Decode(Text(*encoded),*sealed) ||
+        !QueryText(db,"SELECT json_extract(data,'$.id') FROM record",*id) { return 0,Fail(client,invalid) }
+    if !VecReserve(aad,512) { return 0,Fail(client,"Cannot allocate earlier record authentication data") }
+    BuilderPrint(*aad,"{\"account_id\":\"%\",\"app_id\":\"photos\",\"collection\":\"%\",\"id\":\"%\",\"schema\":\"%\"}",
+        TextUntilNul(client.legacy.account_id[:]),ifx kind==1 then Media else Albums,Text(*id),ifx kind==1 then "photos.media.v1" else "photos.album.v1")
+    if !Wire.SyncDecrypt(client.key[:],Wire.OutputBytes(*sealed),Wire.OutputBytes(*aad),Wire.OutputBytes(*nonce),plaintext) ||
+        !UTF8.Valid(Text(plaintext)) || !Put(db,"plain",Text(plaintext)) ||
+        !Check(db,"SELECT coalesce(json_type(p.data)='object' AND json_type(p.data,'$.id')='text' AND json_extract(p.data,'$.id')=json_extract(r.data,'$.id'),0) FROM plain p,record r") {
+        Wire.ClearOutput(plaintext); return 0,Fail(client,invalid)
+    }
+    return cast(s32)kind,""
+}
+
+#scope_module
+ValidatePhoto :: (db: *void) -> bool {
+    return Check(db,"SELECT coalesce(json_type(data,'$.extension')='text' AND json_extract(data,'$.extension') IN ('.jpg','.jpeg','.jpe','.png','.webp','.gif','.heic','.heif','.avif','.tif','.tiff','.bmp','.dng','.cr2','.cr3','.nef','.nrw','.arw','.sr2','.srf','.orf','.rw2','.raf','.pef','.srw','.hif','.rwl','.ptx','.3fr','.fff','.iiq','.kdc','.dcr','.erf','.mrw','.mos','.mef','.mp4','.mov','.m4v','.3gp','.avi','.webm','.mpg','.mpeg','.mod','.flv','.mkv','.wmv') AND json_extract(data,'$.kind') IN ('photo','video') AND json_type(data,'$.name')='text' AND json_type(data,'$.size')='integer' AND typeof(json_extract(data,'$.size'))='integer' AND json_extract(data,'$.size')>=0 AND json_type(data,'$.width')='integer' AND json_type(data,'$.height')='integer' AND json_type(data,'$.caption')='text' AND json_type(data,'$.tags')='text' AND json_type(data,'$.trashed')='integer' AND json_extract(data,'$.trashed')>=0 AND json_type(data,'$.taken') IN ('integer','real') AND json_extract(data,'$.taken')>=-62135596800 AND json_extract(data,'$.taken')<253402300800 AND json_type(data,'$.updated') IN ('integer','real') AND json_extract(data,'$.updated')>=0 AND json_extract(data,'$.updated')<32503680000 AND (json_type(data,'$.metadata') IS NULL OR json_type(data,'$.metadata')='object') AND (json_type(data,'$.manifest')='object') AND json_type(data,'$.manifest.chunks')='array' AND (json_type(data,'$.edits') IS NULL OR json_type(data,'$.edits')='object') AND (json_type(data,'$.albums') IS NULL OR (json_type(data,'$.albums')='array' AND NOT EXISTS(SELECT 1 FROM json_each(data,'$.albums') WHERE type<>'text'))) AND json_type(data,'$.favorite') IN ('integer','true','false') AND json_extract(data,'$.favorite') IN (0,1) AND json_type(data,'$.hidden') IN ('integer','true','false') AND json_extract(data,'$.hidden') IN (0,1) AND (json_type(data,'$.archived') IS NULL OR (json_type(data,'$.archived') IN ('integer','true','false') AND json_extract(data,'$.archived') IN (0,1))),0) FROM incoming")
+}
+// One private scratch database holds decrypted records until every record is
+// validated. It is never attached to or persisted in the owner's database.
+StagePage :: (client: *Client.SyncClient,db: *void,page: []u8,since: string,cursor: string) -> string {
+    if !UTF8.Valid(TextFromBytes(page)) || !Exec(db,"CREATE TABLE page(data TEXT CHECK(json_valid(data))); CREATE TABLE checkpoints(since TEXT,cursor TEXT); CREATE TABLE decoded(kind INTEGER,data TEXT CHECK(json_valid(data))); CREATE TABLE incoming(data TEXT CHECK(json_valid(data)))") || !Put(db,"page",TextFromBytes(page)) {
+        return "Node returned an invalid earlier metadata page; the cursor was retained"
+    }
+    statement: *void
+    if SQL.SqlitePrepareText(db,"INSERT INTO checkpoints VALUES(?,?)",-1,*statement,null)!=SQL.SQLITE_OK { return "Cannot stage the earlier checkpoint" }
+    saved:=Bind(statement,1,since) && Bind(statement,2,cursor) && SQL.SqliteStep(statement)==SQL.SQLITE_DONE
+    unused SQL.SqliteFinalize(statement)
+    if !saved || !Check(db,"SELECT coalesce(json_type(p.data)='object' AND json_type(c.since)='integer' AND typeof(json_extract(c.since,'$'))='integer' AND json_extract(c.since,'$')>=0 AND json_extract(p.data,'$.status')='ok' AND coalesce(json_extract(p.data,'$.full_snapshot_required'),0)=0 AND json_type(p.data,'$.server_version')='integer' AND typeof(json_extract(p.data,'$.server_version'))='integer' AND json_extract(p.data,'$.server_version')>=json_extract(c.since,'$') AND json_type(p.data,'$.changes')='object' AND (json_type(p.data,'$.changes.encrypted_records') IS NULL OR json_type(p.data,'$.changes.encrypted_records') IN ('null','array')) AND coalesce(json_array_length(p.data,'$.changes.encrypted_records'),0)<=200 AND json_type(p.data,'$.changes_complete') IN ('true','false'),0) FROM page p,checkpoints c") {
+        return "Node returned an invalid earlier metadata page; the cursor was retained"
+    }
+    if Integer(db,"SELECT json_type(data,'$.changes_complete')='false' FROM page")==1 &&
+        !Check(db,"SELECT coalesce(json_type(p.data,'$.record_cursor')='object' AND json_array_length(p.data,'$.changes.encrypted_records')>0 AND json_type(p.data,'$.record_cursor.version')='integer' AND typeof(json_extract(p.data,'$.record_cursor.version'))='integer' AND json_extract(p.data,'$.record_cursor.version')>json_extract(c.since,'$') AND json_extract(p.data,'$.record_cursor.version')<=json_extract(p.data,'$.server_version') AND json_type(p.data,'$.record_cursor.collection')='text' AND json_type(p.data,'$.record_cursor.id')='text' AND (json_extract(p.data,'$.record_cursor.version'),json_extract(p.data,'$.record_cursor.collection'),json_extract(p.data,'$.record_cursor.id'))>(coalesce(json_extract(c.cursor,'$.version'),json_extract(c.since,'$')),coalesce(json_extract(c.cursor,'$.collection'),''),coalesce(json_extract(c.cursor,'$.id'),'')) AND json_extract(p.data,'$.record_cursor.collection')=json_extract(p.data,'$.changes.encrypted_records[#-1].collection') AND json_extract(p.data,'$.record_cursor.id')=json_extract(p.data,'$.changes.encrypted_records[#-1].id'),0) FROM page p,checkpoints c") {
+        return "Node returned an invalid earlier metadata page; the cursor was retained"
+    }
+    if SQL.SqlitePrepareText(db,"SELECT value FROM page,json_each(page.data,'$.changes.encrypted_records')",-1,*statement,null)!=SQL.SQLITE_OK { return "Invalid earlier metadata page" }
+    defer { unused SQL.SqliteFinalize(statement) }
+    record: Vec(u8); plain: Vec(u8)
+    defer { Wire.ClearOutput(*record); Wire.ClearOutput(*plain) }
+    while true {
+        code:=SQL.SqliteStep(statement)
+        if code==SQL.SQLITE_DONE { break }
+        if code!=SQL.SQLITE_ROW || !Column(statement,0,*record) { return "Invalid earlier metadata page" }
+        kind,error:=LegacyRecord(client,Wire.OutputBytes(*record),*plain)
+        if error!="" { return error }
+        if kind==0 { continue }
+        if !Exec(db,"DELETE FROM incoming") || !Put(db,"incoming",Text(*plain)) { return "Invalid earlier decrypted record" }
+        if kind==1 && !ValidatePhoto(db) { return "Invalid earlier photo record; the cursor was retained" }
+        if kind==2 && !Check(db,"SELECT json_type(data,'$.name')='text' FROM incoming") { return "Invalid earlier album record; the cursor was retained" }
+        insert: *void
+        if SQL.SqlitePrepareText(db,"INSERT INTO decoded VALUES(?,?)",-1,*insert,null)!=SQL.SQLITE_OK { return "Cannot stage the earlier record" }
+        valid:=SQL.SqliteBindInt64(insert,1,kind)==SQL.SQLITE_OK && Bind(insert,2,Text(*plain)) && SQL.SqliteStep(insert)==SQL.SQLITE_DONE
+        unused SQL.SqliteFinalize(insert)
+        if !valid { return "Cannot stage the earlier record" }
+    }
+    return ""
+}
+Existing :: (lib: *Store.Library,table: string,field: string,value: string) -> s32 {
+    query: Vec(u8); BuilderPrint(*query,"SELECT 1 FROM % WHERE %=?",table,field)
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,Text(*query),-1,*statement,null)!=SQL.SQLITE_OK { return -1 }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if !Bind(statement,1,value) { return -1 }
+    code:=SQL.SqliteStep(statement)
+    return ifx code==SQL.SQLITE_ROW then 1 else ifx code==SQL.SQLITE_DONE then 0 else -1
+}
+ImportAlbum :: (client: *Client.SyncClient,db: *void) -> s64,string {
+    name: Vec(u8)
+    defer { Wire.ClearOutput(*name) }
+    if !QueryText(db,"SELECT json_extract(data,'$.name') FROM incoming",*name) { return 0,"Invalid earlier album" }
+    normalized:=Store.AlbumName(Text(*name)); lib:=client.library
+    // AlbumName lends a trimmed view. NAME stays alive through every use;
+    // the view is never freed independently of its caller-owned vector.
+    if normalized=="" { return 0,"Invalid earlier album name; the cursor was retained" }
+    exists:=Existing(lib,"albums","name",normalized)
+    if exists==1 { return 0,"" }; if exists<0 { return 0,"Cannot compare earlier albums" }
+    if !Check(db,"SELECT coalesce((json_type(data,'$.description') IS NULL OR (json_type(data,'$.description')='text' AND length(CAST(json_extract(data,'$.description') AS BLOB))<=8192)) AND (json_type(data,'$.pinned') IS NULL OR (json_type(data,'$.pinned') IN ('integer','true','false') AND json_extract(data,'$.pinned') IN (0,1))) AND (json_type(data,'$.archived') IS NULL OR (json_type(data,'$.archived') IN ('integer','true','false') AND json_extract(data,'$.archived') IN (0,1))) AND (json_type(data,'$.deleted') IS NULL OR (json_type(data,'$.deleted') IN ('integer','true','false') AND json_extract(data,'$.deleted') IN (0,1))),0) FROM incoming") || !Store.EnsureAlbum(lib,normalized,1) {
+        return 0,"Invalid earlier album record; the cursor was retained"
+    }
+    description: Vec(u8)
+    defer { Wire.ClearOutput(*description) }
+    if !QueryText(db,"SELECT coalesce(json_extract(data,'$.description'),'') FROM incoming",*description) { return 0,"Invalid earlier album description" }
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,"UPDATE albums SET description=?,pinned=?,archived=?,deleted=? WHERE name=?",-1,*statement,null)!=SQL.SQLITE_OK { return 0,"Cannot import earlier album" }
+    defer { unused SQL.SqliteFinalize(statement) }
+    valid:=Bind(statement,1,Text(*description)) && SQL.SqliteBindInt64(statement,2,Integer(db,"SELECT coalesce(json_extract(data,'$.pinned'),0) FROM incoming"))==SQL.SQLITE_OK &&
+        SQL.SqliteBindInt64(statement,3,Integer(db,"SELECT coalesce(json_extract(data,'$.archived'),0) FROM incoming"))==SQL.SQLITE_OK &&
+        SQL.SqliteBindInt64(statement,4,Integer(db,"SELECT coalesce(json_extract(data,'$.deleted'),0) FROM incoming"))==SQL.SQLITE_OK &&
+        Bind(statement,5,normalized) && SQL.SqliteStep(statement)==SQL.SQLITE_DONE
+    return ifx valid then cast(s64)1 else 0,ifx valid then "" else "Cannot import earlier album"
+}
+ImportPhoto :: (client: *Client.SyncClient,db: *void) -> s64,string {
+    id: Vec(u8)
+    defer { Wire.ClearOutput(*id) }
+    if !QueryText(db,"SELECT json_extract(data,'$.id') FROM incoming",*id) { return 0,"Invalid earlier photo ID" }
+    exists:=Existing(client.library,"photos","id",Text(*id))
+    if exists==1 { return 0,"" }; if exists<0 { return 0,"Cannot compare earlier photos" }
+    // Bind every original JSON value through JSON extraction in the target
+    // database, preserving arbitrary unknown metadata and edits verbatim.
+    statement: *void
+    if SQL.SqlitePrepareText(db,"SELECT value FROM incoming,json_each(incoming.data,'$.albums')",-1,*statement,null)!=SQL.SQLITE_OK { return 0,"Invalid earlier albums" }
+    name: Vec(u8); valid:=true
+    defer { Wire.ClearOutput(*name) }
+    while true {
+        code:=SQL.SqliteStep(statement); if code==SQL.SQLITE_DONE { break }
+        if code!=SQL.SQLITE_ROW || !Column(statement,0,*name) || !Store.EnsureAlbum(client.library,Text(*name),1) { valid=false; break }
+    }
+    unused SQL.SqliteFinalize(statement)
+    if !valid { return 0,"Invalid earlier albums; the cursor was retained" }
+    value: Vec(u8)
+    defer { Wire.ClearOutput(*value) }
+    if !QueryText(db,"SELECT json_set(data,'$.manifest',json((SELECT coalesce(json_group_object(key,json(CASE type WHEN 'array' THEN value WHEN 'object' THEN value ELSE json_quote(value) END)),'{}') FROM json_each(incoming.data,'$.manifest') WHERE key IN ('chunks','chunk_bytes','preview','preview_id'))),'$.edits',json_remove(coalesce(json_extract(data,'$.edits'),'{}'),'$.auto_albums')) FROM incoming",*value) { return 0,"Invalid earlier manifest" }
+    query:="WITH incoming(data) AS (VALUES(?)) INSERT INTO photos(id,name,extension,kind,size,taken,width,height,favorite,hidden,trashed,caption,tags,updated,archived,metadata,albums,manifest,edits,dirty) SELECT json_extract(data,'$.id'),json_extract(data,'$.name'),json_extract(data,'$.extension'),json_extract(data,'$.kind'),json_extract(data,'$.size'),json_extract(data,'$.taken'),json_extract(data,'$.width'),json_extract(data,'$.height'),json_extract(data,'$.favorite'),json_extract(data,'$.hidden'),json_extract(data,'$.trashed'),json_extract(data,'$.caption'),json_extract(data,'$.tags'),json_extract(data,'$.updated'),coalesce(json_extract(data,'$.archived'),0),coalesce(json_extract(data,'$.metadata'),'{}'),coalesce(json_extract(data,'$.albums'),'[]'),json_extract(data,'$.manifest'),json_extract(data,'$.edits'),0 FROM incoming"
+    if SQL.SqlitePrepareText(client.library.db,query,-1,*statement,null)!=SQL.SQLITE_OK { return 0,"Cannot import earlier photo" }
+    defer { unused SQL.SqliteFinalize(statement) }
+    valid=Bind(statement,1,Text(*value)) && SQL.SqliteStep(statement)==SQL.SQLITE_DONE
+    return ifx valid then cast(s64)1 else 0,ifx valid then "" else "Cannot import earlier photo"
+}
+
+#scope_export
+// Also callable by synthetic tests/providers after a network response. Request
+// checkpoints are borrowed JSON, compared again under the writer transaction.
+ApplyLegacyPage :: (client: *Client.SyncClient,page: []u8,since: string,cursor: string) -> s64,string {
+    if client==null || !client.legacy.valid { return 0,Fail(client,"Earlier Photos account is unavailable") }
+    if page.count<2 || page.count>134217728 || since.count<1 || since.count>128 || cursor.count<1 || cursor.count>134217728 {
+        return 0,Fail(client,"Node returned an invalid earlier metadata page; the cursor was retained")
+    }
+    stage:=Memory()
+    if stage==null { return 0,Fail(client,"Cannot stage earlier metadata") }; defer { unused SQL.SqliteClose(stage) }
+    error:=StagePage(client,stage,page,since,cursor)
+    if error!="" { return 0,Fail(client,error) }
+    lib:=client.library
+    if !Exec(lib.db,"BEGIN IMMEDIATE") { return 0,Fail(client,"The library is busy; the earlier cursor was retained") }
+    committed:=false; defer { if !committed { unused Exec(lib.db,"ROLLBACK") } }
+    if !Checkpoint(lib,"legacy_server_version",since,"0") || !Checkpoint(lib,"legacy_record_cursor",cursor,"null") {
+        return 0,Fail(client,"Earlier metadata changed during sync; the cursor was retained")
+    }
+    count: s64; statement: *void
+    if SQL.SqlitePrepareText(stage,"SELECT kind,data FROM decoded ORDER BY kind DESC,rowid",-1,*statement,null)!=SQL.SQLITE_OK { return 0,Fail(client,"Cannot read earlier records") }
+    defer { unused SQL.SqliteFinalize(statement) }
+    value: Vec(u8); defer { Wire.ClearOutput(*value) }
+    while true {
+        code:=SQL.SqliteStep(statement); if code==SQL.SQLITE_DONE { break }
+        if code!=SQL.SQLITE_ROW || !Column(statement,1,*value) || !Exec(stage,"DELETE FROM incoming") || !Put(stage,"incoming",Text(*value)) { return 0,Fail(client,"Cannot read earlier record") }
+        added: s64; importError: string
+        if SQL.SqliteColumnInt64(statement,0)==2 { added,importError=ImportAlbum(client,stage) }
+        else { added,importError=ImportPhoto(client,stage) }
+        if importError!="" { return 0,Fail(client,importError) }; count+=added
+    }
+    version: Vec(u8); following: Vec(u8)
+    defer { Wire.ClearOutput(*version); Wire.ClearOutput(*following) }
+    if !QueryText(stage,"SELECT CASE json_type(data,'$.changes_complete') WHEN 'true' THEN CAST(json_extract(data,'$.server_version') AS TEXT) ELSE (SELECT since FROM checkpoints) END FROM page",*version) ||
+        !QueryText(stage,"SELECT CASE json_type(data,'$.changes_complete') WHEN 'true' THEN 'null' ELSE json_extract(data,'$.record_cursor') END FROM page",*following) ||
+        !SaveSetting(lib,"legacy_server_version",Text(*version)) || !SaveSetting(lib,"legacy_record_cursor",Text(*following)) || !Exec(lib.db,"COMMIT") {
+        return 0,Fail(client,"Cannot save earlier metadata; the cursor was retained")
+    }
+    committed=true; Store.ClearError(lib); return count,""
+}
+LegacyExchange :: (client: *Client.SyncClient) -> s64,string {
+    if client==null { return 0,"Photos sync client is not open" }
+    if !client.legacy.valid { return 0,"" }
+    total: s64
+    while true {
+        since: Vec(u8); cursor: Vec(u8); request: Vec(u8)
+        defer { Wire.ClearOutput(*since); Wire.ClearOutput(*cursor); Wire.ClearOutput(*request) }
+        if !Setting(client.library,"legacy_server_version","0",*since) || !Setting(client.library,"legacy_record_cursor","null",*cursor) { return total,Fail(client,"Invalid earlier sync checkpoint") }
+        if since.count<1 || since.count>128 || cursor.count<1 || cursor.count>134217728 ||
+            !VecReserve(request,512+since.count*2+cursor.count) { return total,Fail(client,"Invalid earlier sync checkpoint") }
+        BuilderPrint(*request,"{\"app_id\":\"photos\",\"client_clock\":%,\"client_id\":\"%\",\"encrypted_records\":[],\"encrypted_records_only\":true,\"protocol_version\":6,",Text(*since),TextFromBytes(client.client_id[:client.client_count]))
+        if Text(*cursor)!="null" { BuilderPrint(*request,"\"record_cursor\":%,",Text(*cursor)) }
+        BuilderPrint(*request,"\"record_limit\":200,\"since_server_version\":%,\"user_id_hash\":\"%\"}",Text(*since),TextUntilNul(client.legacy.account_id[:]))
+        response,error:=Client.ClientRequest(client,"/api/v1/sync",2,Wire.OutputBytes(*request),false,true)
+        defer { Transport.ClearResponse(*response) }
+        if error!="" { return total,error }
+        count,applyError:=ApplyLegacyPage(client,response.body,Text(*since),Text(*cursor))
+        if applyError!="" { return total,applyError }; total+=count
+        following: Vec(u8)
+        defer { Wire.ClearOutput(*following) }
+        if !Setting(client.library,"legacy_record_cursor","null",*following) { return total,Fail(client,"Cannot read earlier sync checkpoint") }
+        if Text(*following)=="null" { return total,"" }
+    }
+}
+SwitchAccount :: (client: *Client.SyncClient) -> string {
+    if client==null { return "Photos sync client is not open" }
+    lib:=client.library; account: Vec(u8); current: Vec(u8)
+    defer { Wire.ClearOutput(*account); Wire.ClearOutput(*current) }
+    if !VecReserve(account,68) { return Fail(client,"Cannot allocate Photos account checkpoint") }
+    BuilderPrint(*account,"\"%\"",TextUntilNul(client.owner.account_id[:]))
+    if !Setting(lib,"sync_account","null",*current) { return Fail(client,"Invalid Photos account checkpoint; earlier checkpoints were preserved") }
+    if Checkpoint(lib,"sync_account",Text(*account),"null") { return "" }
+    if !Exec(lib.db,"BEGIN IMMEDIATE") { return Fail(client,"The library is busy; account checkpoints were preserved") }
+    committed:=false; defer { if !committed { unused Exec(lib.db,"ROLLBACK") } }
+    if !Checkpoint(lib,"sync_account",Text(*account),"null") {
+        if !Exec(lib.db,"INSERT OR IGNORE INTO settings(key,value) SELECT 'legacy_'||key,value FROM settings WHERE key IN ('server_version','record_cursor'); DELETE FROM settings WHERE key IN ('server_version','record_cursor'); UPDATE albums SET dirty=1") || !SaveSetting(lib,"sync_account",Text(*account)) {
+            return Fail(client,"Cannot switch Photos account; checkpoints were preserved")
+        }
+    }
+    if !Exec(lib.db,"COMMIT") { return Fail(client,"Cannot switch Photos account; checkpoints were preserved") }
+    committed=true; Store.ClearError(lib); return ""
+}
+
+#scope_module
+ReadBlobs :: (json: string,out: *Client.BlobList) -> bool {
+    db:=Memory()
+    if db==null { return false }; defer { unused SQL.SqliteClose(db) }
+    if !Exec(db,"CREATE TABLE list(data TEXT CHECK(json_valid(data)))") || !Put(db,"list",json) ||
+        !Check(db,"SELECT json_type(data)='array' AND json_array_length(data)<=1000000 AND NOT EXISTS(SELECT 1 FROM json_each(data) WHERE type<>'object' OR json_type(value,'$.address')<>'text' OR json_type(value,'$.size')<>'integer' OR typeof(json_extract(value,'$.size'))<>'integer') FROM list") { return false }
+    statement: *void
+    if SQL.SqlitePrepareText(db,"SELECT json_extract(value,'$.address'),json_extract(value,'$.size') FROM list,json_each(list.data)",-1,*statement,null)!=SQL.SQLITE_OK { return false }
+    defer { unused SQL.SqliteFinalize(statement) }
+    staged: Client.BlobList; address: Vec(u8)
+    defer { Wire.ClearOutput(*address) }
+    while true {
+        code:=SQL.SqliteStep(statement); if code==SQL.SQLITE_DONE { break }
+        if code!=SQL.SQLITE_ROW || !Column(statement,0,*address) || !Client.HashValid(Text(*address)) { return false }
+        blob: Blob
+        for i: 0..63 { blob.address[i]=address[i] }; blob.size=SQL.SqliteColumnInt64(statement,1)
+        if !Client.BlobValid(blob) || !Client.AppendBlob(*staged,blob) { return false }
+    }
+    Client.SwapBlobs(out,*staged); return true
+}
+
+#scope_export
+// Always downloads fresh authenticated bytes through the owner account. Local
+// originals and any earlier successful verification do not satisfy this call.
+Verify :: (client: *Client.SyncClient,photo: Store.PhotoRow,entity: string) -> string {
+    if client==null || !Client.HashValid(photo.id) || photo.size<0 { return Fail(client,"Invalid shared original verification request") }
+    db:=Memory()
+    if db==null { return Fail(client,"Cannot stage shared content verification") }; defer { unused SQL.SqliteClose(db) }
+    if !Exec(db,"CREATE TABLE entity(data TEXT CHECK(json_valid(data)))") || !Put(db,"entity",entity) ||
+        !Check(db,"SELECT json_type(data)='object' AND json_type(data,'$.blobs')='array' FROM entity") { return Fail(client,"Invalid shared photo chunks") }
+    json: Vec(u8); blobs: Client.BlobList
+    defer { Wire.ClearOutput(*json) }
+    if !QueryText(db,"SELECT json_extract(data,'$.blobs') FROM entity",*json) || !ReadBlobs(Text(*json),*blobs) { return Fail(client,"Invalid shared photo chunks") }
+    size,error:=Client.GetContent(client,photo.id,Client.BlobSlice(*blobs))
+    if error!="" { return error }
+    if size!=photo.size { return Fail(client,"Shared original failed verification; old copies were kept") }
+    preview:=Integer(db,"SELECT CASE json_type(data,'$.preview') WHEN 'null' THEN 0 WHEN 'object' THEN (SELECT count(*) FROM json_each(entity.data,'$.preview'))>0 ELSE json_type(data,'$.preview') IS NOT NULL END FROM entity")
+    if preview==0 { return "" }
+    if preview<0 || !Check(db,"SELECT coalesce(json_type(data,'$.preview')='object' AND json_type(data,'$.preview.hash')='text' AND json_type(data,'$.preview.size')='integer' AND typeof(json_extract(data,'$.preview.size'))='integer' AND json_extract(data,'$.preview.size')>=0 AND json_type(data,'$.preview.blobs')='array',0) FROM entity") {
+        return Fail(client,"Invalid shared preview; old copies were kept")
+    }
+    digest: Vec(u8)
+    defer { Wire.ClearOutput(*digest) }
+    if !QueryText(db,"SELECT json_extract(data,'$.preview.hash') FROM entity",*digest) || !Client.HashValid(Text(*digest)) ||
+        !QueryText(db,"SELECT json_extract(data,'$.preview.blobs') FROM entity",*json) || !ReadBlobs(Text(*json),*blobs) { return Fail(client,"Invalid shared photo chunks") }
+    size,error=Client.GetContent(client,Text(*digest),Client.BlobSlice(*blobs))
+    if error!="" { return error }
+    if size!=Integer(db,"SELECT json_extract(data,'$.preview.size') FROM entity") { return Fail(client,"Shared preview failed verification; old copies were kept") }
+    return ""
+}
+// Explicit config remains with its provider. False/absent flag and absent old
+// account perform no reads, requests or deletions. Preview and old records stay.
+Retire :: (client: *Client.SyncClient,config: *Types.Config,maximum: s64 = 50) -> s64,string {
+    if client==null { return 0,"Photos sync client is not open" }
+    if config==null || !config.retire_legacy_chunks || !client.legacy.valid { return 0,"" }
+    if maximum<0 { return 0,Fail(client,"Invalid earlier chunk retirement limit") }
+    stage:=Memory()
+    if stage==null { return 0,Fail(client,"Cannot stage earlier chunk retirement") }; defer { unused SQL.SqliteClose(stage) }
+    if !Exec(stage,"CREATE TABLE retiring(id TEXT,size INTEGER,manifest TEXT); CREATE TABLE incoming(data TEXT CHECK(json_valid(data)))") { return 0,Fail(client,"Cannot stage earlier chunk retirement") }
+    statement: *void
+    if SQL.SqlitePrepareText(client.library.db,"SELECT id,size,manifest FROM photos WHERE json_extract(manifest,'$.entity.confirmed')=1 AND json_type(manifest,'$.chunks')='array' LIMIT ?",-1,*statement,null)!=SQL.SQLITE_OK { return 0,Fail(client,"Cannot read earlier chunks") }
+    valid:=SQL.SqliteBindInt64(statement,1,maximum)==SQL.SQLITE_OK
+    id: Vec(u8); manifest: Vec(u8)
+    defer { Wire.ClearOutput(*id); Wire.ClearOutput(*manifest) }
+    while valid {
+        code:=SQL.SqliteStep(statement); if code==SQL.SQLITE_DONE { break }
+        if code!=SQL.SQLITE_ROW || !Column(statement,0,*id) || !Column(statement,2,*manifest) { valid=false; break }
+        insert: *void
+        if SQL.SqlitePrepareText(stage,"INSERT INTO retiring VALUES(?,?,?)",-1,*insert,null)!=SQL.SQLITE_OK { valid=false; break }
+        valid=Bind(insert,1,Text(*id)) && SQL.SqliteBindInt64(insert,2,SQL.SqliteColumnInt64(statement,1))==SQL.SQLITE_OK && Bind(insert,3,Text(*manifest)) && SQL.SqliteStep(insert)==SQL.SQLITE_DONE
+        unused SQL.SqliteFinalize(insert)
+    }
+    unused SQL.SqliteFinalize(statement)
+    if !valid { return 0,Fail(client,"Cannot stage earlier chunks") }
+    if SQL.SqlitePrepareText(stage,"SELECT id,size,manifest FROM retiring",-1,*statement,null)!=SQL.SQLITE_OK { return 0,Fail(client,"Cannot read earlier chunks") }
+    defer { unused SQL.SqliteFinalize(statement) }
+    total: s64
+    while true {
+        code:=SQL.SqliteStep(statement); if code==SQL.SQLITE_DONE { break }
+        if code!=SQL.SQLITE_ROW || !Column(statement,0,*id) || !Column(statement,2,*manifest) || !Exec(stage,"DELETE FROM incoming") || !Put(stage,"incoming",Text(*manifest)) { return total,Fail(client,"Cannot read earlier chunks") }
+        entity: Vec(u8)
+        defer { Wire.ClearOutput(*entity) }
+        if !QueryText(stage,"SELECT json_extract(data,'$.entity') FROM incoming",*entity) { return total,Fail(client,"Invalid shared content verification") }
+        photo: Store.PhotoRow; photo.id=Text(*id); photo.size=SQL.SqliteColumnInt64(statement,1)
+        error:=Verify(client,photo,Text(*entity))
+        if error!="" { return total,error }
+        // No library writer reservation survives a network call. Compare a
+        // fresh snapshot before transport, then compare again in the short
+        // local bookkeeping transaction after all deletes finish.
+        lib:=client.library
+        compare: *void
+        if SQL.SqlitePrepareText(lib.db,"SELECT 1 FROM photos WHERE id=? AND size=? AND manifest=?",-1,*compare,null)!=SQL.SQLITE_OK { return total,Fail(client,"Cannot compare earlier chunks") }
+        same:=Bind(compare,1,photo.id) && SQL.SqliteBindInt64(compare,2,photo.size)==SQL.SQLITE_OK && Bind(compare,3,Text(*manifest)) && SQL.SqliteStep(compare)==SQL.SQLITE_ROW
+        unused SQL.SqliteFinalize(compare)
+        if !same { return total,Fail(client,"Photo changed during verification; old copies were kept") }
+        chunks: *void
+        if SQL.SqlitePrepareText(stage,"SELECT type,value FROM incoming,json_each(incoming.data,'$.chunks')",-1,*chunks,null)!=SQL.SQLITE_OK { return total,Fail(client,"Invalid earlier chunks") }
+        defer { unused SQL.SqliteFinalize(chunks) }
+        address: Vec(u8)
+        defer { Wire.ClearOutput(*address) }
+        while true {
+            chunkCode:=SQL.SqliteStep(chunks); if chunkCode==SQL.SQLITE_DONE { break }
+            if chunkCode!=SQL.SQLITE_ROW || !Column(chunks,1,*address) { return total,Fail(client,"Invalid earlier chunks") }
+            // Released behavior ignores malformed hash strings; none may be
+            // interpolated into a route. Other JSON types remain invalid.
+            if TextFromCString(SQL.SqliteColumnText(chunks,0))!="text" { return total,Fail(client,"Invalid earlier chunks") }
+            if !Client.HashValid(Text(*address)) { continue }
+            path: Vec(u8); BuilderPrint(*path,"/api/v1/blobs/photos/%",Text(*address)); empty: []u8
+            response,deleteError:=Client.ClientRequest(client,Text(*path),5,empty,true,true,1048576)
+            Transport.ClearResponse(*response)
+            if deleteError!="" { return total,deleteError }
+        }
+        if !Exec(lib.db,"BEGIN IMMEDIATE") { return total,Fail(client,"The library is busy; the current manifest was retained") }
+        committed:=false; defer { if !committed { unused Exec(lib.db,"ROLLBACK") } }
+        if SQL.SqlitePrepareText(lib.db,"SELECT 1 FROM photos WHERE id=? AND size=? AND manifest=?",-1,*compare,null)!=SQL.SQLITE_OK { return total,Fail(client,"Cannot compare earlier chunk retirement") }
+        same=Bind(compare,1,photo.id) && SQL.SqliteBindInt64(compare,2,photo.size)==SQL.SQLITE_OK && Bind(compare,3,Text(*manifest)) && SQL.SqliteStep(compare)==SQL.SQLITE_ROW
+        unused SQL.SqliteFinalize(compare)
+        if !same { return total,Fail(client,"Photo changed during retirement; the current manifest was retained") }
+        update: *void
+        if SQL.SqlitePrepareText(lib.db,"UPDATE photos SET manifest=json_remove(manifest,'$.chunks','$.chunk_bytes') WHERE id=?",-1,*update,null)!=SQL.SQLITE_OK { return total,Fail(client,"Cannot finish earlier chunk retirement") }
+        updated:=Bind(update,1,photo.id) && SQL.SqliteStep(update)==SQL.SQLITE_DONE
+        unused SQL.SqliteFinalize(update)
+        if !updated || !Exec(lib.db,"COMMIT") { return total,Fail(client,"Cannot finish earlier chunk retirement") }
+        committed=true; total+=1
+    }
+    Store.ClearError(client.library); return total,""
+}
+
+LegacyHash :: struct { text: [65]u8 }
+LegacyBlockSource :: struct {
+    client: *Client.SyncClient
+    photo_id: string // borrowed for the source lifetime
+    hashes: Vec(LegacyHash)
+    error: string
+}
+
+#scope_module
+ClearHashes :: (hashes: *Vec(LegacyHash)) {
+    if hashes==null { return }
+    unused VecResize(<<hashes,hashes.capacity)
+    for index: 0..hashes.count-1 {
+        for byte: 0..64 { (<<hashes)[index].text[byte]=0 }
+    }
+    VecFree(<<hashes)
+}
+ReadLegacyBlock :: (context: *void,index: s64,buffer: []u8) -> s64 {
+    source:=cast(*LegacyBlockSource)context
+    if source==null || index<0 || index>source.hashes.count { return -1 }
+    if index==source.hashes.count { return 0 }
+    part: Vec(u8); BuilderPrint(*part,"chunk:%",index)
+    plain: Vec(u8); defer { Wire.ClearOutput(*plain) }
+    error:=Client.FetchBlob(source.client,TextUntilNul(source.hashes[index].text[:]),source.photo_id,Text(*part),*plain,Client.ChunkBytes()+40)
+    if error!="" { source.error=error; return -1 }
+    if plain.count<1 || plain.count>buffer.count { source.error="Invalid earlier content chunk"; return -1 }
+    for i: 0..plain.count-1 { buffer[i]=plain[i] }; return plain.count
+}
+
+#scope_export
+LegacyBlocksClose :: (source: *LegacyBlockSource) {
+    if source==null { return }
+    ClearHashes(*source.hashes); source.client=null; source.photo_id=""; source.error=""
+}
+// SOURCE is caller-owned stable storage and outlives the returned ChunkSource.
+// It owns only hash metadata, and borrows the client and photo ID until close.
+LegacyBlocks :: (client: *Client.SyncClient,photo_id: string,manifest: string,source: *LegacyBlockSource) -> Client.ChunkSource,string {
+    empty: Client.ChunkSource
+    if client==null || !client.legacy.valid || source==null || !Client.HashValid(photo_id) { return empty,Fail(client,"Invalid earlier content source") }
+    db:=Memory()
+    if db==null { return empty,Fail(client,"Cannot stage earlier chunk source") }; defer { unused SQL.SqliteClose(db) }
+    if !Exec(db,"CREATE TABLE manifest(data TEXT CHECK(json_valid(data)))") || !Put(db,"manifest",manifest) ||
+        !Check(db,"SELECT json_type(data,'$.chunks')='array' AND json_array_length(data,'$.chunks')<=1000000 AND NOT EXISTS(SELECT 1 FROM json_each(data,'$.chunks') WHERE type<>'text') FROM manifest") { return empty,Fail(client,"Invalid earlier content source") }
+    statement: *void
+    if SQL.SqlitePrepareText(db,"SELECT value FROM manifest,json_each(manifest.data,'$.chunks')",-1,*statement,null)!=SQL.SQLITE_OK { return empty,Fail(client,"Invalid earlier content source") }
+    defer { unused SQL.SqliteFinalize(statement) }
+    hashes: Vec(LegacyHash); address: Vec(u8)
+    defer { ClearHashes(*hashes); Wire.ClearOutput(*address) }
+    while true {
+        code:=SQL.SqliteStep(statement); if code==SQL.SQLITE_DONE { break }
+        if code!=SQL.SQLITE_ROW || !Column(statement,0,*address) || !Client.HashValid(Text(*address)) { return empty,Fail(client,"Invalid encrypted blob reference") }
+        hash: LegacyHash; for i: 0..63 { hash.text[i]=address[i] }
+        if !VecPush(hashes,hash) { return empty,Fail(client,"Cannot retain earlier content source") }
+    }
+    VecSwap(source.hashes,hashes); source.client=client; source.photo_id=photo_id; source.error=""
+    result: Client.ChunkSource; result.context=cast(*void)source; result.read=ReadLegacyBlock
+    return result,""
+}

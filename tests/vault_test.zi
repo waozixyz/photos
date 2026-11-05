@@ -1,0 +1,100 @@
+Vault :: #import "vault";
+Auth :: #import "vault_auth";
+Access :: #import "access_registry";
+Store :: #import "library_store";
+Kit :: #import "kit";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+Clock :: #import "std/timer_linux";
+Process :: #import "std/process_run_linux";
+JSON :: #import "std/json_document";
+#import "std/byte_text_linux"
+using Vectors :: #import "std/vec";
+
+Bytes :: (text: string) -> []u8 { descriptor := cast(*TextDescriptor)*text; return BytesFromPointer(descriptor.data,cast(u64)text.count) }
+// Exercise the preserved private helper from a file, never secret argv.
+Helper :: (root: string, password: string, verifier: string, mode: string) -> string,s32 {
+    frame: Vec(u8); VecResize(frame,4)
+    for i: 0..3 { frame[i] = cast(u8)((cast(u32)password.count >> cast(u32)((3-i)*8)) & 255) }
+    for byte: password { unused VecPush(frame,byte) }; for byte: verifier { unused VecPush(frame,byte) }
+    input := Tree.JoinPath(root,"auth-frame")
+    file := Files.OpenExclusivePrivate(input)
+    if !file.valid { return "",2 }
+    written := Files.WriteAt(file,VecSlice(frame,0,frame.count),0)
+    unused Files.CloseFile(file)
+    Auth.WipePassword(VecSlice(frame,0,frame.count))
+    defer { unused Files.RemoveFile(input) }
+    if written != frame.count { return "",2 }
+    args: [2]string = .["build/vault-auth/vault_auth",mode]
+    options: Process.ProcessOptions; options.arguments = args[:]; options.input_path = input; options.capture_output = true
+    run: Process.ProcessRun
+    if !Process.RunProcess(options,*run) { return "",2 }
+    text := BuilderFinish(run.output)
+    if text.count > 0 && text[text.count-1] == 10 { text = text[0:text.count-1] }
+    return text,run.code
+}
+main :: () -> s32 {
+    root := Kit.TempDirectory("vault")
+    if root.count == 0 { return 1 }
+    defer { unused Kit.Cleanup(root) }
+    path := Kit.Library(Tree.JoinPath(root,"library"))
+    lib,error := Store.Open(path)
+    if lib == null || error.count > 0 { return 2 }
+    defer { Store.Close(lib) }
+    registry: Access.Registry
+    if !Access.Initialize(*registry) { return 3 }
+    defer { Access.Close(*registry) }
+    password := "correct synthetic password";
+    newer := "replacement synthetic password";
+    if !Kit.Equal(Vault.PasswordError(Bytes("éééé")),"Use at least 8 characters and a password under 1024 bytes","character rather than byte length") ||
+        Vault.PasswordError(Bytes("日本語の写真秘密です")).count > 0 || Vault.PasswordError(Bytes("abc\0defgh")).count == 0 { return 4 }
+    // Both directions use the existing on-disk verifier and exact Argon2 profile.
+    legacy,legacy_code := Helper(root,password,"","hash")
+    if legacy_code != 0 || Auth.NativeVerify(Bytes(password),legacy) != 0 { return 5 }
+    native,hash_error := Vault.HashPassword(Bytes(password))
+    verified,verify_code := Helper(root,password,native,"verify")
+    if hash_error.count > 0 || verify_code != 0 || verified != "ok" || Auth.NativeVerify(Bytes("incorrect password"),native) != 1 { return 6 }
+    if Auth.NativeVerify(Bytes(password),"$argon2id$v=19$m=8192,t=1,p=1$bad$bad") != 2 { return 7 }
+    payload: Vec(u8); BuilderPrint(*payload,"{\"verifier\":%}",JSON.JsonQuote(legacy))
+    if !Files.WriteEntireFile(Vault.Path(lib),Store.Packed(BuilderFinish(payload))) { return 8 }
+    token,auth_error := Vault.VaultAuthenticate(lib,Bytes(password),false,*registry)
+    second,second_error := Vault.VaultAuthenticate(lib,Bytes(password),false,*registry)
+    if auth_error.count > 0 || second_error.count > 0 || !Vault.Unlocked(lib,token,*registry) { return 9 }
+    refused,setup_error := Vault.VaultAuthenticate(lib,Bytes(newer),true,*registry)
+    if !Kit.Equal(setup_error,"Hidden already has a password; unlock with the existing password","setup cannot replace") { return 10 }
+    if Vault.ChangePassword(lib,token,Bytes(newer),*registry).count > 0 || Vault.Unlocked(lib,token,*registry) || Vault.Unlocked(lib,second,*registry) { return 11 }
+    wrong,wrong_error := Vault.VaultAuthenticate(lib,Bytes(password),false,*registry)
+    if wrong_error != "Incorrect password" { return 12 }
+    for i: 0..3 { bad,bad_error := Vault.VaultAuthenticate(lib,Bytes(password),false,*registry); if bad_error != "Incorrect password" { return 13 } }
+    blocked,blocked_error := Vault.VaultAuthenticate(lib,Bytes(newer),false,*registry)
+    if blocked_error != "Too many attempts; wait one minute before trying again" { return 14 }
+    unused Access.ClearAttempts(lib.root,Access.HIDDEN,*registry)
+    fresh,fresh_error := Vault.VaultAuthenticate(lib,Bytes(newer),false,*registry)
+    if fresh_error.count > 0 || !Vault.Unlocked(lib,fresh,*registry) { return 15 }
+    lease := Vault.BeginAuthorization(lib,fresh,true,*registry)
+    if !lease.held || lease.until <= Clock.MonotonicMilliseconds() || lease.error.count > 0 { Vault.EndAuthorization(*lease); return 16 }
+    Vault.EndAuthorization(*lease)
+    Vault.Lock(lib,fresh,*registry)
+    if Vault.Unlocked(lib,fresh,*registry) { return 17 }
+    // Real hashing outlives the short lease and must not replace credentials.
+    Access.Close(*registry)
+    if !Access.Initialize(*registry,30,100) { return 18 }
+    short,short_error := Vault.VaultAuthenticate(lib,Bytes(newer),false,*registry)
+    before,before_ok := Files.ReadEntireFile(Vault.Path(lib))
+    expired_error := Vault.ChangePassword(lib,short,Bytes(password),*registry)
+    after,after_ok := Files.ReadEntireFile(Vault.Path(lib))
+    if short_error.count > 0 || expired_error != "Unlock Hidden before changing its password" || !before_ok || !after_ok || before != after { return 19 }
+    // Malformed credentials never grant access or touch originals/backup keys.
+    if !Files.WriteEntireFile(Vault.Path(lib),"{\"verifier\":\"broken\"}") { return 20 }
+    invalid,invalid_error := Vault.VaultAuthenticate(lib,Bytes(newer),false,*registry)
+    if invalid_error != "Hidden password settings need recovery; your originals and backup keys remain intact" { return 21 }
+    setup_path := Kit.Library(Tree.JoinPath(root,"new-library"))
+    setup_lib,open_error := Store.Open(setup_path)
+    if setup_lib == null { return 22 }
+    created,create_error := Vault.VaultAuthenticate(setup_lib,Bytes(password),true,*registry)
+    valid_setup := create_error.count == 0 && Vault.Configured(setup_lib) && Vault.Unlocked(setup_lib,created,*registry)
+    Store.Close(setup_lib)
+    if !valid_setup { return 23 }
+    print("Photos Hidden: helper compatibility, Unicode validation, exact profile, attempts, expiry, password replacement and revocation passed\n")
+    return 0
+}

@@ -1,0 +1,87 @@
+Kit :: #import "kit";
+Files :: #import "std/file";
+Image :: #import "std/image";
+PNG :: #import "std/png_linux";
+SQL :: #import "sqlite/SQLite";
+#import "std/c_string"
+using Vectors :: #import "std/vec";
+
+#scope_file
+c :: #system_library "c";
+Link :: (target: *u8, path: *u8) -> s32 #foreign c "symlink";
+
+#program_export
+main :: () -> s32 {
+    root := Kit.TempDirectory("kit")
+    if !Kit.Expect(root.count > 0, "create temporary directory") { return 1 }
+    defer { if Files.PathExists(root) { unused Kit.Cleanup(root) } }
+    other := Kit.TempDirectory("kit")
+    if !Kit.Expect(other.count > 0 && other != root, "unique temporary directories") { return 2 }
+    defer { unused Kit.Cleanup(other) }
+    if !Kit.Equal(Kit.TempDirectory("../outside"), "", "reject a path as a fixture name") { return 3 }
+    if !Kit.Expect(!Kit.Cleanup("build/tests/tmp/../outside"), "reject cleanup outside fixture root") { return 4 }
+
+    library := Kit.Library(Kit.Join(root, "library"))
+    if !Kit.Expect(library.count > 0 && Files.PathExists(Kit.Join(library, "private")) &&
+        Files.PathExists(Kit.Join(library, "originals")) &&
+        Files.PathExists(Kit.Join(library, "previews")), "empty library layout") { return 5 }
+    if !Kit.Equal(Kit.Library(library), library, "library layout is idempotent") { return 6 }
+    jpeg := Kit.Join(library, "fixture.jpg")
+    if !Kit.Expect(Kit.Jpeg(jpeg, 17, 9, 0xB42A70), "write synthetic JPEG") { return 7 }
+    encoded, read := Files.ReadEntireFile(jpeg)
+    if !Kit.Expect(read && encoded.count > 4 && encoded[0] == 255 && encoded[1] == 216 &&
+        encoded[encoded.count - 2] == 255 && encoded[encoded.count - 1] == 217,
+        "JPEG contains complete binary framing") { return 8 }
+    png := Kit.Join(library, "fixture.png")
+    if !Kit.Expect(Kit.Png(png, 17, 9, 0xB42A70), "write synthetic PNG") { return 9 }
+    picture := PNG.ReadPNGFile(png)
+    if !Kit.Expect(Image.ImageValid(*picture) && picture.width == 17 && picture.height == 9 &&
+        picture.pixels[0] == 180 && picture.pixels[1] == 42 && picture.pixels[2] == 112 &&
+        picture.pixels[3] == 255, "PNG dimensions and exact RGB pixels round trip") { return 10 }
+    if !Kit.Expect(!Kit.Jpeg(Kit.Join(root, "invalid.jpg"), 0, 1, 0) &&
+        !Kit.Png(Kit.Join(root, "large.png"), 4096, 4096, 0) &&
+        !Files.PathExists(Kit.Join(root, "invalid.jpg")), "invalid fixture sizes create no file") { return 11 }
+
+    database: *void
+    if SQL.SqliteOpenText(Kit.Join(library, "library.sqlite"), *database,
+        SQL.SQLITE_OPEN_READWRITE | SQL.SQLITE_OPEN_CREATE) != SQL.SQLITE_OK { return 12 }
+    sql := Kit.Join(root, "fixture.sql")
+    if !Files.WriteEntireFile(sql, "BEGIN TRANSACTION; CREATE TABLE fixture (value INTEGER); INSERT INTO fixture VALUES (42); COMMIT;") {
+        unused SQL.SqliteClose(database)
+        return 13
+    }
+    if !Kit.Expect(Kit.LoadSql(database, sql), "load synthetic SQLite dump") {
+        unused SQL.SqliteClose(database)
+        return 14
+    }
+    statement: *void
+    if SQL.SqlitePrepareText(database, "SELECT value FROM fixture", -1, *statement, null) != SQL.SQLITE_OK {
+        unused SQL.SqliteClose(database)
+        return 15
+    }
+    valid := SQL.SqliteStep(statement) == SQL.SQLITE_ROW && SQL.SqliteColumnInt64(statement, 0) == 42
+    unused SQL.SqliteFinalize(statement)
+    unused SQL.SqliteClose(database)
+    if !Kit.Expect(valid, "fixture rows survive SQL import") { return 16 }
+    if !Kit.Expect(!Kit.LoadSql(null, sql) && !Kit.LoadSql(null, Kit.Join(root, "missing.sql")),
+        "SQL fixture failures are reported") { return 17 }
+
+    // Cleanup must unlink a fixture's link without walking into its target.
+    sentinel := Kit.Join(other, "keep.txt")
+    if !Files.WriteEntireFile(sentinel, "keep") { return 18 }
+    targetBuffer: [4096]u8
+    linkBuffer: [4096]u8
+    target: Vec(u8)
+    prefix := "build/tests/tmp/"
+    BuilderPrint(*target, "../../%", other[prefix.count:])
+    if !CopyCString(BuilderFinish(target), targetBuffer[:]) ||
+        !CopyCString(Kit.Join(library, "outside"), linkBuffer[:]) ||
+        Link(*targetBuffer[0], *linkBuffer[0]) != 0 { return 19 }
+    if !Kit.Expect(Files.PathExists(Kit.Join(library, "outside")) &&
+        Kit.Library(Kit.Join(library, "outside")) == "",
+        "library fixture refuses a directory symlink") { return 20 }
+    if !Kit.Expect(Kit.Cleanup(root) && !Files.PathExists(root) &&
+        Files.PathExists(sentinel), "cleanup preserves symlink targets") { return 21 }
+    print("Photos Ziran test kit: temporary libraries, JPEG/PNG, SQL and scoped cleanup passed\n")
+    return 0
+}

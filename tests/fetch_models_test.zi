@@ -1,0 +1,262 @@
+Models :: #import, file "../src/tools/fetch_models.zi";
+Kit :: #import "kit";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+JSON :: #import "std/json_document";
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+ABC :: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+EMPTY :: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+Url :: (path: string) -> string {
+    out: Vec(u8)
+    BuilderPrint(*out, "file://%", path)
+    return BuilderFinish(out)
+}
+
+Item :: (name: string, source: string, bytes: s64 = 3, hash: string = ABC) -> string {
+    out: Vec(u8)
+    BuilderPrint(*out, "{\"name\":%,\"source\":%,\"bytes\":%,\"sha256\":%}",
+        JSON.JsonQuote(name), JSON.JsonQuote(source), bytes, JSON.JsonQuote(hash))
+    return BuilderFinish(out)
+}
+
+Manifest :: (path: string, items: string) -> bool {
+    out: Vec(u8)
+    BuilderPrint(*out, "{\"model\":\"synthetic\",\"files\":[%]}", items)
+    return Files.WriteEntireFile(path, BuilderFinish(out))
+}
+
+Contents :: (path: string, expected: string) -> bool {
+    text, read := Files.ReadEntireFile(path)
+    return read && text == expected
+}
+
+NoStaging :: (destination: string) -> bool {
+    names: Vec(string)
+    if !Tree.ListDirectory(destination, *names) { return false }
+    for name: names {
+        if name.count >= 7 && name[0:7] == ".model-" { return false }
+    }
+    return true
+}
+
+Transfers :: (root: string) -> bool {
+    source := Kit.Join(root, "source.onnx")
+    manifest := Kit.Join(root, "transfer.json")
+    dest := Kit.Join(root, "nested/downloads")
+    target := Kit.Join(dest, "model.onnx")
+    if !Files.WriteEntireFile(source, "abc") ||
+        !Manifest(manifest, Item("model.onnx", Url(source))) { return false }
+    ok, error := Models.Fetch(manifest, dest)
+    if !Kit.Expect(ok && error == "" && Contents(target, "abc") && NoStaging(dest),
+        "file:// download, exact SHA-256 and size, nested destination, staging cleanup") { return false }
+    if !Kit.Expect((Tree.PathStatus(dest).mode & 511) == 448 &&
+        (Tree.PathStatus(target).mode & 511) == 384, "private destination and downloaded model") { return false }
+    if !Files.RemoveFile(source) { return false }
+    ok, error = Models.Fetch(manifest, dest)
+    if !Kit.Expect(ok && error == "" && Contents(target, "abc") && NoStaging(dest),
+        "valid cache bypasses unavailable source") { return false }
+
+    // A failed attempted update must preserve the old model byte for byte.
+    if !Files.WriteEntireFile(source, "abd") { return false }
+    if !Manifest(manifest, Item("model.onnx", Url(source), 3, EMPTY)) { return false }
+    ok, error = Models.Fetch(manifest, dest)
+    if !Kit.Expect(!ok && error.count > 0 && Contents(target, "abc") && NoStaging(dest),
+        "wrong SHA-256 does not replace prior model") { return false }
+    if !Manifest(manifest, Item("model.onnx", Url(source), 4)) { return false }
+    ok, error = Models.Fetch(manifest, dest)
+    // The original Python cache rule checks SHA-256 alone, before bytes/source.
+    if !Kit.Expect(ok && Contents(target, "abc"), "cached SHA-256 parity ignores download size") { return false }
+    if !Files.WriteEntireFile(target, "corrupt") || !Files.WriteEntireFile(source, "abc") ||
+        !Manifest(manifest, Item("model.onnx", Url(source))) { return false }
+    ok, error = Models.Fetch(manifest, dest)
+    if !Kit.Expect(ok && Contents(target, "abc"), "corrupt cache is replaced after verification") { return false }
+
+    if !Files.WriteEntireFile(source, "ab") ||
+        !Manifest(manifest, Item("short.onnx", Url(source))) { return false }
+    ok, error = Models.Fetch(manifest, dest)
+    if !Kit.Expect(!ok && !Files.PathExists(Kit.Join(dest, "short.onnx")) && NoStaging(dest),
+        "short download is rejected and staging removed") { return false }
+    if !Files.WriteEntireFile(source, "abcd") ||
+        !Manifest(manifest, Item("large.onnx", Url(source))) { return false }
+    ok, error = Models.Fetch(manifest, dest)
+    if !Kit.Expect(!ok && !Files.PathExists(Kit.Join(dest, "large.onnx")) && NoStaging(dest),
+        "oversized download is rejected and staging removed") { return false }
+    missing := Kit.Join(root, "missing.onnx")
+    if !Manifest(manifest, Item("missing.onnx", Url(missing))) { return false }
+    ok, error = Models.Fetch(manifest, dest)
+    if !Kit.Expect(!ok && error.count > 0 && Contents(target, "abc") && NoStaging(dest),
+        "missing source preserves existing models") { return false }
+
+    if !Files.WriteEntireFile(source, "abc") { return false }
+    items: Vec(u8)
+    BuilderPrint(*items, "%,%", Item("first.onnx", Url(source)), Item("second.onnx", Url(missing)))
+    if !Manifest(manifest, BuilderFinish(items)) { return false }
+    ok, error = Models.Fetch(manifest, dest)
+    if !Kit.Expect(!ok && Contents(Kit.Join(dest, "first.onnx"), "abc") &&
+        Contents(target, "abc") && !Files.PathExists(Kit.Join(dest, "second.onnx")) && NoStaging(dest),
+        "partial manifest failure retains completed and cached models") { return false }
+    if !Files.WriteEntireFile(source, "") ||
+        !Manifest(manifest, Item("empty.onnx", Url(source), 0, EMPTY)) { return false }
+    ok, error = Models.Fetch(manifest, dest)
+    if !Kit.Expect(ok && Contents(Kit.Join(dest, "empty.onnx"), "") && NoStaging(dest),
+        "zero-byte model hashes and downloads correctly") { return false }
+    if !Files.WriteEntireFile(source, "ab") ||
+        !Manifest(manifest, Item("nonempty.onnx", Url(source), 0, EMPTY)) { return false }
+    ok, error = Models.Fetch(manifest, dest)
+    if !Kit.Expect(!ok && !Files.PathExists(Kit.Join(dest, "nonempty.onnx")) && NoStaging(dest),
+        "zero-byte expected size never permits a nonempty download") { return false }
+
+    if !Files.WriteEntireFile(source, "abc") ||
+        !Manifest(manifest, Item("blocked.onnx", Url(source))) ||
+        !Tree.CreateDirectories(Kit.Join(dest, "blocked.onnx"), 448) { return false }
+    ok, error = Models.Fetch(manifest, dest)
+    if !Kit.Expect(!ok && Tree.IsDirectory(Kit.Join(dest, "blocked.onnx")) && NoStaging(dest),
+        "failed atomic publication preserves destination and removes staging") { return false }
+    // An explicit offline source must not fall back to the manifest's URL.
+    if !Manifest(manifest, Item("offline.onnx", Url(source))) { return false }
+    ok, error = Models.FetchFrom(manifest, dest, Kit.Join(root, "absent-source"))
+    return Kit.Expect(!ok && !Files.PathExists(Kit.Join(dest, "offline.onnx")) && NoStaging(dest),
+        "missing offline source does not fall back to a download")
+}
+
+BinaryTransfer :: (root: string) -> bool {
+    // Frozen independent SHA-256 oracle for bytes[i] = i % 251. The length
+    // crosses two 64-KiB I/O chunks and includes NUL and non-UTF-8 bytes.
+    hash := "dd84db969f4ff2abb79c8c2fbc06e8d8e02c46d6481c958e057f7ad7a24c58a7"
+    bytes: [131073]u8
+    for index: 0..bytes.count - 1 { bytes[index] = cast(u8)(index % 251) }
+    source := Kit.Join(root, "binary-source")
+    file := Files.OpenReplace(source)
+    if !file.valid { return false }
+    written := Files.WriteAt(file, bytes[:], 0)
+    closed := Files.CloseFile(file)
+    if written != bytes.count || !closed { return false }
+    manifest := Kit.Join(root, "binary.json")
+    dest := Kit.Join(root, "binary-download")
+    if !Manifest(manifest, Item("binary.onnx", Url(source), bytes.count, hash)) { return false }
+    ok, error := Models.Fetch(manifest, dest)
+    if !Kit.Expect(ok && error == "" && NoStaging(dest), "binary file:// transfer across hash chunks") { return false }
+    if !Files.RemoveFile(source) { return false }
+    ok, error = Models.Fetch(manifest, dest)
+    if !Kit.Expect(ok, "binary cache is hashed correctly across chunks") { return false }
+    offline := Kit.Join(root, "binary-offline")
+    ok, error = Models.FetchFrom(manifest, offline, dest)
+    if !Kit.Expect(ok && NoStaging(offline), "bounded offline copy across chunks") { return false }
+    file = Files.OpenRead(Kit.Join(offline, "binary.onnx"))
+    if !file.valid { return false }
+    actual: [131073]u8
+    read := Files.ReadAt(file, actual[:], 0)
+    closed = Files.CloseFile(file)
+    if read != bytes.count || !closed { return false }
+    for index: 0..bytes.count - 1 {
+        if actual[index] != bytes[index] { return Kit.Expect(false, "binary bytes preserved") }
+    }
+    return true
+}
+
+InvalidManifests :: (root: string) -> bool {
+    path := Kit.Join(root, "invalid.json")
+    destination := Kit.Join(root, "invalid-destination")
+    cases: [11]string = .["{", "[]", "{}", "{\"files\":{}}", "{\"files\":[null]}",
+        "{\"files\":[{\"name\":\"x\"}]}",
+        "{\"files\":[{\"name\":\"../escape\",\"source\":\"file:///missing\",\"bytes\":3,\"sha256\":\"bad\"}]}",
+        "{\"files\":[],\"bad\":true} trailing", "{\"files\":[{\"name\":\"x\",\"source\":\"x\",\"bytes\":-1}]}",
+        "{\"files\":[{\"name\":\"x\",\"source\":\"x\",\"bytes\":3.0}]}",
+        "{\"files\":[{\"name\":\"x\",\"source\":\"x\",\"bytes\":9223372036854775808}]}"]
+    for text: cases {
+        if !Files.WriteEntireFile(path, text) { return false }
+        ok, error := Models.Fetch(path, destination)
+        if !Kit.Expect(!ok && error.count > 0 && !Files.PathExists(destination),
+            "malformed manifest rejected before destination changes") { return false }
+    }
+    if !Manifest(path, Item("../escape", "file:///missing")) { return false }
+    ok, error := Models.Fetch(path, destination)
+    if !Kit.Expect(!ok && !Files.PathExists(destination), "path traversal rejected") { return false }
+    duplicate: Vec(u8)
+    BuilderPrint(*duplicate, "%,%", Item("same", "file:///missing"), Item("same", "file:///missing"))
+    if !Manifest(path, BuilderFinish(duplicate)) { return false }
+    ok, error = Models.Fetch(path, destination)
+    return Kit.Expect(!ok && !Files.PathExists(destination), "duplicate target rejected before downloads")
+}
+
+// Use the real manifests' names, structure and extra metadata, replacing only
+// artifact sources/checksums/sizes with tiny local fixtures. No real model I/O.
+Profiles :: (root: string) -> bool {
+    assets := Kit.Join(root, "assets")
+    source := Kit.Join(root, "offline models")
+    if !Tree.CreateDirectories(assets, 448) || !Tree.CreateDirectories(source, 448) { return false }
+    kinds: [3]string = .["face", "text", "semantic"]
+    counts: [3]s32 = .[2, 6, 3]
+    defaults: [3]string = .["build/models/face", "build/models/ocr", "build/models"]
+    for kind, index: kinds {
+        profile := Models.Profile(kind)
+        if !Kit.Expect(profile.destination == defaults[index], "original default model destination") { return false }
+        text, read := Files.ReadEntireFile(Kit.Join("assets", profile.manifest))
+        document: JSON.JsonDocument
+        if !read || !JSON.JsonRead(*document, text) { return false }
+        files := JSON.JsonMember(*document, document.root, "files")
+        if !Kit.Expect(JSON.JsonCount(*document, files) == counts[index], "original manifest file count") { return false }
+        node := JSON.JsonFirst(*document, files)
+        while node >= 0 {
+            name := JSON.JsonString(*document, JSON.JsonMember(*document, node, "name"))
+            if !Files.WriteEntireFile(Kit.Join(source, name), "abc") { return false }
+            if !JSON.JsonSet(*document, node, "source", JSON.JsonNewString(*document, "file:///must-not-be-used")) ||
+                !JSON.JsonSet(*document, node, "sha256", JSON.JsonNewString(*document, ABC)) ||
+                !JSON.JsonSet(*document, node, "bytes", JSON.JsonNewInteger(*document, 3)) { return false }
+            node = JSON.JsonNext(*document, node)
+        }
+        if !Files.WriteEntireFile(Kit.Join(assets, profile.manifest),
+            JSON.JsonWrite(*document, document.root, JSON.JsonCompactStyle())) { return false }
+        for license: profile.licenses {
+            if license.count > 0 && !Files.WriteEntireFile(Kit.Join(assets, license), "synthetic model license\n") { return false }
+        }
+        arguments: [3]string = .[kind, "--source", source]
+        if !Kit.Expect(Models.Run(arguments[:], root) == 0, "offline CLI model preparation") { return false }
+        dest := Kit.Join(root, profile.destination)
+        node = JSON.JsonFirst(*document, files)
+        while node >= 0 {
+            name := JSON.JsonString(*document, JSON.JsonMember(*document, node, "name"))
+            if !Kit.Expect(Contents(Kit.Join(dest, name), "abc"), "original artifact filename preserved") ||
+                !Files.RemoveFile(Kit.Join(source, name)) { return false }
+            node = JSON.JsonNext(*document, node)
+        }
+        for license: profile.licenses {
+            if license.count > 0 && !Kit.Expect(Contents(Kit.Join(dest, license), "synthetic model license\n"),
+                "original license name and contents copied") { return false }
+        }
+        if !Kit.Expect(Models.Run(arguments[:], root) == 0 && NoStaging(dest), "CLI cache works without offline source") { return false }
+        explicit := Kit.Join(root, "explicit destination")
+        custom: [5]string = .[kind, "--source", source, "--destination", explicit]
+        // Seed the custom destination cache; sources have already been removed.
+        if !Tree.CreateDirectories(explicit, 448) { return false }
+        node = JSON.JsonFirst(*document, files)
+        while node >= 0 {
+            name := JSON.JsonString(*document, JSON.JsonMember(*document, node, "name"))
+            if !Files.WriteEntireFile(Kit.Join(explicit, name), "abc") { return false }
+            node = JSON.JsonNext(*document, node)
+        }
+        if !Kit.Expect(Models.Run(custom[:], root) == 0 && NoStaging(explicit), "explicit destination with spaces") { return false }
+    }
+    invalid: [1]string = .["unknown"]
+    option: [2]string = .["face", "--source"]
+    return Kit.Expect(Models.Run(invalid[:], root) == 2 && Models.Run(option[:], root) == 2,
+        "unknown kind and missing option value fail without downloads")
+}
+
+#scope_export
+main :: () -> s32 {
+    relative := Kit.TempDirectory("fetch-models")
+    if relative.count == 0 { return 1 }
+    defer { unused Kit.Cleanup(relative) }
+    root := Tree.ResolvePath(relative)
+    if !Transfers(root) { return 2 }
+    if !InvalidManifests(root) { return 3 }
+    if !Profiles(root) { return 4 }
+    if !BinaryTransfer(root) { return 5 }
+    print("Photos model fetch: downloads, cache, integrity failures, manifests, CLI and licenses passed\n")
+    return 0
+}

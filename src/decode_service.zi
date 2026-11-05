@@ -1,0 +1,179 @@
+// Replaceable HEIF/RAW display assets. The codec helper never changes originals.
+Store :: #import "library_store";
+LibraryFiles :: #import "library_files";
+Images :: #import "image_edit";
+Vault :: #import "vault";
+Access :: #import "access_registry";
+SQL :: #import "sqlite/SQLite";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+JSON :: #import "std/json_document";
+Timer :: #import "std/timer_linux";
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+Unavailable :: "Build or install the Photos HEIC/RAW decoder to view this format";
+Failed :: "HEIC/RAW decoding could not finish; your original is safe";
+CodecFailed :: "This image could not be decoded by the installed HEIC/RAW codecs; the original is safe";
+
+Identity :: (id: string) -> bool {
+    if id.count != 64 { return false }
+    for byte: id { if !((byte >= 48 && byte <= 57) || (byte >= 97 && byte <= 102)) { return false } }
+    return true
+}
+
+PNGDimensions :: (path: string, dimensions: *Images.ThumbnailDimensions) -> bool {
+    if Tree.PathStatus(path, false).kind != Tree.PathKind.File { return false }
+    input := Files.OpenRead(path)
+    if !input.valid { return false }
+    defer { unused Files.CloseFile(input) }
+    signature: [8]u8
+    expected: [8]u8 = .[137,80,78,71,13,10,26,10]
+    if Files.ReadAt(input, signature[:], 0) != 8 { return false }
+    for at: 0..7 { if signature[at] != expected[at] { return false } }
+    return Images.Dimensions(path, dimensions)
+}
+
+Check :: (lib: *Store.Library, id: string) -> Store.PhotoRow, string {
+    row, error := LibraryFiles.Photo(lib, id)
+    if error != "" { return row, error }
+    if row.trashed != 0 { return row, "Restore this photo before opening it" }
+    if row.kind != "photo" || !Supported(row.extension) { return row, "This photo does not need HEIC/RAW decoding" }
+    return row, ""
+}
+
+#scope_export
+Supported :: (extension: string) -> bool { return LibraryFiles.SpecialCodec(extension) != "" }
+
+// Every nonempty result is owned; release with LibraryFiles.ReleasePath.
+DisplayPath :: (lib: *Store.Library, photo: Store.PhotoRow) -> string {
+    name: Vec(u8)
+    if !DisplayPathInto(*name,lib,photo) { return "" }
+    return BuilderFinish(name)
+}
+
+DisplayPathInto :: (output: *Vec(u8),lib: *Store.Library,photo: Store.PhotoRow) -> bool {
+    return output != null && output.count == 0 && lib != null && Identity(photo.id) &&
+        BuilderAppend(<<output,lib.root) && BuilderAppend(<<output,"/private/display/") &&
+        BuilderAppend(<<output,photo.id) && BuilderAppend(<<output,".png")
+}
+
+// Decode to a private staging file, validate the reported dimensions and PNG,
+// then atomically publish. A failed decode leaves an existing target intact.
+DecodeSource :: (source: string, extension: string, destination: string, thumbnail: bool = false,
+    options: LibraryFiles.FileOptions = .{}) -> Images.ThumbnailDimensions, string {
+    dimensions: Images.ThumbnailDimensions
+    if options.cancelled != null && options.cancelled(options.cancel_context) { return dimensions,Failed }
+    codec := LibraryFiles.SpecialCodec(extension)
+    if codec == "" { return dimensions, "This photo does not need HEIC/RAW decoding" }
+    helperBytes: Vec(u8)
+    if !LibraryFiles.HelperProgramInto(*helperBytes,options,"photo_decode","photo-decoder") { return dimensions, Unavailable }
+    helper := TextView(VecSlice(helperBytes,0,helperBytes.count))
+    parent := Tree.PathParent(destination)
+    if destination == "" || Files.PathIsLink(parent) || !Tree.CreateDirectories(parent, 448) { return dimensions, Failed }
+    staging := Tree.CreateTemporaryDirectory(parent, ".decode-")
+    if staging == "" { return dimensions, Failed }
+    defer { unused Tree.RemoveTree(staging); LibraryFiles.ReleasePath(*staging) }
+    temporaryBytes: Vec(u8)
+    if !BuilderAppend(temporaryBytes,staging) || !BuilderAppend(temporaryBytes,"/image.png") { return dimensions,Failed }
+    temporary := TextView(VecSlice(temporaryBytes,0,temporaryBytes.count))
+    arguments: [9]string = .["prlimit", "--as=1610612736", "--cpu=120", "--", helper, codec,
+        source, temporary, ifx thumbnail then "640" else "0"]
+    response: Vec(u8)
+    code: s32 = -1
+    if !LibraryFiles.RunHelper(arguments[:], LibraryFiles.HelperTimeout(options.decode_timeout_ms, 130000), *response, *code,65536,options.cancelled,options.cancel_context) {
+        return dimensions, ifx code >= 0 then CodecFailed else Failed
+    }
+    document: JSON.JsonDocument
+    defer { JSON.JsonReset(*document) }
+    if !JSON.JsonRead(*document, TextView(VecSlice(response, 0, response.count))) { return dimensions, Failed }
+    width, widthValid := JSON.JsonInteger(*document, JSON.JsonMember(*document, document.root, "width"))
+    height, heightValid := JSON.JsonInteger(*document, JSON.JsonMember(*document, document.root, "height"))
+    if !widthValid || !heightValid || width <= 0 || height <= 0 || width > 100000 || height > 100000 { return dimensions, Failed }
+    actual: Images.ThumbnailDimensions
+    if !PNGDimensions(temporary, *actual) ||
+        (!thumbnail && (actual.width != width || actual.height != height)) ||
+        (thumbnail && (actual.width > 640 || actual.height > 640 || actual.width > width || actual.height > height)) {
+        return dimensions, Failed
+    }
+    // Decoder processes may inherit a permissive umask. Display assets are
+    // private regardless of the helper's mode or the caller's environment.
+    if !Tree.SetPathMode(temporary, 384) { return dimensions, Failed }
+    input := Files.OpenRead(temporary)
+    if !input.valid { return dimensions, Failed }
+    synced := Files.SyncFile(input)
+    closed := Files.CloseFile(input)
+    if !synced || !closed || (options.cancelled != null && options.cancelled(options.cancel_context)) || !Files.RenamePath(temporary, destination) { return dimensions, Failed }
+    dimensions.width = cast(s32)width
+    dimensions.height = cast(s32)height
+    return dimensions, ""
+}
+
+// Every nonempty successful Display path is owned; release it with
+// LibraryFiles.ReleasePath. Error messages are borrowed constants.
+// The service supplies its actual Hidden token/registry. Authorization is
+// checked before starting the helper and again against a fresh writer snapshot;
+// no credential guard remains held during a potentially long codec operation.
+Display :: (lib: *Store.Library, photo: Store.PhotoRow, token: string = "", registry: *Access.Registry = null,
+    options: LibraryFiles.FileOptions = .{}) -> string, string {
+    if lib == null || lib.db == null { return "", "Photo library is not open" }
+    if !Identity(photo.id) { return "", "Choose a valid photo" }
+    if !SQL.SqliteGetAutocommit(lib.db) { return "", "Finish the current library operation before decoding photos" }
+    if options.cancelled != null && options.cancelled(options.cancel_context) { return "",Failed }
+    before, error := Check(lib, photo.id)
+    defer { LibraryFiles.ClearPhoto(*before) }
+    if error != "" { return "", error }
+    initial := Vault.BeginAuthorization(lib, token, before.hidden, registry)
+    initialError := initial.error
+    Vault.EndAuthorization(*initial)
+    if initialError != "" { return "", initialError }
+    targetBytes: Vec(u8)
+    if !DisplayPathInto(*targetBytes,lib,before) { return "",Failed }
+    target := TextView(VecSlice(targetBytes,0,targetBytes.count))
+    parent := Tree.PathParent(target)
+    if Files.PathIsLink(parent) || !Tree.CreateDirectories(parent, 448) { return "", Failed }
+    dimensions: Images.ThumbnailDimensions
+    cached := PNGDimensions(target, *dimensions)
+    staging := Tree.CreateTemporaryDirectory(parent, ".display-")
+    if staging == "" { return "", Failed }
+    defer { unused Tree.RemoveTree(staging); LibraryFiles.ReleasePath(*staging) }
+    decodedBytes: Vec(u8)
+    if !BuilderAppend(decodedBytes,staging) || !BuilderAppend(decodedBytes,"/image.png") { return "",Failed }
+    decoded := TextView(VecSlice(decodedBytes,0,decodedBytes.count))
+    if !cached {
+        originalBytes: Vec(u8)
+        if !LibraryFiles.OriginalInto(*originalBytes,lib,before.id,before.extension) { return "",Failed }
+        dimensions, error = DecodeSource(TextView(VecSlice(originalBytes,0,originalBytes.count)), before.extension, decoded, false, options)
+        if error != "" { return "", error }
+    }
+    authorization: Vault.Authorization
+    defer { Vault.EndAuthorization(*authorization) }
+    if SQL.SqliteExecText(lib.db, "BEGIN IMMEDIATE") != SQL.SQLITE_OK { return "", "The library is busy; try again" }
+    committed := false
+    published := false
+    defer {
+        if !committed {
+            unused SQL.SqliteExecText(lib.db, "ROLLBACK")
+            if published { unused Files.RemoveFile(target) }
+        }
+    }
+    current, currentError := Check(lib, photo.id)
+    defer { LibraryFiles.ClearPhoto(*current) }
+    if currentError != "" { return "", currentError }
+    if current.extension != before.extension { return "", "This photo changed while decoding; try again" }
+    authorization = Vault.BeginAuthorization(lib, token, current.hidden, registry)
+    if authorization.error != "" { return "", authorization.error }
+    if current.hidden && authorization.until <= Timer.MonotonicMilliseconds() { return "", "Hidden is locked; unlock again" }
+    if options.cancelled != null && options.cancelled(options.cancel_context) { return "",Failed }
+    if !cached {
+        if !LibraryFiles.SetDimensions(lib, photo.id, dimensions.width, dimensions.height) { return "", "Could not update decoded photo dimensions" }
+        if !Files.RenamePath(decoded, target) { return "", Failed }
+        published = true
+    }
+    if current.hidden && authorization.until <= Timer.MonotonicMilliseconds() { return "", "Hidden is locked; unlock again" }
+    if options.cancelled != null && options.cancelled(options.cancel_context) { return "",Failed }
+    if SQL.SqliteExecText(lib.db, "COMMIT") != SQL.SQLITE_OK { return "", "Could not save decoded photo dimensions" }
+    committed = true
+    return BuilderFinish(targetBytes), ""
+}

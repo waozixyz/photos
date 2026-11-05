@@ -1,0 +1,62 @@
+Rank :: #import "semantic";
+SQL :: #import "sqlite/SQLite";
+
+#scope_file
+Vector :: (second: bool = false) -> [2048]u8 {
+    bytes: [2048]u8
+    offset := ifx second then 4 else 0
+    bytes[offset+2] = 128; bytes[offset+3] = 63
+    return bytes
+}
+Open :: () -> *void {
+    database: *void
+    if SQL.SqliteOpenText(":memory:",*database,SQL.SQLITE_OPEN_READWRITE | SQL.SQLITE_OPEN_CREATE) != SQL.SQLITE_OK { return null }
+    return database
+}
+Score :: (database: *void, bytes: []u8) -> float64 {
+    statement: *void
+    if SQL.SqlitePrepareText(database,"SELECT photos_semantic_score(?)",-1,*statement,null) != SQL.SQLITE_OK { return -9.0 }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if SQL.SqliteBindBlob(statement,1,bytes) != SQL.SQLITE_OK || SQL.SqliteStep(statement) != SQL.SQLITE_ROW { return -9.0 }
+    return SQL.SqliteColumnDouble(statement,0)
+}
+
+#scope_export
+// Exported for the native allocation-failure harness. Every successful
+// registration is exercised, then every database is closed in this call.
+#program_export
+RankLifetime :: () -> s32 {
+    first := Open(); if first == null { return 0 }
+    defer { unused SQL.SqliteClose(first) }
+    second := Open(); if second == null { return 0 }
+    defer { unused SQL.SqliteClose(second) }
+    a := Vector(); b := Vector(true)
+    if !Rank.RegisterVector(first,a[:]) || !Rank.RegisterVector(second,b[:]) { return 0 }
+    if Score(first,a[:]) != 1.0 || Score(second,a[:]) != 0.0 || Score(second,b[:]) != 1.0 { return 3 }
+    if !Rank.RegisterVector(first,b[:]) || !Rank.RegisterVector(second,a[:]) { return 0 }
+    return ifx Score(first,a[:]) == 0.0 && Score(second,a[:]) == 1.0 then 42 else 3
+}
+#program_export
+main :: () -> s32 {
+    for repeat: 0..99 { if RankLifetime() != 42 { return 1 } }
+    database := Open(); if database == null { return 2 }
+    defer { unused SQL.SqliteClose(database) }
+    a := Vector(); b := Vector(true)
+    if !Rank.RegisterVector(database,a[:]) { return 3 }
+    // Function data owns its copy, independent of a caller's mutable tensor.
+    for at: 0..2047 { a[at] = 0 }
+    original := Vector()
+    if Score(database,original[:]) != 1.0 || Rank.RegisterVector(database,a[:]) || Score(database,original[:]) != 1.0 { return 4 }
+    // Replacing an active SQLite function fails; SQLite destroys the rejected
+    // new context and keeps the previous context and live statement valid.
+    statement: *void
+    if SQL.SqlitePrepareText(database,"SELECT photos_semantic_score(?)",-1,*statement,null) != SQL.SQLITE_OK { return 5 }
+    if SQL.SqliteBindBlob(statement,1,original[:]) != SQL.SQLITE_OK || SQL.SqliteStep(statement) != SQL.SQLITE_ROW { unused SQL.SqliteFinalize(statement); return 6 }
+    rejected := Rank.RegisterVector(database,b[:])
+    result := SQL.SqliteColumnDouble(statement,0)
+    unused SQL.SqliteFinalize(statement)
+    if rejected || result != 1.0 || Score(database,original[:]) != 1.0 || !Rank.RegisterVector(database,b[:]) || Score(database,b[:]) != 1.0 { return 7 }
+    if Rank.RegisterVector(database,original[:2047]) || Rank.RegisterVector(null,original[:]) || Score(database,a[:]) != -1.0 { return 8 }
+    print("Semantic ranker: isolated two-DB interleaving, immutable query copies, replacement/close, active-registration failure and invalid vectors passed\n")
+    return 0
+}

@@ -75,12 +75,14 @@ Predicate :: (scope: *Scope, query: *Search.Predicate) {
     }
 }
 
-Populate :: (scope: *Scope, database: *void) -> bool {
+Populate :: (scope: *Scope, database: *void, created: *bool = null) -> bool {
+    if created != null { created.* = false }
     if !scope.active || !scope.selection { return true }
-    // The main database is opened read-only. Temporary identities stay in
-    // memory and disappear with this helper; they never enter library backup.
-    if SqliteExecText(database,"PRAGMA temp_store=MEMORY") != SQLITE_OK ||
-        SqliteExecText(database,"CREATE TEMP TABLE guest_selection(id TEXT PRIMARY KEY,ordinal INTEGER NOT NULL)") != SQLITE_OK { return false }
+    // The gallery owner prepares MEMORY policy before caller work exists and
+    // drops only its own temporary identities after the read. No main rows or
+    // backup records store this selection.
+    if SqliteExecText(database,"CREATE TEMP TABLE guest_selection(id TEXT PRIMARY KEY,ordinal INTEGER NOT NULL)") != SQLITE_OK { return false }
+    if created != null { created.* = true }
     statement: *void
     if SqlitePrepareText(database,"INSERT INTO guest_selection VALUES(?,?)",-1,*statement,null) != SQLITE_OK { return false }
     defer { unused SqliteFinalize(statement) }

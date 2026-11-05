@@ -1,0 +1,24 @@
+// In-process Photos transport carries only a numeric loopback port. The
+// request cannot introduce another host, scheme, proxy or redirect target.
+Http :: #import "std/net_http";
+using Vectors :: #import "std/vec";
+
+SyncFrame :: struct {
+    version: u8 // 1 ordinary request, 2 pinned node policy
+    method: u8 // GET, POST, PUT, HEAD, DELETE
+    port: u16
+    path: string
+    headers: []Http.HttpHeader
+    body: []u8
+    response_limit: s64
+    timeout_ms: s32
+    pin: []u8 // version 2: authenticated /api/v1/node response
+}
+
+SyncResponse :: struct {
+    status: s32
+    body: []u8
+    storage: *u8 // Owned native allocation; release with sync_http.ClearResponse.
+    capacity: s64
+    code: s32 // Existing helper exit codes: 2 invalid, 3 bound, 4 I/O, 5–7 policy.
+}

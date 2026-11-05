@@ -1,0 +1,155 @@
+// CLIP RGB/EXIF preprocessing. Run the file entry as a bounded helper;
+// TensorFromImage is also usable with small caller-owned test rasters.
+Raster :: #import "std/image";
+Files :: #import "std/file";
+#import "std/byte_text_linux"
+#import "std/c_string"
+using Vectors :: #import "std/vec";
+
+#scope_file
+pixbuf :: #system_library "gdk_pixbuf-2.0";
+object :: #system_library "gobject-2.0";
+c :: #system_library "c";
+FileInfo :: (path: *u8, width: *s32, height: *s32) -> *void #foreign pixbuf "gdk_pixbuf_get_file_info";
+Load :: (path: *u8, error: **void) -> *void #foreign pixbuf "gdk_pixbuf_new_from_file";
+Orient :: (image: *void) -> *void #foreign pixbuf "gdk_pixbuf_apply_embedded_orientation";
+Option :: (image: *void, key: *u8) -> *u8 #foreign pixbuf "gdk_pixbuf_get_option";
+SetOption :: (image: *void, key: *u8, value: *u8) -> s32 #foreign pixbuf "gdk_pixbuf_set_option";
+Width :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_width";
+Height :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_height";
+Channels :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_n_channels";
+Stride :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_rowstride";
+Pixels :: (image: *void) -> *u8 #foreign pixbuf "gdk_pixbuf_get_pixels";
+Unref :: (image: *void) #foreign object "g_object_unref";
+CopyMemory :: (target: *void, source: *void, size: usize) -> *void #foreign c "memcpy";
+means: [3]float32 = .[.48145466,.4578275,.40821073];
+deviations: [3]float32 = .[.26862954,.26130258,.27577711];
+AllowedSize :: (width: s32, height: s32) -> bool {
+    return width > 0 && height > 0 && cast(s64)width*height <= 100000000
+}
+Integer :: (bytes: []u8, little: bool) -> s64 {
+    value: s64
+    if little { for at: 0..bytes.count-1 { value |= cast(s64)bytes[at] << (at*8) } }
+    else { for byte: bytes { value = value*256+cast(s64)byte } }
+    return value
+}
+// GdkPixbuf handles JPEG/TIFF orientation but its PNG loader omits eXIf.
+// Read only the bounded TIFF IFD0 orientation, then let its existing transpose
+// routine perform the transform. No pixel stream or other metadata is copied.
+PNGOrientation :: (path: string) -> u8 {
+    input := Files.OpenRead(path); if !input.valid { return 1 }
+    defer { unused Files.CloseFile(input) }
+    header: [16]u8; signature: [8]u8 = .[137,80,78,71,13,10,26,10]
+    if Files.ReadAt(input,header[:8],0) != 8 { return 1 }
+    for at: 0..7 { if header[at] != signature[at] { return 1 } }
+    size := Files.FileSize(input); offset: s64 = 8
+    for chunk: 0..4095 {
+        if offset < 8 || offset > size-12 || Files.ReadAt(input,header[:8],offset) != 8 { return 1 }
+        length := Integer(header[:4],false)
+        if length > size-offset-12 { return 1 }
+        if header[4] == 101 && header[5] == 88 && header[6] == 73 && header[7] == 102 {
+            base := offset+8
+            if length < 8 || Files.ReadAt(input,header[:8],base) != 8 { return 1 }
+            little := header[0] == 73 && header[1] == 73
+            if !little && (header[0] != 77 || header[1] != 77) { return 1 }
+            if Integer(header[2:4],little) != 42 { return 1 }
+            root := Integer(header[4:8],little)
+            if root < 8 || root > length-2 || Files.ReadAt(input,header[:2],base+root) != 2 { return 1 }
+            count := Integer(header[:2],little)
+            if count > 4096 || count > (length-root-2)/12 { return 1 }
+            for at: 0..count-1 {
+                if Files.ReadAt(input,header[:12],base+root+2+at*12) != 12 { return 1 }
+                if Integer(header[:2],little) == 274 && Integer(header[2:4],little) == 3 && Integer(header[4:8],little) == 1 {
+                    value := Integer(header[8:10],little)
+                    return ifx value >= 1 && value <= 8 then cast(u8)value else 1
+                }
+            }
+            return 1
+        }
+        if header[4] == 73 && header[5] == 69 && header[6] == 78 && header[7] == 68 { return 1 }
+        offset += length+12
+    }
+    return 1
+}
+
+#scope_file
+TensorRGB :: (image: *Raster.Image, output: *Vec(u8)) -> bool {
+    width: s64 = 224; height: s64 = 224
+    if image.width <= image.height { height = cast(s64)image.height*224/image.width }
+    else { width = cast(s64)image.width*224/image.height }
+    if width > 2147483647 || height > 2147483647 { return false }
+    resized: Raster.Image
+    if !Raster.ResizeBicubicInto(image,cast(s32)width,cast(s32)height,*resized) || !VecResize(<<output,602112) { return false }
+    left := (width-224)/2; top := (height-224)/2
+    bytes := BytesFromPointer(*(<<output)[0],cast(u64)output.count)
+    for channel: 0..2 {
+        for y: 0..223 {
+            for x: 0..223 {
+                pixel := resized.pixels[((y+top)*width+x+left)*4+channel]
+                scaled: float32 = cast(float32)pixel / cast(float32)255.0
+                value: float32 = (scaled-means[channel])/deviations[channel]
+                bits: u32; unused CopyMemory(cast(*void)*bits,cast(*void)*value,4)
+                at := ((channel*224+y)*224+x)*4
+                for byte: 0..3 { bytes[at+byte] = cast(u8)(bits >> (byte*8)) }
+            }
+        }
+    }
+    return true
+}
+
+#scope_export
+// Replacement output: exactly 602112 little-endian float32 NCHW bytes on
+// success, empty on failure. Source and output storage must be disjoint.
+TensorFromImage :: (image: *Raster.Image, output: *Vec(u8)) -> bool {
+    if output == null { return false }
+    VecClear(<<output)
+    if !Raster.ImageValid(image) || !AllowedSize(image.width,image.height) { return false }
+    rgb: Raster.Image
+    if !VecResize(rgb.pixels,image.pixels.count) { return false }
+    rgb.width = image.width; rgb.height = image.height
+    for at: 0..image.pixels.count-1 { rgb.pixels[at] = image.pixels[at] }
+    Raster.DropAlpha(*rgb)
+    return TensorRGB(*rgb,output)
+}
+TensorFromFile :: (path: string, output: *Vec(u8)) -> bool {
+    if output == null { return false }
+    VecClear(<<output)
+    name: [4096]u8; width: s32; height: s32
+    if !CopyCString(path,name[:]) || FileInfo(*name[0],*width,*height) == null || !AllowedSize(width,height) { return false }
+    source := Load(*name[0],null); if source == null { return false }
+    defer { if source != null { Unref(source) } }
+    if !AllowedSize(Width(source),Height(source)) { return false }
+    key: [12]u8
+    unused CopyCString("orientation",key[:])
+    if Option(source,*key[0]) == null {
+        orientation := PNGOrientation(path)
+        if orientation > 1 { value: [2]u8 = .[cast(u8)(48+orientation),0]; unused SetOption(source,*key[0],*value[0]) }
+    }
+    oriented := Orient(source); if oriented == null { return false }
+    defer { if oriented != null { Unref(oriented) } }
+    width = Width(oriented); height = Height(oriented)
+    channels := Channels(oriented); stride := Stride(oriented); pixels := Pixels(oriented)
+    if !AllowedSize(width,height) || (channels != 3 && channels != 4) || stride < cast(s64)width*channels || pixels == null { return false }
+    image: Raster.Image
+    if !VecResize(image.pixels,cast(s64)width*height*4) { return false }
+    image.width = width; image.height = height
+    for y: 0..height-1 {
+        for x: 0..width-1 {
+            at := (cast(s64)y*width+x)*4; source_at := cast(s64)y*stride+cast(s64)x*channels
+            for channel: 0..2 { image.pixels[at+channel] = pixels[source_at+channel] }
+            image.pixels[at+3] = 255
+        }
+    }
+    // Release codec buffers before the checked resizer copies the RGB image.
+    Unref(oriented); oriented = null; Unref(source); source = null
+    return TensorRGB(*image,output)
+}
+#program_export
+main :: (argc: s32, argv: **u8) -> s32 {
+    if argc != 3 { print("Choose an input image and a private tensor output\n"); return 2 }
+    tensor: Vec(u8)
+    if !TensorFromFile(TextFromCString(argv[1]),*tensor) { print("This photo could not be prepared for local semantic indexing\n"); return 3 }
+    output := Files.OpenExclusivePrivate(TextFromCString(argv[2])); if !output.valid { return 4 }
+    defer { unused Files.CloseFile(output) }
+    return ifx Files.WriteAt(output,VecSlice(tensor,0,tensor.count),0) == 602112 then 0 else 4
+}

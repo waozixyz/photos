@@ -1,0 +1,69 @@
+Transaction :: #import "sync_transaction";
+Wire :: #import "sync_crypto";
+Native :: #import "daochi_client/crypto_native";
+Account :: #import "account_sign";
+Test :: #import "sync_crypto_test";
+JSON :: #import "std/json_document";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+Bytes :: (text: string) -> []u8 {
+    d:=cast(*TextDescriptor)*text; return BytesFromPointer(d.data,cast(u64)text.count)
+}
+Hex :: (bytes: []u8) -> string {
+    out: Vec(u8); digits:="0123456789abcdef"
+    for byte: bytes { VecPush(out,digits[byte>>4]); VecPush(out,digits[byte&15]) }; return BuilderFinish(out)
+}
+Unhex :: (text: string,out: []u8) -> bool {
+    if text.count!=out.count*2 { return false }
+    for i: 0..out.count-1 {
+        value: u8
+        for j: 0..1 {
+            byte:=text[i*2+j]
+            if byte>=48 && byte<=57 { value = cast(u8)(value*16+byte-48) }
+            else if byte>=97 && byte<=102 { value = cast(u8)(value*16+byte-87) }
+            else { return false }
+        }
+        out[i] = value
+    }; return true
+}
+Field :: (json: *JSON.JsonDocument,name: string) -> string {
+    return JSON.JsonString(json,JSON.JsonMember(json,json.root,name))
+}
+main :: () -> s32 {
+    public: Vec(u8); private: Vec(u8); seed: Vec(u8); out: Vec(u8); retry: Vec(u8)
+    defer { Wire.ClearOutput(*private); Wire.ClearOutput(*seed); Wire.ClearOutput(*out); Wire.ClearOutput(*retry) }
+    if !Test.Expect(Test.Fixture("account-public.bin",*public) && Test.Fixture("account-secret.bin",*private) && Test.Fixture("key.bin",*seed),"synthetic transaction keys") { return 1 }
+    pk:=VecSlice(public,0,public.count); sk:=VecSlice(private,0,private.count); device:=VecSlice(seed,0,seed.count)
+    digest: [32]u8; account: [32]u8; devicePublic: [32]u8; deviceID: [32]u8
+    if !Native.Digest(Bytes("synthetic request body"),digest[: ]) || !Native.Digest(pk,account[: ]) ||
+        !Native.DevicePublic(device,devicePublic[: ]) || !Native.Digest(devicePublic[: ],deviceID[: ]) { return 1 }
+    methods: [5]string = .{"GET","POST","PUT","HEAD","DELETE"}
+    paths: [5]string = .{"/api/v1/records?since=42&limit=1","/api/v1/sync","/api/v1/blobs/photos/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","/api/v1/blobs/entity/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","/api/v1/blobs/photos/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    for i: 0..4 {
+        if !Test.Expect(Transaction.BuildTransaction(pk,sk,device,cast(u8)(i+1),paths[i],digest[: ],2000000000,*out),"in-process transaction builder") { return 1 }
+        json: JSON.JsonDocument
+        if !Test.Expect(JSON.JsonRead(*json,TextFromBytes(VecSlice(out,0,out.count))) &&
+            Field(*json,"account_id")==Hex(account[: ]) && Field(*json,"device_key_id")==Hex(deviceID[: ]) &&
+            Field(*json,"app_id")=="photos" && Field(*json,"method")==methods[i] && Field(*json,"path")==paths[i] &&
+            Field(*json,"body_sha256")==Hex(digest[: ]) && Field(*json,"signature_context")=="daochi-tx-v1", "exact canonical header fields") { return 1 }
+        message: Vec(u8); BuilderPrint(*message,"daochi-tx-v1\n6\n%\n%\nphotos\n%\n%\n%\n%\n%\n2000000000\n",Field(*json,"tx_id"),Hex(account[: ]),Hex(deviceID[: ]),methods[i],paths[i],Hex(digest[: ]),Field(*json,"nonce"))
+        text:=BuilderFinish(message); proof: [2420]u8; deviceProof: [64]u8; expected: [64]u8
+        changed: Vec(u8); BuilderPrint(*changed,"%changed",text)
+        if !Test.Expect(Unhex(Field(*json,"signature"),proof[: ]) && Account.AccountVerify(pk,Bytes(text),proof[: ]) &&
+            !Account.AccountVerify(pk,Bytes(BuilderFinish(changed)),proof[: ]) && Unhex(Field(*json,"device_signature"),deviceProof[: ]) &&
+            Native.SignDevice(device,Bytes(text),expected[: ]) && Test.Equal(deviceProof[: ],expected[: ]), "account and Ed25519 signatures bind exact request") { return 1 }
+        if !Test.Expect(Transaction.BuildTransaction(pk,sk,device,cast(u8)(i+1),paths[i],digest[: ],2000000000,*retry) &&
+            !Test.Equal(VecSlice(out,0,out.count),VecSlice(retry,0,retry.count)), "fresh transaction nonce and ID") { return 1 }
+    }
+    invalid: [4]string = .{"relative","/api/v1/sync\nother","/api/v1/sync\0other",""}
+    for path: invalid { if !Test.Expect(!Transaction.BuildTransaction(pk,sk,device,2,path,digest[: ],2000000000,*out) && Test.Wiped(*out),"invalid paths clear result") { return 1 } }
+    if !Test.Expect(!Transaction.BuildTransaction(pk[: 1311],sk,device,2,"/api/v1/sync",digest[: ],1,*out) && Test.Wiped(*out) &&
+        !Transaction.BuildTransaction(pk,sk[: 2559],device,2,"/api/v1/sync",digest[: ],1,*out) && Test.Wiped(*out) &&
+        !Transaction.BuildTransaction(pk,sk,device[: 31],2,"/api/v1/sync",digest[: ],1,*out) && Test.Wiped(*out) &&
+        !Transaction.BuildTransaction(pk,sk,device,6,"/api/v1/sync",digest[: ],1,*out) && Test.Wiped(*out) &&
+        !Transaction.BuildTransaction(pk,sk,device,2,"/api/v1/sync",digest[: 31],1,*out) && Test.Wiped(*out) &&
+        !Transaction.BuildTransaction(pk,sk,device,2,"/api/v1/sync",digest[: ],0,*out) && Test.Wiped(*out), "transaction key/digest/method/expiration bounds") { return 1 }
+    print("sync_transaction: local tests passed\n"); return 0
+}

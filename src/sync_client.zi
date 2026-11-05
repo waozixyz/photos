@@ -1,0 +1,560 @@
+// Photos orchestration over the accepted native Daochi primitives. Persistent
+// identities remain in their released JSON format; opening never logs in.
+#scope_module
+BlobDescriptor :: struct { data: *Blob; length: s64 }
+Store :: #import "library_store";
+Types :: #import "service_types";
+Owner :: #import "owner_account";
+Wire :: #import "sync_crypto";
+Entity :: #import "entity_crypto";
+EntityProtocol :: #import "daochi_client/entity";
+Native :: #import "daochi_client/crypto_native";
+Record :: #import "daochi_client/record";
+JSON :: #import "std/json_document";
+Account :: #import "sync_account";
+Transaction :: #import "sync_transaction";
+Transport :: #import "sync_http";
+Frames :: #import "sync_frame";
+Policy :: #import "node_policy";
+Http :: #import "std/net_http";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+Mutex :: #import "std/mutex_linux";
+Clock :: #import "std/date_time_linux";
+UTF8 :: #import "std/utf8";
+#import "std/byte_text_linux"
+#import "std/json_scan"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+c :: #system_library "c";
+Allocate :: (count: usize, size: usize) -> *void #foreign c "calloc";
+Release :: (memory: *void) #foreign c "free";
+
+#scope_export
+ChunkBytes :: () -> s64 { return EntityProtocol.ENTITY_CHUNK_BYTES }
+Blob :: struct { address: [65]u8; size: s64 }
+BlobList :: struct { items: Vec(Blob) }
+SyncNode :: struct { port: u16; pin: [32]u8 }
+// The source lends no storage: fill BUFFER with one block, return its length,
+// zero at EOF, or -1 on failure. Each block is at most ChunkBytes(). Rewind the
+// source before retrying a failed upload; already stored blobs are HEAD-skipped.
+ReadChunk :: #type (context: *void, index: s64, buffer: []u8) -> s64;
+WriteChunk :: #type (context: *void, index: s64, plain: []u8) -> bool;
+ChunkSource :: struct { context: *void; read: ReadChunk }
+// Plaintext is borrowed only during WRITE. Publish a staged output only after
+// GetContent succeeds, since the final digest can fail after individual chunks.
+ChunkSink :: struct { context: *void; write: WriteChunk }
+SyncClient :: struct {
+    library: *Store.Library // borrowed; outlives this handle
+    owner: Owner.OwnerAccount
+    legacy: Owner.OwnerAccount
+    key: [32]u8
+    device_key: [32]u8
+    device_public: [32]u8
+    device_id: [65]u8
+    client_id: [129]u8
+    client_count: s64
+    nodes: [2]SyncNode
+    tokens: [2]Vec(u8)
+    mutex: Mutex.Mutex
+}
+
+#scope_module
+Bytes :: (text: string) -> []u8 {
+    descriptor := cast(*TextDescriptor)*text
+    return BytesFromPointer(descriptor.data, cast(u64)text.count)
+}
+Hex :: (bytes: []u8, out: []u8) -> bool {
+    if out.count < bytes.count*2+1 { return false }
+    digits := "0123456789abcdef"
+    for i: 0..bytes.count-1 { out[i*2]=digits[bytes[i]>>4]; out[i*2+1]=digits[bytes[i]&15] }
+    out[bytes.count*2]=0; return true
+}
+Nibble :: (byte: u8) -> s32 {
+    if byte>=48 && byte<=57 { return cast(s32)byte-48 }
+    if byte>=97 && byte<=102 { return cast(s32)byte-87 }
+    if byte>=65 && byte<=70 { return cast(s32)byte-55 }
+    return -1
+}
+// Python bytes.fromhex permits ASCII whitespace between byte pairs.
+Unhex :: (text: string, out: []u8) -> bool {
+    at: s64; index: s64
+    while at<text.count {
+        byte:=text[at]
+        if byte==32 || (byte>=9 && byte<=13) { at+=1; continue }
+        if at+1>=text.count || index>=out.count { return false }
+        high:=Nibble(byte); low:=Nibble(text[at+1])
+        if high<0 || low<0 { return false }
+        out[index]=cast(u8)(high*16+low); index+=1; at+=2
+    }
+    return index==out.count
+}
+Error :: (client: *SyncClient, message: string) -> string {
+    if client!=null {
+        if message=="" { Store.ClearError(client.library) }
+        else { Store.SetError(client.library,message) }
+    }
+    return message
+}
+Document :: (json: string, names: []string, positions: []s32) -> bool {
+    if json.count<2 || !UTF8.Valid(json) { return false }
+    at:=Space(json,0); end:=ValueEnd(json,at,0)
+    return at>=0 && at<json.count && json[at]==123 && end>=0 &&
+        Space(json,end)==json.count && Policy.Fields(json,at,names,positions)
+}
+HexField :: (json: string, at: s32, out: []u8) -> bool {
+    encoded: [16385]u8
+    defer { Native.Clear(encoded[:]) }
+    count:=ReadStringText(json,at,encoded[:])
+    return count>=0 && Unhex(TextFromBytes(encoded[:count]),out)
+}
+ReadPrivate :: (path: string, out: *Vec(u8)) -> bool {
+    Wire.ClearOutput(out)
+    input:=Files.OpenRead(path)
+    if !input.valid { return false }; defer { unused Files.CloseFile(input) }
+    count:=Files.FileSize(input)
+    if count<2 || count>65536 || !Wire.PrepareOutput(out,count) { return false }
+    buffer:=Wire.OutputBytes(out); at: s64
+    while at<count {
+        amount:=Files.ReadAt(input,buffer[at:],at)
+        if amount<=0 { Wire.ClearOutput(out); return false }; at+=amount
+    }
+    extra: [1]u8
+    if Files.ReadAt(input,extra[:],count)!=0 { Wire.ClearOutput(out); return false }
+    return true
+}
+CreatePrivate :: (path: string, data: []u8) -> bool {
+    parent:=Tree.PathParent(path)
+    if !Tree.CreateDirectories(parent,448) { return false }
+    stage:=Tree.CreateTemporaryDirectory(parent,".next-")
+    if stage=="" { return false }
+    // This exact result is owned by CreateTemporaryDirectory. Never release
+    // an arbitrary string or a borrowed path/member through a common helper.
+    stageStorage:=cast(*TextDescriptor)*stage
+    defer { unused Tree.RemoveTree(stage); Release(cast(*void)stageStorage.data) }
+    name: Vec(u8); BuilderPrint(*name,"%/data",stage)
+    temporary:=TextFromBytes(Wire.OutputBytes(*name))
+    output:=Files.OpenExclusivePrivate(temporary)
+    if !output.valid { return false }
+    opened:=true; defer { if opened { unused Files.CloseFile(output) } }
+    at: s64
+    while at<data.count {
+        amount:=Files.WriteAt(output,data[at:],at)
+        if amount<=0 { return false }; at+=amount
+    }
+    synced:=Files.SyncFile(output); closed:=Files.CloseFile(output); opened=false
+    // A concurrent opener's identity is authoritative; never replace it.
+    return synced && closed && (Files.RenameNoReplace(temporary,path) || Files.PathExists(path))
+}
+LoadIdentity :: (client: *SyncClient) -> string {
+    identityPath: Vec(u8); deviceName: Vec(u8)
+    BuilderPrint(*identityPath,"%/private/identity.json",client.library.root)
+    BuilderPrint(*deviceName,"%/private/device.json",client.library.root)
+    path:=TextFromBytes(Wire.OutputBytes(*identityPath)); devicePath:=TextFromBytes(Wire.OutputBytes(*deviceName))
+    input: Vec(u8); generated: Vec(u8)
+    defer { Wire.ClearOutput(*input); Wire.ClearOutput(*generated) }
+    // Both released JSON shapes fit before any private hex is appended.
+    if !VecReserve(generated,256) { return "Could not allocate Photos identity storage" }
+    if !Files.PathExists(path) {
+        key: [32]u8; encoded: [65]u8
+        defer { Native.Clear(key[:]); Native.Clear(encoded[:]) }
+        if !Native.RandomBytes(key[:]) || !Hex(key[:],encoded[:]) { return "Could not create Photos content key" }
+        BuilderPrint(*generated,"{\"content_key\":\"%\"}",TextUntilNul(encoded[:]))
+        if !CreatePrivate(path,Wire.OutputBytes(*generated)) { return "Could not save Photos content key; existing keys were preserved" }
+        Wire.ClearOutput(*generated)
+    }
+    if !ReadPrivate(path,*input) { return "Invalid Photos content key; existing keys were preserved" }
+    json:=TextFromBytes(Wire.OutputBytes(*input))
+    names: [3]string=.{"content_key","public","private"}; positions: [3]s32
+    if !Document(json,names[:],positions[:]) || !HexField(json,positions[0],client.key[:]) {
+        return "Invalid Photos content key; existing keys were preserved"
+    }
+    if positions[1]>=0 || positions[2]>=0 {
+        public: [1312]u8; private: [2560]u8
+        defer { Native.Clear(private[:]) }
+        if !HexField(json,positions[1],public[:]) || !HexField(json,positions[2],private[:]) {
+            return "Invalid Photos account identity; existing keys were preserved"
+        }
+        legacy,error:=Owner.FromKeys(public[:],private[:])
+        defer { Owner.Clear(*legacy) }
+        if error!="" { return "Invalid Photos account identity; existing keys were preserved" }
+        if TextUntilNul(legacy.account_id[:])!=TextUntilNul(client.owner.account_id[:]) { client.legacy=legacy }
+    }
+    Wire.ClearOutput(*input)
+    if !Files.PathExists(devicePath) {
+        seed: [32]u8; random: [12]u8; encoded: [65]u8; suffix: [25]u8
+        defer { Native.Clear(seed[:]); Native.Clear(encoded[:]) }
+        if !Native.RandomBytes(seed[:]) || !Native.RandomBytes(random[:]) || !Hex(seed[:],encoded[:]) || !Hex(random[:],suffix[:]) {
+            return "Could not create Photos device identity"
+        }
+        BuilderPrint(*generated,"{\"client\":\"photos-%\",\"key\":\"%\"}",TextUntilNul(suffix[:]),TextUntilNul(encoded[:]))
+        if !CreatePrivate(devicePath,Wire.OutputBytes(*generated)) { return "Could not save Photos device identity; existing keys were preserved" }
+    }
+    if !ReadPrivate(devicePath,*input) { return "Invalid Photos device identity; existing keys were preserved" }
+    device:=TextFromBytes(Wire.OutputBytes(*input))
+    deviceNames: [2]string=.{"key","client"}; devicePositions: [2]s32
+    if !Document(device,deviceNames[:],devicePositions[:]) || !HexField(device,devicePositions[0],client.device_key[:]) {
+        return "Invalid Photos device identity; existing keys were preserved"
+    }
+    count:=ReadStringText(device,devicePositions[1],client.client_id[:])
+    if count<1 || count>128 { return "Invalid Photos device identity; existing keys were preserved" }
+    for byte: client.client_id[:count] {
+        if byte<33 || byte>126 || byte==34 || byte==92 { return "Invalid Photos device identity; existing keys were preserved" }
+    }
+    client.client_count=count
+    id: [32]u8
+    if !Native.DevicePublic(client.device_key[:],client.device_public[:]) ||
+        !Native.Digest(client.device_public[:],id[:]) || !Hex(id[:],client.device_id[:]) {
+        return "Invalid Photos device identity; existing keys were preserved"
+    }
+    return ""
+}
+NodeFor :: (client: *SyncClient, legacy: bool) -> s64 { return ifx legacy && client.legacy.valid then 1 else 0 }
+AccountFor :: (client: *SyncClient, legacy: bool) -> *Owner.OwnerAccount {
+    return ifx legacy && client.legacy.valid then *client.legacy else *client.owner
+}
+Bearer :: (token: []u8,out: *Vec(u8)) -> bool {
+    Wire.ClearOutput(out)
+    if out==null || token.count>8184 || !VecReserve(<<out,token.count+7) ||
+        !BuilderAppend(<<out,"Bearer ") || !BuilderAppend(<<out,TextFromBytes(token)) {
+        Wire.ClearOutput(out); return false
+    }
+    return true
+}
+Raw :: (client: *SyncClient, node: s64, path: string, method: u8, body: []u8,
+    headers: []Http.HttpHeader, limit: s64) -> Frames.SyncResponse, string {
+    frame: Frames.SyncFrame
+    frame.version=1; frame.method=method; frame.port=client.nodes[node].port; frame.path=path
+    frame.body=body; frame.headers=headers; frame.response_limit=limit; frame.timeout_ms=60000
+    response,error:=Transport.HttpRequest(frame)
+    return response,error
+}
+CheckNode :: (client: *SyncClient, node: s64) -> string {
+    frame: Frames.SyncFrame
+    frame.version=2; frame.method=1; frame.port=client.nodes[node].port; frame.path="/api/v1/node"
+    frame.pin=client.nodes[node].pin[:]; frame.response_limit=1048576; frame.timeout_ms=60000
+    response,error:=Transport.HttpRequest(frame)
+    defer { Transport.ClearResponse(*response) }
+    return error
+}
+Login :: (client: *SyncClient, legacy: bool) -> string {
+    node:=NodeFor(client,legacy); owner:=AccountFor(client,legacy)
+    Wire.ClearOutput(*client.tokens[node])
+    policyError:=CheckNode(client,node)
+    if policyError!="" { return policyError }
+    path: Vec(u8); BuilderPrint(*path,"/api/v1/sync/challenge?user_id=%",TextUntilNul(owner.account_id[:]))
+    empty: []u8; noHeaders: []Http.HttpHeader
+    challenge,error:=Raw(client,node,TextFromBytes(Wire.OutputBytes(*path)),1,empty,noHeaders,4096)
+    defer { Transport.ClearResponse(*challenge) }
+    if error!="" { return error }
+    body: Vec(u8); signature: Vec(u8); bearer: Vec(u8); token: Vec(u8)
+    defer { Wire.ClearOutput(*body); Wire.ClearOutput(*signature); Wire.ClearOutput(*bearer); Wire.ClearOutput(*token) }
+    if !Account.LoginRequest(owner.public_key[:],owner.private_key[:],TextFromBytes(client.client_id[:client.client_count]),
+        TextFromBytes(challenge.body),*body,*signature) { return "Invalid local node authentication challenge" }
+    headers: [3]Http.HttpHeader
+    headers[0].name="Content-Type"; headers[0].value="application/json"
+    headers[1].name="X-Daochi-User"; headers[1].value=TextUntilNul(owner.account_id[:])
+    headers[2].name="X-Daochi-Signature"; headers[2].value=TextFromBytes(Wire.OutputBytes(*signature))
+    response,loginError:=Raw(client,node,"/api/v1/sync/login",2,Wire.OutputBytes(*body),headers[:],1048576)
+    defer { Transport.ClearResponse(*response) }
+    if loginError!="" { return loginError }
+    names: [1]string=.{"auth_token"}; positions: [1]s32
+    json:=TextFromBytes(response.body)
+    if !Document(json,names[:],positions[:]) || !Wire.PrepareOutput(*token,8185) { return "Invalid local node authentication token" }
+    tokenBytes:=Wire.OutputBytes(*token); count:=ReadStringText(json,positions[0],tokenBytes)
+    if count<1 || count>8184 { return "Invalid local node authentication token" }
+    for byte: tokenBytes[:count] { if byte<32 || byte>126 { return "Invalid local node authentication token" } }
+    unused VecResize(token,cast(s64)count)
+    if !Bearer(Wire.OutputBytes(*token),*bearer) { return "Could not retain Photos authentication" }
+    if !Account.RegistrationRequest(owner.public_key[:],owner.private_key[:],client.device_key[:],
+        TextFromBytes(client.client_id[:client.client_count]),Clock.UnixNow(),*body) { return "Could not sign Photos device registration" }
+    registrationHeaders: [2]Http.HttpHeader
+    registrationHeaders[0]=headers[0]; registrationHeaders[1].name="Authorization"
+    registrationHeaders[1].value=TextFromBytes(Wire.OutputBytes(*bearer))
+    registration,registrationError:=Raw(client,node,"/api/v1/account/devices",2,Wire.OutputBytes(*body),registrationHeaders[:],1048576)
+    defer { Transport.ClearResponse(*registration) }
+    if registrationError!="" { return registrationError }
+    if !Wire.PrepareOutput(*client.tokens[node],count) { return "Could not retain Photos authentication" }
+    saved:=Wire.OutputBytes(*client.tokens[node]); source:=Wire.OutputBytes(*token)
+    for i: 0..count-1 { saved[i]=source[i] }
+    return ""
+}
+
+#scope_export
+// Borrows the caller's metadata Vec; do not mutate the list while in use.
+BlobSlice :: (list: *BlobList) -> []Blob {
+    result: []Blob
+    if list==null || list.items.count==0 { return result }
+    descriptor:=cast(*BlobDescriptor)*result
+    descriptor.data=*list.items[0]; descriptor.length=list.items.count
+    return result
+}
+BlobAt :: (list: *BlobList, index: s64) -> Blob {
+    empty: Blob
+    if list==null || index<0 || index>=list.items.count { return empty }
+    return list.items[index]
+}
+AppendBlob :: (list: *BlobList, blob: Blob) -> bool { return list!=null && VecPush(list.items,blob) }
+SwapBlobs :: (first: *BlobList, second: *BlobList) {
+    if first!=null && second!=null { VecSwap(first.items,second.items) }
+}
+HashValid :: (hash: string) -> bool {
+    if hash.count!=64 { return false }
+    for byte: hash { if !((byte>=48 && byte<=57) || (byte>=97 && byte<=102)) { return false } }
+    return true
+}
+TextValid :: (text: string, limit: s64) -> bool { return limit>=0 && text.count<=limit && UTF8.Valid(text) }
+// INPUT must not borrow OUT; callers wipe their owned encoded result with
+// Wire.ClearOutput before releasing it, as with the other native Vec outputs.
+Encode :: (input: []u8, out: *Vec(u8)) -> bool {
+    Wire.ClearOutput(out)
+    if input.count<0 || input.count>134217728 || !Wire.PrepareOutput(out,((input.count+2)/3)*4+1) { return false }
+    count:=Record.RecordBase64(input,Wire.OutputBytes(out))
+    if count<0 { Wire.ClearOutput(out); return false }
+    unused VecResize(<<out,count); return true
+}
+Pinned :: (pin: Types.NodePin) -> u16, string {
+    prefix:="http://127.0.0.1:"
+    if pin.origin.count<=prefix.count || pin.origin[0:prefix.count]!=prefix {
+        return 0,"Photos sync requires loopback to a private node; remote URLs are forbidden"
+    }
+    port: s64
+    for byte: pin.origin[prefix.count:] {
+        if byte<48 || byte>57 { return 0,"Photos sync requires loopback to a private node; remote URLs are forbidden" }
+        port=port*10+cast(s64)byte-48
+        if port>65535 { return 0,"Photos sync requires loopback to a private node; remote URLs are forbidden" }
+    }
+    if port<1 { return 0,"Photos sync requires loopback to a private node; remote URLs are forbidden" }
+    if !HashValid(pin.id) { return 0,"The private node identity must be pinned" }
+    return cast(u16)port,""
+}
+// Only the configuration's selected account and node are read. Network failure
+// cannot alter records, configuration or key files. Close after joining users.
+ClientOpen :: (lib: *Store.Library, config: Types.Config) -> *SyncClient, string {
+    client,error:=ClientOpen(lib,*config)
+    return client,error
+}
+// Borrowing form for providers that retain the configuration's sources Vec.
+ClientOpen :: (lib: *Store.Library, config: *Types.Config) -> *SyncClient, string {
+    if lib==null || lib.db==null || lib.root=="" { return null,"Photo library is not open" }
+    if config==null { return null,"Photos sync configuration is unavailable" }
+    Store.ClearError(lib)
+    port,error:=Pinned(config.node)
+    if error!="" { Store.SetError(lib,error); return null,error }
+    legacyPin:=config.legacy_node
+    if legacyPin.origin=="" { legacyPin=config.node }
+    legacyPort,legacyError:=Pinned(legacyPin)
+    if legacyError!="" { Store.SetError(lib,legacyError); return null,legacyError }
+    client:=cast(*SyncClient)Allocate(1,cast(usize)size_of(SyncClient))
+    if client==null { return null,"Could not allocate Photos sync client" }
+    client.library=lib
+    if !Mutex.Open(*client.mutex) { ClientClose(client); return null,"Could not open Photos sync lock" }
+    client.nodes[0].port=port; client.nodes[1].port=legacyPort
+    unused Unhex(config.node.id,client.nodes[0].pin[:]); unused Unhex(legacyPin.id,client.nodes[1].pin[:])
+    owner,ownerError:=Owner.Load(config.account_database)
+    defer { Owner.Clear(*owner) }
+    if ownerError!="" { Store.SetError(lib,ownerError); ClientClose(client); return null,ownerError }
+    client.owner=owner
+    identityError:=LoadIdentity(client)
+    if identityError!="" { Store.SetError(lib,identityError); ClientClose(client); return null,identityError }
+    return client,""
+}
+ClientClose :: (client: *SyncClient) {
+    if client==null { return }
+    Wire.ClearOutput(*client.tokens[0]); Wire.ClearOutput(*client.tokens[1])
+    VecFree(client.tokens[0]); VecFree(client.tokens[1])
+    if client.mutex.opened { unused Mutex.Close(*client.mutex) }
+    Native.Clear(BytesFromPointer(cast(*u8)client,size_of(SyncClient)))
+    Release(cast(*void)client)
+}
+ClientCheckNode :: (client: *SyncClient, legacy: bool = false) -> string {
+    if client==null { return "Photos sync client is not open" }
+    if !Mutex.Lock(*client.mutex) { return Error(client,"Could not lock Photos sync client") }
+    defer { unused Mutex.Unlock(*client.mutex) }
+    Store.ClearError(client.library)
+    return Error(client,CheckNode(client,NodeFor(client,legacy)))
+}
+ClientLogin :: (client: *SyncClient, legacy: bool = false) -> string {
+    if client==null { return "Photos sync client is not open" }
+    if !Mutex.Lock(*client.mutex) { return Error(client,"Could not lock Photos sync client") }
+    defer { unused Mutex.Unlock(*client.mutex) }
+    Store.ClearError(client.library)
+    return Error(client,Login(client,legacy))
+}
+// One response allocation transfers to the caller on every result, including
+// HTTP errors. Call Transport.ClearResponse exactly once. A 401 is consumed
+// and cleared internally only when performing the single authentication retry.
+ClientRequest :: (client: *SyncClient, path: string, method: u8 = 1) -> Frames.SyncResponse, string {
+    body: []u8
+    response,error:=ClientRequest(client,path,method,body)
+    return response,error
+}
+ClientRequest :: (client: *SyncClient, path: string, method: u8, body: []u8,
+    binary: bool = false, legacy: bool = false, limit: s64 = 134217728) -> Frames.SyncResponse, string {
+    empty: Frames.SyncResponse
+    if client==null { return empty,"Photos sync client is not open" }
+    if !Mutex.Lock(*client.mutex) { return empty,Error(client,"Could not lock Photos sync client") }
+    defer { unused Mutex.Unlock(*client.mutex) }
+    Store.ClearError(client.library)
+    if legacy && !client.legacy.valid { return empty,Error(client,"Invalid encrypted blob reference") }
+    node:=NodeFor(client,legacy); owner:=AccountFor(client,legacy)
+    for attempt: 0..1 {
+        if client.tokens[node].count==0 {
+            loginError:=Login(client,legacy)
+            if loginError!="" { return empty,Error(client,loginError) }
+        }
+        digest: [32]u8; header: Vec(u8); bearer: Vec(u8)
+        defer { Wire.ClearOutput(*header); Wire.ClearOutput(*bearer) }
+        if !Native.Digest(body,digest[:]) || !Transaction.BuildTransaction(owner.public_key[:],owner.private_key[:],
+            client.device_key[:],method,path,digest[:],Clock.UnixNow()+120,*header) {
+            return empty,Error(client,"Could not sign Photos sync request")
+        }
+        if !Bearer(Wire.OutputBytes(*client.tokens[node]),*bearer) { return empty,Error(client,"Could not retain Photos authentication") }
+        headers: [4]Http.HttpHeader
+        headers[0].name="Authorization"; headers[0].value=TextFromBytes(Wire.OutputBytes(*bearer))
+        headers[1].name="X-Daochi-User"; headers[1].value=TextUntilNul(owner.account_id[:])
+        headers[2].name="X-Daochi-Tx"; headers[2].value=TextFromBytes(Wire.OutputBytes(*header))
+        headers[3].name="Content-Type"; headers[3].value=ifx binary then "application/octet-stream" else "application/json"
+        response,error:=Raw(client,node,path,method,body,headers[:],limit)
+        if response.status==401 && attempt==0 {
+            Transport.ClearResponse(*response); Wire.ClearOutput(*client.tokens[node]); continue
+        }
+        return response,Error(client,error)
+    }
+    return empty,Error(client,"Local node authentication failed")
+}
+// OUT belongs to the caller and must not alias keys or any other input.
+ClientRecordKey :: (client: *SyncClient, kind: string, out: *Vec(u8)) -> bool {
+    Wire.ClearOutput(out)
+    if client==null { return false }
+    valid:=Entity.EntityRecordKey(client.owner.private_key[:],kind,out)
+    if !valid { unused Error(client,"Invalid shared record key") }
+    return valid
+}
+ClientPut :: (client: *SyncClient, app: string, data: []u8, legacy: bool = false) -> Blob, string {
+    blob: Blob; hash: [32]u8
+    if (app!="entity" && app!="photos") || !Native.Digest(data,hash[:]) || !Hex(hash[:],blob.address[:]) {
+        return blob,Error(client,"Invalid encrypted blob reference")
+    }
+    path: Vec(u8); BuilderPrint(*path,"/api/v1/blobs/%/%",app,TextUntilNul(blob.address[:]))
+    empty: []u8
+    route:=TextFromBytes(Wire.OutputBytes(*path)); response,error:=ClientRequest(client,route,4,empty,true,legacy,1048576)
+    missing:=response.status==404
+    Transport.ClearResponse(*response)
+    if error!="" && !missing { return blob,error }
+    if missing {
+        uploaded,uploadError:=ClientRequest(client,route,3,data,true,legacy,1048576)
+        defer { Transport.ClearResponse(*uploaded) }
+        if uploadError!="" { return blob,uploadError }
+    }
+    blob.size=data.count; return blob,""
+}
+BlobValid :: (blob: Blob) -> bool {
+    return HashValid(TextUntilNul(blob.address[:])) && blob.size>16 && blob.size<=ChunkBytes()+16
+}
+// Output metadata is replaced only on success. Existing local records/keys are
+// untouched on every failure; server-side chunks are safe to reuse on retry.
+PutContent :: (client: *SyncClient, digest: string, source: ChunkSource, blobs: *BlobList) -> s64, string {
+    if client==null || !HashValid(digest) || source.read==null || blobs==null {
+        return 0,Error(client,"Invalid shared photo chunks")
+    }
+    plain: Vec(u8); sealed: Vec(u8); state: Vec(u8); staged: Vec(Blob)
+    defer { Wire.ClearOutput(*plain); Wire.ClearOutput(*sealed); Wire.ClearOutput(*state) }
+    if !Wire.PrepareOutput(*plain,ChunkBytes()) || !Wire.PrepareOutput(*state,cast(s64)Native.DigestStateBytes()) ||
+        !Native.DigestStart(Wire.OutputBytes(*state)) { return 0,Error(client,"Could not allocate Photos content stream") }
+    index: s64; size: s64
+    while true {
+        buffer:=Wire.OutputBytes(*plain); count:=source.read(source.context,index,buffer)
+        if count==0 { break }
+        if count<0 || count>ChunkBytes() || index>=EntityProtocol.ENTITY_CHUNK_MAX || size>9223372036854775807-count {
+            return 0,Error(client,"Invalid shared photo chunks")
+        }
+        if !Native.DigestUpdate(Wire.OutputBytes(*state),buffer[:count]) ||
+            !Entity.EntitySealChunk(client.owner.private_key[:],"photos",digest,index,buffer[:count],*sealed) {
+            return 0,Error(client,"Could not encrypt Photos content chunk")
+        }
+        blob,error:=ClientPut(client,"entity",Wire.OutputBytes(*sealed))
+        if error!="" { return 0,error }
+        if !VecPush(staged,blob) { return 0,Error(client,"Could not retain Photos content chunk metadata") }
+        size+=count; index+=1
+        Wire.ClearOutput(*sealed); Native.Clear(buffer)
+    }
+    hash: [32]u8; encoded: [65]u8
+    if !Native.DigestFinish(Wire.OutputBytes(*state),hash[:]) || !Hex(hash[:],encoded[:]) || TextUntilNul(encoded[:])!=digest {
+        return 0,Error(client,"Local original changed; refusing to sync corrupted bytes")
+    }
+    VecSwap(blobs.items,staged); Store.ClearError(client.library); return size,""
+}
+GetContent :: (client: *SyncClient, digest: string, blobs: []Blob, sink: ChunkSink = .{}) -> s64, string {
+    if client==null || !HashValid(digest) || blobs.count<0 || blobs.count>EntityProtocol.ENTITY_CHUNK_MAX {
+        return 0,Error(client,"Invalid shared photo chunks")
+    }
+    for blob: blobs { if !BlobValid(blob) { return 0,Error(client,"Invalid shared photo chunks") } }
+    plain: Vec(u8); state: Vec(u8)
+    defer { Wire.ClearOutput(*plain); Wire.ClearOutput(*state) }
+    if !Wire.PrepareOutput(*state,cast(s64)Native.DigestStateBytes()) || !Native.DigestStart(Wire.OutputBytes(*state)) {
+        return 0,Error(client,"Could not allocate Photos content stream")
+    }
+    size: s64
+    for index: 0..blobs.count-1 {
+        blob:=blobs[index]; path: Vec(u8)
+        BuilderPrint(*path,"/api/v1/blobs/entity/%",TextUntilNul(blob.address[:]))
+        empty: []u8
+        response,error:=ClientRequest(client,TextFromBytes(Wire.OutputBytes(*path)),1,empty,true,false,blob.size)
+        defer { Transport.ClearResponse(*response) }
+        if error!="" { return 0,error }
+        hash: [32]u8; encoded: [65]u8
+        if response.body.count!=blob.size || !Native.Digest(response.body,hash[:]) || !Hex(hash[:],encoded[:]) ||
+            TextUntilNul(encoded[:])!=TextUntilNul(blob.address[:]) {
+            return 0,Error(client,"Encrypted original failed its integrity check")
+        }
+        if !Entity.EntityOpenChunk(client.owner.private_key[:],"photos",digest,index,response.body,*plain) {
+            return 0,Error(client,"Encrypted original failed its integrity check")
+        }
+        bytes:=Wire.OutputBytes(*plain)
+        if !Native.DigestUpdate(Wire.OutputBytes(*state),bytes) || size>9223372036854775807-bytes.count {
+            return 0,Error(client,"Original download failed integrity verification")
+        }
+        if sink.write!=null && !sink.write(sink.context,index,bytes) { return 0,Error(client,"Could not write Photos content stream") }
+        size+=bytes.count; Wire.ClearOutput(*plain)
+    }
+    hash: [32]u8; encoded: [65]u8
+    if !Native.DigestFinish(Wire.OutputBytes(*state),hash[:]) || !Hex(hash[:],encoded[:]) || TextUntilNul(encoded[:])!=digest {
+        return 0,Error(client,"Original download failed integrity verification")
+    }
+    Store.ClearError(client.library); return size,""
+}
+// String inputs must not borrow OUT. The caller owns/wipes plaintext output;
+// authentication or transport failure wipes any earlier result and its tail.
+FetchBlob :: (client: *SyncClient, digest: string, photo_id: string, part: string, out: *Vec(u8), limit: s64 = 134217728) -> string {
+    Wire.ClearOutput(out)
+    if client==null || !client.legacy.valid || !HashValid(digest) || out==null || !UTF8.Valid(photo_id) || !UTF8.Valid(part) {
+        return Error(client,"Invalid encrypted blob reference")
+    }
+    path: Vec(u8); BuilderPrint(*path,"/api/v1/blobs/photos/%",digest)
+    empty: []u8
+    response,error:=ClientRequest(client,TextFromBytes(Wire.OutputBytes(*path)),1,empty,true,true,limit)
+    defer { Transport.ClearResponse(*response) }
+    if error!="" { return error }
+    hash: [32]u8; encoded: [65]u8
+    if response.body.count<40 || !Native.Digest(response.body,hash[:]) || !Hex(hash[:],encoded[:]) || TextUntilNul(encoded[:])!=digest {
+        return Error(client,"Encrypted original failed its integrity check")
+    }
+    // Packed sorts keys and retains Unicode, exactly like the Python baseline.
+    json: Vec(u8)
+    defer { Wire.ClearOutput(*json) }
+    maximum: s64=(9223372036854775807-256)/6
+    if photo_id.count>maximum || part.count>maximum-photo_id.count ||
+        !VecReserve(json,256+6*(photo_id.count+part.count)) {
+        return Error(client,"Could not allocate earlier Photos authentication data")
+    }
+    if !BuilderAppend(json,"{\"account_id\":\"") || !BuilderAppend(json,TextUntilNul(client.legacy.account_id[:])) ||
+        !BuilderAppend(json,"\",\"app_id\":\"photos\",\"id\":") || !JSON.JsonQuoteInto(*json,photo_id,false) ||
+        !BuilderAppend(json,",\"part\":") || !JSON.JsonQuoteInto(*json,part,false) ||
+        !BuilderAppend(json,",\"schema\":\"photos.media.v1\"}") {
+        return Error(client,"Could not encode earlier Photos authentication data")
+    }
+    aad:=TextFromBytes(Wire.OutputBytes(*json))
+    if !Wire.SyncOpen(client.key[:],response.body,Bytes(aad),out) { return Error(client,"Encrypted original failed its integrity check") }
+    Store.ClearError(client.library); return ""
+}

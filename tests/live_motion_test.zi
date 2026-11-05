@@ -1,0 +1,272 @@
+Motion :: #import "live_motion";
+Store :: #import "library_store";
+Kit :: #import "kit";
+SQL :: #import "sqlite/SQLite";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+Fixture :: #import "backup_fixture";
+LibraryFiles :: #import "library_files";
+Auth :: #import "vault_auth";
+Access :: #import "access_registry";
+Vault :: #import "vault";
+Timer :: #import "std/timer_linux";
+Threads :: #import "std/thread_linux";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+c :: #system_library "c";
+Pause :: (microseconds: u32) -> s32 #foreign c "usleep";
+HeapInfo :: struct { arena: usize; blocks: usize; small: usize; mappings: usize; mapped: usize; unused_high: usize; free_fast: usize; used: usize; free: usize; releasable: usize }
+Heap :: () -> HeapInfo #foreign c "mallinfo2";
+Text :: (out: *Vec(u8)) -> string { return Fixture.Text(out) }
+Bind :: (statement: *void,index: s32,value: string) -> bool { return SQL.SqliteBindTextString(statement,index,value,cast(s32)value.count)==SQL.SQLITE_OK }
+Scalar :: (lib: *Store.Library,query: string) -> s64 {
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,query,-1,*statement,null)!=SQL.SQLITE_OK { return -1 }; defer { unused SQL.SqliteFinalize(statement) }
+    return ifx SQL.SqliteStep(statement)==SQL.SQLITE_ROW then SQL.SqliteColumnInt64(statement,0) else -1
+}
+Insert :: (lib: *Store.Library,path: string,name: string,extension: string,kind: string,id: *Vec(u8)) -> bool {
+    Auth.WipeOwned(id)
+    if !Fixture.HashFile(path,id) { return false }
+    folder: Vec(u8); destination: Vec(u8); defer { Auth.WipeOwned(*folder); Auth.WipeOwned(*destination) }
+    BuilderPrint(*folder,"%/originals/%",lib.root,Text(id)[:2]); BuilderPrint(*destination,"%/%",Text(*folder),Text(id)); BuilderPrint(*destination,"%",extension)
+    if !Tree.CreateDirectories(Text(*folder),448) || !Tree.CopyFile(path,Text(*destination)) { return false }
+    statement: *void
+    query:="INSERT OR IGNORE INTO photos(id,name,extension,kind,size,taken,metadata,albums,updated) VALUES(?,?,?,?,?,1234,'{}','[]',0)"
+    if SQL.SqlitePrepareText(lib.db,query,-1,*statement,null)!=SQL.SQLITE_OK { return false }; defer { unused SQL.SqliteFinalize(statement) }
+    return Bind(statement,1,Text(id)) && Bind(statement,2,name) && Bind(statement,3,extension) && Bind(statement,4,kind) && SQL.SqliteBindInt64(statement,5,Tree.PathStatus(path).size)==SQL.SQLITE_OK && SQL.SqliteStep(statement)==SQL.SQLITE_DONE
+}
+Source :: (lib: *Store.Library,path: string,id: string,mtime: s64=1000) -> bool {
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,"INSERT OR REPLACE INTO sources(path,size,mtime,meta_stamp,photo_id) VALUES(?,0,?,'',?)",-1,*statement,null)!=SQL.SQLITE_OK { return false }; defer { unused SQL.SqliteFinalize(statement) }
+    return Bind(statement,1,path) && SQL.SqliteBindInt64(statement,2,mtime)==SQL.SQLITE_OK && Bind(statement,3,id) && SQL.SqliteStep(statement)==SQL.SQLITE_DONE
+}
+Patch :: (lib: *Store.Library,id: string,sql: string) -> bool {
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,sql,-1,*statement,null)!=SQL.SQLITE_OK { return false }; defer { unused SQL.SqliteFinalize(statement) }
+    return Bind(statement,1,id) && SQL.SqliteStep(statement)==SQL.SQLITE_DONE
+}
+Script :: (path: string,body: string) -> bool { return Files.WriteEntireFile(path,body) && Tree.SetPathMode(path,448) }
+Original :: (lib: *Store.Library,id: string,extension: string,out: *Vec(u8)) { Auth.WipeOwned(out); BuilderPrint(out,"%/originals/%/%",lib.root,id[:2],id); BuilderPrint(out,"%",extension) }
+SameFile :: (a: string,b: string) -> bool {
+    left: Vec(u8); right: Vec(u8); defer { Auth.WipeOwned(*left); Auth.WipeOwned(*right) }
+    return Fixture.HashFile(a,*left) && Fixture.HashFile(b,*right) && Text(*left)==Text(*right)
+}
+NativeContainers :: (lib: *Store.Library,options: Motion.Options) -> bool {
+    names: [7]string=.["modern.jpg","legacy.jpg","gainmap.jpg","samsung.jpg","extended.jpg","motion.heic","motion.avif"]
+    extensions: [7]string=.[".jpg",".jpg",".jpg",".jpg",".jpg",".heic",".avif"]
+    for index: 0..6 {
+        fixture: Vec(u8); id: Vec(u8); source: Vec(u8); defer { Auth.WipeOwned(*fixture); Auth.WipeOwned(*id); Auth.WipeOwned(*source) }
+        BuilderPrint(*fixture,"tests/fixtures/motion/%",names[index])
+        if !Insert(lib,Text(*fixture),names[index],extensions[index],"photo",*id) { return false }
+        Original(lib,Text(*id),extensions[index],*source)
+        error:=Motion.MotionDetect(lib,Text(*id),false,options.files)
+        if error!="" { print("detect %: %\n",names[index],error); return false }
+        result: Motion.Playback; defer { Motion.Close(*result) }
+        error=Motion.MotionExtract(lib,Text(*id),*result,options)
+        if error!="" { print("extract %: %\n",names[index],error); return false }
+        if !SameFile(Motion.PlaybackPath(*result),"tests/fixtures/motion/clip.mp4") || !SameFile(Text(*source),Text(*fixture)) || result.info.width!=96 || result.info.height!=64 || !result.info.audio || result.info.duration_ms!=2000 || Tree.PathStatus(Motion.PlaybackPath(*result),false).mode!=384 { return false }
+        // A validated cache survives unavailable readers/codecs; a changed
+        // target must be reparsed and probed rather than trusted by its name.
+        unavailable:=options; unavailable.files.application_root=lib.root; unavailable.files.probe_program="/no-such-ffprobe"
+        cached: Motion.Playback; defer { Motion.Close(*cached) }
+        if Motion.MotionExtract(lib,Text(*id),*cached,unavailable)!="" { return false }
+        if !Files.WriteEntireFile(Motion.PlaybackPath(*result),"tampered cache") || Motion.MotionExtract(lib,Text(*id),*cached,unavailable)=="" || cached.path.count!=0 { return false }
+        if Motion.MotionExtract(lib,Text(*id),*cached,options)!="" || !SameFile(Motion.PlaybackPath(*cached),"tests/fixtures/motion/clip.mp4") { return false }
+        if !Patch(lib,Text(*id),"UPDATE photos SET dirty=0 WHERE id=?") || Motion.MotionDetect(lib,Text(*id),false,options.files)!="" { return false }
+        if Scalar(lib,"SELECT count(*) FROM photos WHERE dirty<>0 AND json_type(metadata,'$.photosMotion')='object'")!=0 { return false }
+    }; return true
+}
+NegativeAndFailures :: (lib: *Store.Library,options: Motion.Options) -> bool {
+    id: Vec(u8); source: Vec(u8); helper: Vec(u8); defer { Auth.WipeOwned(*id); Auth.WipeOwned(*source); Auth.WipeOwned(*helper) }
+    if !Insert(lib,"tests/fixtures/motion/still.jpg","forged.jpg",".jpg","photo",*id) { return false }
+    Original(lib,Text(*id),".jpg",*source)
+    if !Patch(lib,Text(*id),"UPDATE photos SET metadata='{\"keep\":123,\"photosMotion\":{\"version\":1,\"offset\":20,\"length\":40}}' WHERE id=?") || Motion.MotionDetect(lib,Text(*id),false,options.files)!="" || Scalar(lib,"SELECT count(*) FROM photos WHERE json_extract(metadata,'$.keep')=123 AND json_type(metadata,'$.photosMotion') IS NULL")!=1 { return false }
+    if !Patch(lib,Text(*id),"UPDATE photos SET dirty=0 WHERE id=?") { return false }
+    missing:=options.files; missing.application_root=lib.root
+    if Motion.MotionDetect(lib,Text(*id),true,missing)!="" || !Patch(lib,Text(*id),"DELETE FROM motion_scans WHERE photo_id=?") { return false }
+    BuilderPrint(*helper,"%/motion_photo",lib.root)
+    bodies: [5]string=.["#!/bin/sh\nexit 2\n","#!/bin/sh\nprintf '{bad'\n","#!/bin/sh\nprintf '{\"version\":true,\"offset\":10,\"length\":16}'\n","#!/bin/sh\nwhile :; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; done\n","#!/bin/sh\nexec sleep 4\n"]
+    for body: bodies {
+        if !Script(Text(*helper),body) { return false }
+        failing:=missing; failing.decode_timeout_ms=100
+        start:=Timer.MonotonicMilliseconds()
+        if Motion.MotionDetect(lib,Text(*id),false,failing)=="" || Timer.MonotonicMilliseconds()-start>2500 || Scalar(lib,"SELECT count(*) FROM motion_scans WHERE photo_id=(SELECT id FROM photos WHERE name='forged.jpg')")!=0 || Scalar(lib,"SELECT dirty FROM photos WHERE name='forged.jpg'")!=0 || !SameFile(Text(*source),"tests/fixtures/motion/still.jpg") { return false }
+    }
+    if !Files.RemoveFile(Text(*helper)) || Motion.MotionDetect(lib,Text(*id),false,options.files)!="" { return false }
+    return true
+}
+Change :: struct { lib: *Store.Library; mode: s32; path: string; token: string; registry: *Access.Registry; ok: bool }
+ChangeDuringProbe :: (context: *void) {
+    change:=cast(*Change)context
+    unused Pause(80000)
+    if change.mode==0 { change.ok=Files.WriteEntireFile(change.path,"{\"kind\":\"invalid\"}") }
+    if change.mode==1 { Vault.Lock(change.lib,change.token,change.registry); change.ok=true }
+    if change.mode==2 {
+        db: *void
+        if SQL.SqliteOpenText(change.path,*db,SQL.SQLITE_OPEN_READWRITE)==SQL.SQLITE_OK { change.ok=SQL.SqliteExecText(db,"UPDATE photos SET caption='concurrent newer caption' WHERE name='modern.jpg'")==SQL.SQLITE_OK; unused SQL.SqliteClose(db) }
+    }
+    if change.mode==3 {
+        file:=Files.OpenReplace(change.path)
+        if file.valid { bytes: [1]u8=.[0]; change.ok=Files.WriteAt(file,bytes[:],0)==1; unused Files.CloseFile(file) }
+    }
+}
+AccessAndStale :: (lib: *Store.Library,options: Motion.Options) -> bool {
+    id: Vec(u8); source: Vec(u8); target: Vec(u8); probe: Vec(u8); marker: Vec(u8); dbpath: Vec(u8)
+    defer { Auth.WipeOwned(*id); Auth.WipeOwned(*source); Auth.WipeOwned(*target); Auth.WipeOwned(*probe); Auth.WipeOwned(*marker); Auth.WipeOwned(*dbpath) }
+    if !Fixture.HashFile("tests/fixtures/motion/modern.jpg",*id) { return false }; Original(lib,Text(*id),".jpg",*source)
+    BuilderPrint(*target,"%/private/motion/%.mp4",lib.root,Text(*id)); BuilderPrint(*probe,"%/slow-probe",lib.root); BuilderPrint(*marker,"%/private/guest-view.json",lib.root); BuilderPrint(*dbpath,"%/library.sqlite",lib.root)
+    if !Script(Text(*probe),"#!/bin/sh\nsleep 0.3\nexec ffprobe \"$@\"\n") { return false }
+    registry: Access.Registry
+    if !Access.Initialize(*registry) { return false }; defer { Access.Close(*registry) }
+    selected:=options; selected.registry= *registry; selected.files.probe_program=Text(*probe)
+    result: Motion.Playback; defer { Motion.Close(*result) }
+    for mode: 0..3 {
+        if !Files.WriteEntireFile(Text(*target),"invalidate cache") || !Patch(lib,Text(*id),"UPDATE photos SET hidden=1 WHERE id=?") { return false }
+        token,error:=Access.Grant(lib.root,Access.HIDDEN,"",*registry)
+        if error!="" { return false }; defer { Auth.ReleaseOwned(token) }; selected.token=token
+        if mode==0 { if !Patch(lib,Text(*id),"UPDATE photos SET hidden=0 WHERE id=?") { return false } }
+        change: Change; change.lib=lib; change.mode=cast(s32)mode; change.path=ifx mode==0 then Text(*marker) else ifx mode==2 then Text(*dbpath) else Text(*source); change.token=token; change.registry= *registry
+        thread: Threads.Thread; procedure: Threads.ThreadProcedure=ChangeDuringProbe
+        if !Threads.ThreadStart(*thread,procedure,cast(*void)*change) { return false }
+        extractError:=Motion.MotionExtract(lib,Text(*id),*result,selected)
+        Threads.ThreadWait(*thread)
+        if !change.ok || extractError=="" || result.path.count!=0 { print("access/stale mode %: %\n",mode,extractError); return false }
+        if mode==0 && !Files.RemoveFile(Text(*marker)) { return false }
+        if mode==2 && Scalar(lib,"SELECT count(*) FROM photos WHERE name='modern.jpg' AND caption='concurrent newer caption'")!=1 { return false }
+        if mode==3 && !Tree.CopyFile("tests/fixtures/motion/modern.jpg",Text(*source)) { return false }
+    }
+    Access.Close(*registry)
+    if !Access.Initialize(*registry,150) { return false }
+    token,error:=Access.Grant(lib.root,Access.HIDDEN,"",*registry)
+    if error!="" { return false }; defer { Auth.ReleaseOwned(token) }; selected.token=token
+    if !Files.WriteEntireFile(Text(*target),"invalidate cache") || Motion.MotionExtract(lib,Text(*id),*result,selected)=="" || result.path.count!=0 { return false }
+    if !Patch(lib,Text(*id),"UPDATE photos SET hidden=0 WHERE id=?") { return false }
+    return SameFile(Text(*source),"tests/fixtures/motion/modern.jpg") && Motion.MotionExtract(lib,Text(*id),*result,options)==""
+}
+PairsAndSeparation :: (lib: *Store.Library,options: Motion.Options) -> bool {
+    still: Vec(u8); movie: Vec(u8); source: Vec(u8)
+    defer { Auth.WipeOwned(*still); Auth.WipeOwned(*movie); Auth.WipeOwned(*source) }
+    if !Insert(lib,"tests/fixtures/motion/still.jpg","STRASSE.jpg",".jpg","photo",*still) || !Insert(lib,"tests/fixtures/motion/clip.mp4","Straße.mov",".mov","video",*movie) || !Source(lib,"Camera/STRASSE.jpg",Text(*still)) || !Source(lib,"Camera/Straße.mov",Text(*movie)) { return false }
+    if !Patch(lib,Text(*still),"UPDATE photos SET metadata='{\"keep\":123}',albums='[\"a\",\"b\"]',favorite=1,hidden=1 WHERE id=?") || !Patch(lib,Text(*movie),"UPDATE photos SET albums='[\"b\",\"c\"]',archived=1 WHERE id=?") { return false }
+    count,error:=Motion.LiveDetect(lib,options)
+    if error!="" || count!=1 || Scalar(lib,"SELECT count(*) FROM photos WHERE json_type(metadata,'$.photosLive')='object' AND albums='[\"a\",\"b\",\"c\"]' AND hidden=1 AND favorite=1 AND archived=1")!=2 { return false }
+    count,error=Motion.LiveDetect(lib,options)
+    if error!="" || count!=0 || Motion.LiveSeparate(lib,Text(*still),options)=="" || Scalar(lib,"SELECT count(*) FROM photos WHERE json_type(metadata,'$.photosLive')='object'")!=2 { return false }
+    if !Patch(lib,Text(*still),"UPDATE photos SET hidden=0 WHERE id=?") || !Patch(lib,Text(*movie),"UPDATE photos SET hidden=0 WHERE id=?") { return false }
+    // Trigger aborts the second half: both links and all privacy state roll back.
+    trigger: Vec(u8); defer { Auth.WipeOwned(*trigger) }; BuilderPrint(*trigger,"CREATE TRIGGER stop_split BEFORE UPDATE ON photos WHEN old.id='%' AND json_extract(new.metadata,'$.photosLiveSeparated')=1 BEGIN SELECT RAISE(ABORT,'synthetic split failure'); END",Text(*movie))
+    if SQL.SqliteExecText(lib.db,Text(*trigger))!=SQL.SQLITE_OK || Motion.LiveSeparate(lib,Text(*still),options)=="" || Scalar(lib,"SELECT count(*) FROM photos WHERE json_type(metadata,'$.photosLive')='object'")!=2 || SQL.SqliteExecText(lib.db,"DROP TRIGGER stop_split")!=SQL.SQLITE_OK || Motion.LiveSeparate(lib,Text(*still),options)!="" { return false }
+    if Scalar(lib,"SELECT count(*) FROM photos WHERE json_extract(metadata,'$.photosLiveSeparated')=1 AND json_extract(edits,'$.live_separated')=1")!=2 || Motion.LiveSeparate(lib,Text(*still),options)=="" { return false }
+    count,error=Motion.LiveDetect(lib,options)
+    if error!="" || count!=0 { return false }
+    // Embedded extraction inherits metadata/privacy, while an existing content
+    // identity retains its later edits instead of being rewritten.
+    id: Vec(u8); defer { Auth.WipeOwned(*id) }
+    if !Fixture.HashFile("tests/fixtures/motion/modern.jpg",*id) || !Patch(lib,Text(*id),"UPDATE photos SET albums='[\"motion album\"]',caption='parent caption',tags='parent tags',favorite=1,archived=1,edits='{\"rotate\":90}' WHERE id=?") { return false }
+    if !Patch(lib,Text(*movie),"UPDATE photos SET caption='keep existing child',hidden=1,edits='{\"rotate\":180}' WHERE id=?") || Motion.LiveSeparate(lib,Text(*id),options)!="" { return false }
+    if Scalar(lib,"SELECT count(*) FROM photos WHERE caption='keep existing child' AND hidden=1 AND edits='{\"rotate\":180}'")!=1 || Scalar(lib,"SELECT count(*) FROM photos WHERE name='modern.jpg' AND caption='parent caption' AND json_extract(edits,'$.rotate')=90 AND json_extract(metadata,'$.photosLiveSeparated')=1")!=1 { return false }
+    Original(lib,Text(*id),".jpg",*source)
+    return SameFile(Text(*source),"tests/fixtures/motion/modern.jpg") && Motion.MotionDetect(lib,Text(*id),false,options.files)==""
+}
+Lifetime :: (lib: *Store.Library,options: Motion.Options) -> bool {
+    id: Vec(u8); defer { Auth.WipeOwned(*id) }
+    if !Fixture.HashFile("tests/fixtures/motion/legacy.jpg",*id) { return false }
+    for index: 0..15 { result: Motion.Playback; error:=Motion.MotionExtract(lib,Text(*id),*result,options); Motion.Close(*result); if error!="" { return false } }
+    before:=Heap()
+    for index: 0..127 { result: Motion.Playback; error:=Motion.MotionExtract(lib,Text(*id),*result,options); Motion.Close(*result); Motion.Close(*result); if error!="" || result.path.count!=0 { return false } }
+    after:=Heap(); retained:=cast(s64)after.used+cast(s64)after.mapped-cast(s64)before.used-cast(s64)before.mapped
+    print("live_motion cached lifetime retained bytes: %\n",retained)
+    return retained<=32768
+}
+NewChild :: (root: string,options: Motion.Options) -> bool {
+    path: Vec(u8); defer { Auth.WipeOwned(*path) }; BuilderPrint(*path,"%/new-child",root)
+    lib,error:=Store.Open(Text(*path))
+    if lib==null { return false }; defer { Motion.ClearCache(lib); Store.Close(lib) }
+    id: Vec(u8); child: Vec(u8); original: Vec(u8); destination: Vec(u8); defer { Auth.WipeOwned(*id); Auth.WipeOwned(*child); Auth.WipeOwned(*original); Auth.WipeOwned(*destination) }
+    if !Insert(lib,"tests/fixtures/motion/gainmap.jpg","旅行.quoted.jpg",".jpg","photo",*id) || Motion.MotionDetect(lib,Text(*id),false,options.files)!="" || !Fixture.HashFile("tests/fixtures/motion/clip.mp4",*child) { return false }
+    Original(lib,Text(*id),".jpg",*original); Original(lib,Text(*child),".mp4",*destination)
+    if !Patch(lib,Text(*id),"UPDATE photos SET metadata=json_set(metadata,'$.privateUnknown',json('{\"n\":1234567890123456789}')),albums='[\"family\"]',favorite=1,hidden=1,archived=1,caption='caption',tags='tags',edits='{\"rotate\":90}' WHERE id=?") { return false }
+    registry: Access.Registry
+    if !Access.Initialize(*registry) { return false }; defer { Access.Close(*registry) }
+    token,tokenError:=Access.Grant(lib.root,Access.HIDDEN,"",*registry)
+    if tokenError!="" { return false }; defer { Auth.ReleaseOwned(token) }
+    selected:=options; selected.registry= *registry; selected.token=token
+    if SQL.SqliteExecText(lib.db,"CREATE TRIGGER stop_child BEFORE INSERT ON photos WHEN new.kind='video' BEGIN SELECT RAISE(ABORT,'synthetic child failure'); END")!=SQL.SQLITE_OK || Motion.LiveSeparate(lib,Text(*id),selected)=="" || Scalar(lib,"SELECT count(*) FROM photos")!=1 || Scalar(lib,"SELECT count(*) FROM photos WHERE json_type(metadata,'$.photosLiveSeparated') IS NOT NULL")!=0 || Files.PathExists(Text(*destination)) || !SameFile(Text(*original),"tests/fixtures/motion/gainmap.jpg") { return false }
+    if SQL.SqliteExecText(lib.db,"DROP TRIGGER stop_child")!=SQL.SQLITE_OK || Motion.LiveSeparate(lib,Text(*id),selected)!="" || Scalar(lib,"SELECT count(*) FROM photos")!=2 || !SameFile(Text(*destination),"tests/fixtures/motion/clip.mp4") { return false }
+    query:="SELECT count(*) FROM photos WHERE kind='video' AND name='旅行.quoted-motion.mp4' AND extension='.mp4' AND taken=1234 AND width=96 AND height=64 AND hidden=1 AND favorite=1 AND archived=1 AND trashed=0 AND caption='caption' AND tags='tags' AND albums='[\"family\"]' AND json_extract(metadata,'$.privateUnknown.n')=1234567890123456789 AND json_type(metadata,'$.photosMotion') IS NULL AND json_type(metadata,'$.photosLive') IS NULL AND json_extract(metadata,'$.photosLiveSeparated')=1 AND length(json_extract(metadata,'$.photosMotionSource'))=64 AND json_extract(edits,'$.rotate')=90 AND json_extract(edits,'$.live_separated')=1 AND manifest='{}'"
+    return Scalar(lib,query)==1 && SameFile(Text(*original),"tests/fixtures/motion/gainmap.jpg") && Motion.MotionDetect(lib,Text(*id),false,options.files)==""
+}
+PairPolicies :: (root: string,options: Motion.Options) -> bool {
+    path: Vec(u8); defer { Auth.WipeOwned(*path) }; BuilderPrint(*path,"%/pair-policies",root)
+    lib,error:=Store.Open(Text(*path))
+    if lib==null { return false }; defer { Motion.ClearCache(lib); Store.Close(lib) }
+    still: Vec(u8); movie: Vec(u8); second: Vec(u8); otherPath: Vec(u8)
+    defer { Auth.WipeOwned(*still); Auth.WipeOwned(*movie); Auth.WipeOwned(*second); Auth.WipeOwned(*otherPath) }
+    BuilderPrint(*otherPath,"%/other.jpg",lib.root)
+    if !Kit.Jpeg(Text(*otherPath),96,64,0x1267ab) || !Insert(lib,"tests/fixtures/motion/still.jpg","same.jpg",".jpg","photo",*still) || !Insert(lib,"tests/fixtures/motion/clip.mp4","same.mov",".mov","video",*movie) || !Insert(lib,Text(*otherPath),"same.jpeg",".jpeg","photo",*second) { return false }
+    if !Source(lib,"Camera/same.jpg",Text(*still)) || !Source(lib,"Camera/same.jpeg",Text(*second)) || !Source(lib,"Camera/same.mov",Text(*movie)) { return false }
+    count,detectError:=Motion.LiveDetect(lib,options)
+    if detectError!="" || count!=0 || SQL.SqliteExecText(lib.db,"DELETE FROM sources WHERE path='Camera/same.jpeg'")!=SQL.SQLITE_OK { return false }
+    if !Patch(lib,Text(*movie),"UPDATE photos SET taken=taken+172800 WHERE id=?") || !Source(lib,"Camera/same.mov",Text(*movie),172800000001000) { return false }
+    count,detectError=Motion.LiveDetect(lib,options)
+    if detectError!="" || count!=0 { return false }
+    // Only both clocks disagreeing excludes a pair; a close filesystem clock
+    // still permits two compatible originals with different metadata dates.
+    if !Source(lib,"Camera/same.mov",Text(*movie),2000) { return false }
+    unavailable:=options; unavailable.files.probe_program="/no-such-probe"
+    count,detectError=Motion.LiveDetect(lib,unavailable)
+    if detectError!="" || count!=0 { return false }
+    count,detectError=Motion.LiveDetect(lib,options)
+    return detectError=="" && count==1
+}
+SecondMovie :: (path: string) -> bool {
+    input:=Files.OpenRead("tests/fixtures/motion/clip.mp4")
+    if !input.valid { return false }; defer { unused Files.CloseFile(input) }
+    output:=Files.OpenExclusivePrivate(path)
+    if !output.valid { return false }; defer { unused Files.CloseFile(output) }
+    bytes: [65536]u8; defer { Auth.JsonErase(null,bytes[:]) }
+    size:=Files.FileSize(input)
+    if size<16 || size>65536 || Files.ReadAt(input,bytes[:size],0)!=size || Files.WriteAt(output,bytes[:size],0)!=size { return false }
+    // A valid empty ISO BMFF free box changes identity without changing video.
+    suffix: [8]u8=.[0,0,0,8,102,114,101,101]
+    return Files.WriteAt(output,suffix[:],size)==8 && Files.SyncFile(output)
+}
+FirstSeenPair :: (root: string,options: Motion.Options) -> bool {
+    path: Vec(u8); secondPath: Vec(u8); still: Vec(u8); first: Vec(u8); second: Vec(u8)
+    defer { Auth.WipeOwned(*path); Auth.WipeOwned(*secondPath); Auth.WipeOwned(*still); Auth.WipeOwned(*first); Auth.WipeOwned(*second) }
+    BuilderPrint(*path,"%/first-seen",root)
+    lib,error:=Store.Open(Text(*path))
+    if lib==null { return false }; defer { Motion.ClearCache(lib); Store.Close(lib) }
+    BuilderPrint(*secondPath,"%/second.mp4",lib.root)
+    if !SecondMovie(Text(*secondPath)) || !Insert(lib,"tests/fixtures/motion/still.jpg","same.jpg",".jpg","photo",*still) || !Insert(lib,"tests/fixtures/motion/clip.mp4","same.mov",".mov","video",*first) || !Insert(lib,Text(*secondPath),"same.mp4",".mp4","video",*second) || Text(*first)==Text(*second) { return false }
+    if !Source(lib,"Z/same.jpg",Text(*still)) || !Source(lib,"A/same.jpg",Text(*still)) || !Source(lib,"A/same.mp4",Text(*second)) || !Source(lib,"Z/same.jpeg",Text(*still)) || !Source(lib,"Z/same.mov",Text(*first)) { return false }
+    count,detectError:=Motion.LiveDetect(lib,options)
+    // Retained photos.live.detect: first-seen source group wins when a single
+    // content identity appears in two otherwise valid folders.
+    return detectError=="" && count==1 && Scalar(lib,"SELECT count(*) FROM photos WHERE name='same.mov' AND json_type(metadata,'$.photosLive.photo')='text'")==1 && Scalar(lib,"SELECT count(*) FROM photos WHERE name='same.mp4' AND json_type(metadata,'$.photosLive') IS NULL")==1
+}
+Run :: (root: string) -> s32 {
+    lib,error:=Store.Open(root)
+    if lib==null { print("%\n",error); return 1 }; defer { Motion.ClearCache(lib); Store.Close(lib) }
+    if !Kit.Expect(Motion.MotionDetect(lib,"invalid")!="","invalid identity fails closed") { return 2 }
+    options: Motion.Options; options.files.application_root="."
+    if !Kit.Expect(NativeContainers(lib,options),"actual native containers produce exact motion bytes and immutable originals; validated cache rejects tampering") { return 3 }
+    if !Kit.Expect(NegativeAndFailures(lib,options),"negative scan, forged sidecar, malformed/flood/stalled helper preserve local records and originals") { return 4 }
+    if !Kit.Expect(AccessAndStale(lib,options),"real concurrent Guest/Hidden revocation, expiry, database and file changes deny playback and preserve newer data") { return 5 }
+    if !Kit.Expect(PairsAndSeparation(lib,options),"Unicode pairing, shared privacy/albums, transactional separation, existing child and immutable source preservation") { return 6 }
+    if !Kit.Expect(Lifetime(lib,options),"cached repeated calls release owned rows and caller output exactly once") { return 7 }
+    if !Kit.Expect(NewChild(root,options),"embedded split inherits metadata/privacy, rolls back a failed insert and retries without losing originals") { return 8 }
+    if !Kit.Expect(PairPolicies(root,options),"ambiguous groups, day mismatch and unavailable probe stay independent; compatible clocks permit pairing") { return 9 }
+    if !Kit.Expect(FirstSeenPair(root,options),"a duplicate still identity follows retained first-seen source-group pairing order") { return 10 }
+    return 0
+}
+#program_export
+main :: () -> s32 {
+    root:=Kit.TempDirectory("live-motion")
+    if root=="" { return 100 }; defer { unused Kit.Cleanup(root) }
+    result:=Run(root)
+    if result==0 { print("live_motion: local tests passed\n") }; return result
+}

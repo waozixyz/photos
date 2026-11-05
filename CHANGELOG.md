@@ -6,6 +6,7 @@
 - Photos syncs to your desktop Harmony node, which has room for your library. Your earlier copies on the ThinkPad stay untouched, so older Photos versions keep working.
 - Your library moves to the new storage one photo at a time; a photo counts as moved only after the node confirmed its new copy.
 - Photos uses the account you signed in to Inbe with on this computer.
+- Gallery days are headed Today, Yesterday or the date, in your language.
 
 ## 0.1.59
 

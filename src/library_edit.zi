@@ -7,6 +7,7 @@ Metadata :: #import "metadata_input";
 Cleanup :: #import "similar_cleanup";
 SemanticIndex :: #import "semantic_index";
 People :: #import "people_edit";
+JSON :: #import "std/json_document";
 #import "std/byte_text_linux"
 #import "std/json_scan"
 #import "std/text_buffer"
@@ -87,26 +88,63 @@ Expand :: (database: *void, id: string, photos: []Photo, count: *s32) -> bool {
     }
     return Add(photos,count,photo) && Add(photos,count,peer)
 }
-EditAlbum :: (path: string, json: string) -> s32 {
+ErrorInto :: (output: *Vec(u8), message: string) -> bool {
+    if output == null { return false }
+    VecClear(<<output)
+    if !BuilderAppend(<<output, "{\"error\":") || !JSON.JsonQuoteInto(output, message, true) ||
+        !BuilderAppend(<<output, "}") { VecClear(<<output); return false }
+    return true
+}
+ErrorJSON :: (message: string) -> string {
+    output: Vec(u8)
+    if !ErrorInto(*output,message) { return "" }
+    return BuilderFinish(output)
+}
+
+// Command-line convenience. Persistent callers use the caller-owned Into
+// entry points below and keep the reply vector alive through transmission.
+ApplyAlbum :: (database: *void, json: string) -> string {
+    output: Vec(u8)
+    if !ApplyAlbumInto(*output,database,json) { return "" }
+    return BuilderFinish(output)
+}
+
+// In-process album mutation. The caller retains its connection; the same
+// procedure serves the existing command-line protocol below.
+ApplyAlbumInto :: (output: *Vec(u8), database: *void, json: string) -> bool {
+    if output == null || output.count != 0 || !VecReserve(<<output,1024) { return false }
     action: [32]u8; name: [513]u8; value: [8193]u8; search: [513]u8; source: [65]u8
     actionLength := ReadStringText(json,FieldAt(json,0,"operation"),action[:])
     nameLength := ReadStringText(json,FieldAt(json,0,"name"),name[:])
     valueLength := ReadStringText(json,FieldAt(json,0,"value"),value[:])
     searchLength := ReadStringText(json,FieldAt(json,0,"search"),search[:])
     sourceLength := ReadStringText(json,FieldAt(json,0,"source"),source[:])
-    if actionLength < 1 || nameLength < 0 || valueLength < 0 || searchLength < 0 || sourceLength < 0 { return Failure("Choose valid album properties") }
+    if actionLength < 1 || nameLength < 0 || valueLength < 0 || searchLength < 0 || sourceLength < 0 { return ErrorInto(output,"Choose valid album properties") }
+    if database == null { return ErrorInto(output,"Cannot open the private library database") }
+    if !SqliteGetAutocommit(database) { return ErrorInto(output,"Finish the current library operation before editing albums") }
+    if SqliteExecText(database,"BEGIN IMMEDIATE") != SQLITE_OK { return ErrorInto(output,"The library is busy; try again") }
+    committed := false
+    defer { if !committed { unused SqliteExecText(database,"ROLLBACK") } }
+    time: Timespec; if GetTime(0,*time) != 0 { return ErrorInto(output,"Cannot read the edit time") }
+    now := cast(float64)time.seconds+cast(float64)time.nanoseconds/1000000000.0
+    error := AlbumDetails.Mutate(database,TextFromBytes(action[:actionLength]),TextFromBytes(name[:nameLength]),TextFromBytes(value[:valueLength]),TextFromBytes(search[:searchLength]),TextFromBytes(source[:sourceLength]),now)
+    if error != "" { return ErrorInto(output,error) }
+    if !BuilderAppend(<<output,"{\"saved\":1}") { return false }
+    if SqliteExecText(database,"COMMIT") != SQLITE_OK { return ErrorInto(output,"Cannot save the album edit") }
+    committed = true
+    return true
+}
+
+EditAlbum :: (path: string, json: string) -> s32 {
     database: *void
     if SqliteOpenText(path,*database,SQLITE_OPEN_READWRITE) != SQLITE_OK { if database != null { unused SqliteClose(database) }; return Failure("Cannot open the private library database") }
     defer { unused SqliteClose(database) }
     unused SqliteBusyTimeout(database,5000)
-    if SqliteExecText(database,"BEGIN IMMEDIATE") != SQLITE_OK { return Failure("The library is busy; try again") }
-    defer { unused SqliteExecText(database,"ROLLBACK") }
-    time: Timespec; if GetTime(0,*time) != 0 { return Failure("Cannot read the edit time") }
-    now := cast(float64)time.seconds+cast(float64)time.nanoseconds/1000000000.0
-    error := AlbumDetails.Mutate(database,TextFromBytes(action[:actionLength]),TextFromBytes(name[:nameLength]),TextFromBytes(value[:valueLength]),TextFromBytes(search[:searchLength]),TextFromBytes(source[:sourceLength]),now)
-    if error != "" { return Failure(error) }
-    if SqliteExecText(database,"COMMIT") != SQLITE_OK { return Failure("Cannot save the album edit") }
-    unused Send("{\"saved\":1}"); return 0
+    responseBytes: Vec(u8)
+    if !ApplyAlbumInto(*responseBytes,database,json) { return Failure("Cannot encode the album edit response") }
+    response := TextView(VecSlice(responseBytes,0,responseBytes.count))
+    if !Send(response) { return 1 }
+    return ifx FieldAt(response, 0, "error") >= 0 then 1 else 0
 }
 main :: (argc: s32, argv: **u8) -> s32 {
     if argc != 2 { return Failure("Supply the private library database") }
@@ -149,6 +187,67 @@ main :: (argc: s32, argv: **u8) -> s32 {
         if SqliteExecText(database,"COMMIT") != SQLITE_OK { return Failure("Cannot save the local image index") }
         response: Vec(u8); BuilderPrint(*response,"{\"saved\":%,\"id\":\"%\"}",saved,TextFromCString(*selected[0])); unused Send(BuilderFinish(response)); return 0
     }
+    database: *void
+    if SqliteOpenText(TextFromCString(argv[1]),*database,SQLITE_OPEN_READWRITE) != SQLITE_OK {
+        if database != null { unused SqliteClose(database) }; return Failure("Cannot open the private library database")
+    }
+    defer { unused SqliteClose(database) }
+    unused SqliteBusyTimeout(database,5000)
+    responseBytes: Vec(u8)
+    if !ApplyPhotosInto(*responseBytes,database,json,AuthorizeCLI) { return Failure("Cannot encode the photo edit response") }
+    response := TextView(VecSlice(responseBytes,0,responseBytes.count))
+    if !Send(response) { return 1 }
+    return ifx FieldAt(response, 0, "error") >= 0 then 1 else 0
+}
+
+Authorization :: struct { until: float64; error: string }
+Authorize :: #type (context: *void, ids: []string, hidden: bool) -> Authorization;
+ReleaseAuthorization :: #type (context: *void) -> void;
+NoRelease :: (context: *void) { unused context }
+DenyAuthorization :: (context: *void, ids: []string, hidden: bool) -> Authorization {
+    unused context; unused ids; unused hidden
+    return .{error="Photo edit authorization ended"}
+}
+
+AuthorizeCLI :: (context: *void, ids: []string, hidden: bool) -> Authorization {
+    unused context; unused hidden
+    challenge: Vec(u8); BuilderPrint(*challenge,"{\"authorize\":[")
+    for i: 0..ids.count-1 { BuilderPrint(*challenge,"%\"%\"",ifx i == 0 then "" else ",",ids[i]) }
+    BuilderPrint(*challenge,"]}")
+    if !Send(BuilderFinish(challenge)) { return .{error="Photo edit authorization ended"} }
+    permitBytes: [1025]u8; permitLength := Line(permitBytes[:])
+    if permitLength < 1 { return .{error="Photo edit authorization ended"} }
+    permit := TextFromBytes(permitBytes[:permitLength])
+    if permit[0] != 123 || Space(permit,ValueEnd(permit,0,0)) != permitLength { return .{error="Photo edit authorization ended"} }
+    allow := ReadNumber(permit,FieldAt(permit,0,"allow")); until := ReadNumber(permit,FieldAt(permit,0,"until"))
+    if !allow.valid || allow.value != 1.0 || !until.valid { return .{error="Hidden is locked; authenticate before changing hidden photos"} }
+    return .{until=until.value}
+}
+
+// One writer snapshot from Live Photo expansion through guarded commit. The
+// caller retains its database and supplies the actual access provider.
+// Nonempty success/error replies are caller-owned bytes. Into requires empty
+// output (reused capacity is allowed); false reports an encoding/allocation
+// failure, true reports complete JSON whose error/updated fields give outcome.
+// Reserve the small success reply before any SQL mutation, so a successful
+// commit never depends on allocating a response afterwards.
+ApplyPhotos :: (database: *void, json: string, authorize: Authorize = DenyAuthorization,
+    context: *void = null, release: ReleaseAuthorization = NoRelease) -> string {
+    output: Vec(u8)
+    if !ApplyPhotosInto(*output,database,json,authorize,context,release) { return "" }
+    return BuilderFinish(output)
+}
+
+ApplyPhotosInto :: (output: *Vec(u8), database: *void, json: string, authorize: Authorize = DenyAuthorization,
+    context: *void = null, release: ReleaseAuthorization = NoRelease) -> bool {
+    if output == null || output.count != 0 || !VecReserve(<<output,1024) { return false }
+    if database == null { return ErrorInto(output,"Cannot open the private library database") }
+    if !SqliteGetAutocommit(database) { return ErrorInto(output,"Finish the current library operation before editing photos") }
+    if json.count == 0 || json.count > 262144 { return ErrorInto(output,"Photo edit exceeds its limit") }
+    if json[0] != 123 || Space(json,ValueEnd(json,0,0)) != json.count { return ErrorInto(output,"Choose a valid photo edit") }
+    actionBytes: [32]u8; valueBytes: [8193]u8
+    if ReadStringText(json,FieldAt(json,0,"action"),actionBytes[:]) < 0 { return ErrorInto(output,"Choose a photo action") }
+    action := TextFromCString(*actionBytes[0]); valueLength := ReadStringText(json,FieldAt(json,0,"value"),valueBytes[:])
     property: string
     if action == "favorite" || action == "favorite_set" { property = "favorite" }
     if action == "hidden" || action == "hidden_set" { property = "hidden" }
@@ -158,78 +257,74 @@ main :: (argc: s32, argv: **u8) -> s32 {
     trash := action == "trash" || action == "restore" || cleanup
     album := action == "album_add" || action == "album_remove"
     date := action == "taken"; location := action == "location"; rename := action == "rename"
-    if property == "" && !text && !trash && !album && !date && !location && !rename { return Failure("Unknown native photo action") }
+    if property == "" && !text && !trash && !album && !date && !location && !rename { return ErrorInto(output,"Unknown native photo action") }
     explicit := action == "favorite_set" || action == "hidden_set" || action == "archived_set"
-    if explicit && (valueLength != 1 || valueBytes[0] != 48 && valueBytes[0] != 49) { return Failure("Choose whether to enable this property") }
-    if text && (valueLength < 0 || valueLength > 8192) { return Failure("Enter at most 8192 bytes of text") }
-    if album && (valueLength < 1 || valueLength > 512) { return Failure("Enter an album name of at most 512 bytes") }
+    if explicit && (valueLength != 1 || valueBytes[0] != 48 && valueBytes[0] != 49) { return ErrorInto(output,"Choose whether to enable this property") }
+    if text && (valueLength < 0 || valueLength > 8192) { return ErrorInto(output,"Enter at most 8192 bytes of text") }
+    if album && (valueLength < 1 || valueLength > 512) { return ErrorInto(output,"Enter an album name of at most 512 bytes") }
     dateValue: float64
     if date {
-        if valueLength < 0 { return Failure("Enter a valid date and time, for example 2024-06-15 14:30:00+00:00") }
+        if valueLength < 0 { return ErrorInto(output,"Enter a valid date and time, for example 2024-06-15 14:30:00+00:00") }
         capture := Metadata.Date(TextFromBytes(valueBytes[:valueLength]))
-        if !capture.valid { return Failure("Enter a valid date and time, for example 2024-06-15 14:30:00+00:00") }
+        if !capture.valid { return ErrorInto(output,"Enter a valid date and time, for example 2024-06-15 14:30:00+00:00") }
         dateValue = capture.seconds
     }
     geo: Vec(u8); clearLocation: bool
     if location {
-        if valueLength < 0 { return Failure("Enter latitude, longitude, or leave empty to remove location") }
+        if valueLength < 0 { return ErrorInto(output,"Enter latitude, longitude, or leave empty to remove location") }
         coordinates := Metadata.Coordinates(TextFromBytes(valueBytes[:valueLength]))
-        if !coordinates.valid { return Failure("Enter valid coordinates: latitude -90 to 90, longitude -180 to 180") }
+        if !coordinates.valid { return ErrorInto(output,"Enter valid coordinates: latitude -90 to 90, longitude -180 to 180") }
         clearLocation = coordinates.clear
         if clearLocation { BuilderPrint(*geo,"null") }
         else {
             latitude: [64]u8; longitude: [64]u8
-            if !Metadata.Format(coordinates.latitude,latitude[:]) || !Metadata.Format(coordinates.longitude,longitude[:]) { return Failure("Cannot save the photo location") }
+            if !Metadata.Format(coordinates.latitude,latitude[:]) || !Metadata.Format(coordinates.longitude,longitude[:]) { return ErrorInto(output,"Cannot save the photo location") }
             BuilderPrint(*geo,"{\"latitude\":%,\"longitude\":%}",TextFromCString(*latitude[0]),TextFromCString(*longitude[0]))
         }
     }
-    geoText := BuilderFinish(geo)
+    geoText := TextView(VecSlice(geo,0,geo.count))
     if rename {
-        if valueLength < 1 || valueLength > 512 || TextFromBytes(valueBytes[:valueLength]) == "." || TextFromBytes(valueBytes[:valueLength]) == ".." { return Failure("Enter a file name without a folder path") }
-        for i: 0..valueLength-1 { if valueBytes[i] < 32 || valueBytes[i] == 47 || valueBytes[i] == 92 { return Failure("Enter a file name without a folder path") } }
+        if valueLength < 1 || valueLength > 512 || TextFromBytes(valueBytes[:valueLength]) == "." || TextFromBytes(valueBytes[:valueLength]) == ".." { return ErrorInto(output,"Enter a file name without a folder path") }
+        for i: 0..valueLength-1 { if valueBytes[i] < 32 || valueBytes[i] == 47 || valueBytes[i] == 92 { return ErrorInto(output,"Enter a file name without a folder path") } }
     }
     offsets: [1000]s32; requested := ArrayPositions(json,FieldAt(json,0,"ids"),offsets[:])
-    if requested < 1 || requested > 1000 { return Failure("Select between 1 and 1000 photos") }
-    database: *void
-    if SqliteOpenText(TextFromCString(argv[1]),*database,SQLITE_OPEN_READWRITE) != SQLITE_OK {
-        if database != null { unused SqliteClose(database) }; return Failure("Cannot open the private library database")
-    }
-    defer { unused SqliteClose(database) }
-    unused SqliteBusyTimeout(database,5000)
-    if SqliteExecText(database,"BEGIN IMMEDIATE") != SQLITE_OK { return Failure("The library is busy; try again") }
-    defer { unused SqliteExecText(database,"ROLLBACK") }
+    if requested < 1 || requested > 1000 { return ErrorInto(output,"Select between 1 and 1000 photos") }
+    authorizationStarted := false
+    defer { if authorizationStarted && release != null { release(context) } }
+    if SqliteExecText(database,"BEGIN IMMEDIATE") != SQLITE_OK { return ErrorInto(output,"The library is busy; try again") }
+    committed := false
+    defer { if !committed { unused SqliteExecText(database,"ROLLBACK") } }
     photos: [2002]Photo; count: s32; hidden: bool
     reference := TextFromBytes(valueBytes[:ifx valueLength > 0 then valueLength else 0])
-    if cleanup && (!Identity(reference) || !Cleanup.Ready(database,reference) || !Cleanup.Begin(database)) { return Failure("Enable local ML and choose an indexed visible reference photo") }
+    if cleanup && (!Identity(reference) || !Cleanup.Ready(database,reference) || !Cleanup.Begin(database)) { return ErrorInto(output,"Enable local ML and choose an indexed visible reference photo") }
     for i: 0..requested-1 {
         id: [65]u8
-        if ReadStringText(json,offsets[i],id[:]) != 64 || !Expand(database,TextFromCString(*id[0]),photos[:],*count) { return Failure("Photo not found or Live Photo pairing is incomplete") }
-        if cleanup && (TextFromCString(*id[0]) == reference || !Cleanup.Matches(database,TextFromCString(*id[0]))) { return Failure("Refresh similar photos; every selected match must remain visible and indexed") }
+        if ReadStringText(json,offsets[i],id[:]) != 64 || !Expand(database,TextFromCString(*id[0]),photos[:],*count) { return ErrorInto(output,"Photo not found or Live Photo pairing is incomplete") }
+        if cleanup && (TextFromCString(*id[0]) == reference || !Cleanup.Matches(database,TextFromCString(*id[0]))) { return ErrorInto(output,"Refresh similar photos; every selected match must remain visible and indexed") }
     }
     discarded := count
     if cleanup {
         for i: 0..discarded-1 {
-            if photos[i].hidden || photos[i].trashed || TextFromCString(*photos[i].id[0]) == reference || !Cleanup.Member(database,TextFromCString(*photos[i].id[0]),false) { return Failure("Refresh similar photos; selected items changed") }
+            if photos[i].hidden || photos[i].trashed || TextFromCString(*photos[i].id[0]) == reference || !Cleanup.Member(database,TextFromCString(*photos[i].id[0]),false) { return ErrorInto(output,"Refresh similar photos; selected items changed") }
         }
-        if !Expand(database,reference,photos[:],*count) || count == discarded { return Failure("Choose a separate visible reference photo to keep") }
+        if !Expand(database,reference,photos[:],*count) || count == discarded { return ErrorInto(output,"Choose a separate visible reference photo to keep") }
         for i: discarded..count-1 {
-            if photos[i].hidden || photos[i].trashed || !Cleanup.Member(database,TextFromCString(*photos[i].id[0]),true) { return Failure("Refresh similar photos; the reference became private") }
+            if photos[i].hidden || photos[i].trashed || !Cleanup.Member(database,TextFromCString(*photos[i].id[0]),true) { return ErrorInto(output,"Refresh similar photos; the reference became private") }
         }
     }
-    challenge: Vec(u8); BuilderPrint(*challenge,"{\"authorize\":[")
+    ids: [2002]string
     for i: 0..count-1 {
-        BuilderPrint(*challenge,"%\"%\"",ifx i == 0 then "" else ",",TextFromCString(*photos[i].id[0]))
+        ids[i] = TextFromCString(*photos[i].id[0])
         if photos[i].hidden { hidden = true }
     }
-    BuilderPrint(*challenge,"]}")
-    if !Send(BuilderFinish(challenge)) { return 1 }
-    permitBytes: [1025]u8; permitLength := Line(permitBytes[:])
-    if permitLength < 1 { return Failure("Photo edit authorization ended") }
-    permit := TextFromBytes(permitBytes[:permitLength])
-    if permit[0] != 123 || Space(permit,ValueEnd(permit,0,0)) != permitLength { return Failure("Photo edit authorization ended") }
-    allow := ReadNumber(permit,FieldAt(permit,0,"allow")); until := ReadNumber(permit,FieldAt(permit,0,"until"))
+    if authorize == null { return ErrorInto(output,"Photo edit authorization ended") }
+    // The provider keeps its access guard until release, including rollback.
+    // Release follows the transaction defer, so revocation and commit have one order.
+    authorizationStarted = true
+    permit := authorize(context, ids[:count], hidden)
+    if permit.error != "" { return ErrorInto(output,permit.error) }
     now := Monotonic()
-    if !allow.valid || allow.value != 1.0 || !until.valid || now <= 0.0 || until.value <= now || until.value > now+10.0 { return Failure("Hidden is locked; authenticate before changing hidden photos") }
+    if now <= 0.0 || permit.until <= now || permit.until > now+10.0 { return ErrorInto(output,"Hidden is locked; authenticate before changing hidden photos") }
     sql: Vec(u8)
     BuilderPrint(*sql,"UPDATE photos SET ")
     if property != "" {
@@ -248,25 +343,25 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if location { BuilderPrint(*sql,",updated=max(updated+0.000001,?2),dirty=1 WHERE id=?3") }
     else { BuilderPrint(*sql,",updated=max(updated+0.000001,?),dirty=1 WHERE id=?") }
     statement: *void
-    time: Timespec; if GetTime(0,*time) != 0 { return Failure("Cannot read the edit time") }
+    time: Timespec; if GetTime(0,*time) != 0 { return ErrorInto(output,"Cannot read the edit time") }
     timestamp := cast(float64)time.seconds+cast(float64)time.nanoseconds/1000000000.0
     if cleanup {
         error := Cleanup.Transfer(database,reference,timestamp)
-        if error != "" { return Failure(error) }
+        if error != "" { return ErrorInto(output,error) }
     }
     if album {
         prepared := Album.Prepare(database,action,TextFromBytes(valueBytes[:valueLength]),timestamp)
-        if prepared.error != "" { return Failure(prepared.error) }; statement = prepared.statement
-    } else if SqlitePrepareText(database,BuilderFinish(sql),-1,*statement,null) != SQLITE_OK { return Failure("Cannot prepare the photo edit") }
+        if prepared.error != "" { return ErrorInto(output,prepared.error) }; statement = prepared.statement
+    } else if SqlitePrepareText(database,TextView(VecSlice(sql,0,sql.count)),-1,*statement,null) != SQLITE_OK { return ErrorInto(output,"Cannot prepare the photo edit") }
     defer { unused SqliteFinalize(statement) }
     for i: 0..(ifx cleanup then discarded else count)-1 {
-        if (hidden || cleanup) && Monotonic() >= until.value { return Failure("Photo edit access expired before the edit finished") }
+        if (hidden || cleanup) && Monotonic() >= permit.until { return ErrorInto(output,"Photo edit access expired before the edit finished") }
         unused SqliteReset(statement); if !album { unused SqliteClearBindings(statement) }
         index: s32 = ifx album then 3 else 1
-        if explicit { if SqliteBindInt(statement,index,cast(s32)valueBytes[0]-48) != SQLITE_OK { return Failure("Cannot bind the photo edit") }; index += 1 }
-        else if text { if SqliteBindTextString(statement,index,TextFromBytes(valueBytes[:valueLength]),valueLength) != SQLITE_OK { return Failure("Cannot bind the photo edit") }; index += 1 }
-        else if date { if SqliteBindDouble(statement,index,dateValue) != SQLITE_OK { return Failure("Cannot bind the capture date") }; index += 1 }
-        else if location { if SqliteBindTextString(statement,index,geoText,cast(s32)geoText.count) != SQLITE_OK { return Failure("Cannot bind the photo location") }; index += 1 }
+        if explicit { if SqliteBindInt(statement,index,cast(s32)valueBytes[0]-48) != SQLITE_OK { return ErrorInto(output,"Cannot bind the photo edit") }; index += 1 }
+        else if text { if SqliteBindTextString(statement,index,TextFromBytes(valueBytes[:valueLength]),valueLength) != SQLITE_OK { return ErrorInto(output,"Cannot bind the photo edit") }; index += 1 }
+        else if date { if SqliteBindDouble(statement,index,dateValue) != SQLITE_OK { return ErrorInto(output,"Cannot bind the capture date") }; index += 1 }
+        else if location { if SqliteBindTextString(statement,index,geoText,cast(s32)geoText.count) != SQLITE_OK { return ErrorInto(output,"Cannot bind the photo location") }; index += 1 }
         else if rename {
             name: Vec(u8); original := TextFromBytes(valueBytes[:valueLength])
             if photos[i].still[0] != 0 {
@@ -275,14 +370,20 @@ main :: (argc: s32, argv: **u8) -> s32 {
                 stem := ifx dot < 0 then original else original[:dot]
                 BuilderPrint(*name,"%",stem); BuilderPrint(*name,"%",TextFromCString(*photos[i].extension[0]))
             } else { BuilderPrint(*name,"%",original) }
-            nameText := BuilderFinish(name)
-            if nameText.count > 512 || SqliteBindTextString(statement,index,nameText,cast(s32)nameText.count) != SQLITE_OK { return Failure("Enter a file name without a folder path") }; index += 1
+            nameText := TextView(VecSlice(name,0,name.count))
+            if nameText.count > 512 || SqliteBindTextString(statement,index,nameText,cast(s32)nameText.count) != SQLITE_OK { return ErrorInto(output,"Enter a file name without a folder path") }; index += 1
         }
-        else if trash { if SqliteBindInt64(statement,index,ifx action == "trash" || cleanup then cast(s64)timestamp else 0) != SQLITE_OK { return Failure("Cannot bind the photo edit") }; index += 1 }
+        else if trash { if SqliteBindInt64(statement,index,ifx action == "trash" || cleanup then cast(s64)timestamp else 0) != SQLITE_OK { return ErrorInto(output,"Cannot bind the photo edit") }; index += 1 }
         if SqliteBindDouble(statement,index,timestamp) != SQLITE_OK || SqliteBindTextString(statement,index+1,TextFromCString(*photos[i].id[0]),64) != SQLITE_OK ||
-            SqliteStep(statement) != SQLITE_DONE || SqliteChanges(database) != 1 { return Failure("Cannot finish the photo edit") }
+            SqliteStep(statement) != SQLITE_DONE || SqliteChanges(database) != 1 { return ErrorInto(output,"Cannot finish the photo edit") }
     }
-    if (hidden || cleanup) && Monotonic() >= until.value { return Failure("Photo edit access expired before the edit finished") }
-    if SqliteExecText(database,"COMMIT") != SQLITE_OK { return Failure("Cannot save the photo edit") }
-    out: Vec(u8); BuilderPrint(*out,"{\"updated\":%}",count); if !Send(BuilderFinish(out)) { return 1 }; return 0
+    if (hidden || cleanup) && Monotonic() >= permit.until { return ErrorInto(output,"Photo edit access expired before the edit finished") }
+    reply: JSON.JsonDocument
+    defer { JSON.JsonReset(*reply) }
+    object := JSON.JsonNewObject(*reply)
+    if !JSON.JsonSet(*reply,object,"updated",JSON.JsonNewInteger(*reply,count)) ||
+        !JSON.JsonWriteInto(output,*reply,object,JSON.JsonCompactStyle()) { return false }
+    if SqliteExecText(database,"COMMIT") != SQLITE_OK { return ErrorInto(output,"Cannot save the photo edit") }
+    committed = true
+    return true
 }

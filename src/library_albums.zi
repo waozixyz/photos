@@ -1,0 +1,436 @@
+// Album UI policy and edits share Photos' existing SQLite storage and writers.
+Store :: #import "library_store";
+LibraryFiles :: #import "library_files";
+Engine :: #import "library_query";
+Editor :: #import "library_edit";
+Vault :: #import "vault";
+Access :: #import "access_registry";
+Geo :: #import "geo";
+SQL :: #import "sqlite/SQLite";
+JSON :: #import "std/json_document";
+Float :: #import "std/float_text";
+Tree :: #import "std/file_tree_linux";
+UTF8 :: #import "std/utf8";
+Unicode :: #import "std/unicode";
+#import "std/byte_text_linux"
+#import "std/c_string"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+glib :: #system_library "glib-2.0";
+CasefoldRaw :: (text: *u8, count: s64) -> *u8 #foreign glib "g_utf8_casefold";
+FreeRaw :: (text: *void) #foreign glib "g_free";
+FormatRaw :: (output: *u8, length: s32, format: *u8, number: float64) -> *u8 #foreign glib "g_ascii_formatd";
+
+// Preserve Python shown_album's public fields. Entity/record sync bookkeeping
+// stays in SQLite, untouched, rather than appearing in album detail.
+AlbumJSON :: "json_object('id',id,'name',name,'description',description,'cover',cover,'pinned',pinned,'archived',archived,'deleted',deleted,'created',created,'updated',updated,'dirty',dirty,'filter',filter,'auto_people',auto_people)";
+
+Entry :: struct { node: s32; pinned: bool; created: float64; folded: string; id: string }
+GuardContext :: struct { lib: *Store.Library; token: string; registry: *Access.Registry; lease: Vault.Authorization }
+
+GuardAuthorize :: (opaque: *void, ids: []string, hidden: bool) -> Editor.Authorization {
+    unused ids
+    context := cast(*GuardContext)opaque
+    context.lease = Vault.BeginAuthorization(context.lib, context.token, hidden, context.registry)
+    if context.lease.error != "" {
+        return .{error=ifx hidden then "Hidden is locked; authenticate before changing hidden photos" else Copy(context.lease.error)}
+    }
+    until := Editor.Monotonic()+5.0
+    if hidden {
+        deadline := cast(float64)context.lease.until/1000.0
+        if deadline < until { until = deadline }
+    }
+    return .{until=until}
+}
+GuardRelease :: (opaque: *void) {
+    context := cast(*GuardContext)opaque
+    Vault.EndAuthorization(*context.lease)
+}
+
+Copy :: (text: string) -> string {
+    out: Vec(u8)
+    BuilderPrint(*out, "%", text)
+    return BuilderFinish(out)
+}
+
+Column :: (statement: *void, index: s32) -> string {
+    pointer := SQL.SqliteColumnText(statement, index)
+    if pointer == null { return "" }
+    return Copy(TextFromBytes(BytesFromPointer(pointer, cast(u64)SQL.SqliteColumnBytes(statement, index))))
+}
+
+Fail :: (lib: *Store.Library, message: string) -> string { Store.SetError(lib, message); return Copy("[]") }
+
+Fold :: (text: string) -> string {
+    if text.count == 0 { return "" }
+    descriptor := cast(*TextDescriptor)*text
+    folded := CasefoldRaw(descriptor.data, text.count)
+    if folded == null { return "" }
+    defer { FreeRaw(cast(*void)folded) }
+    return Copy(TextFromCString(folded))
+}
+
+Compare :: (left: string, right: string) -> s32 {
+    at: s64 = 0
+    while at < left.count && at < right.count {
+        if left[at] < right[at] { return -1 }
+        if left[at] > right[at] { return 1 }
+        at += 1
+    }
+    if left.count < right.count { return -1 }
+    if left.count > right.count { return 1 }
+    return 0
+}
+
+Contains :: (text: string, query: string) -> bool {
+    if query.count == 0 { return true }
+    start: s64 = 0
+    while start + query.count <= text.count {
+        if text[start:start + query.count] == query { return true }
+        start += 1
+    }
+    return false
+}
+
+Number :: (document: *JSON.JsonDocument, object: s32, name: string) -> s64 {
+    value, valid := JSON.JsonInteger(document, JSON.JsonMember(document, object, name))
+    return ifx valid then value else 0
+}
+
+TextInto :: (document: *JSON.JsonDocument, object: s32, name: string, output: *Vec(u8)) -> bool {
+    node := JSON.JsonMember(document, object, name)
+    if JSON.JsonKindOf(document, node) != JSON.JsonKind.String { return true }
+    return JSON.JsonStringInto(document, node, output)
+}
+
+FieldInto :: (document: *JSON.JsonDocument, name: string, fallback: string, output: *Vec(u8)) -> bool {
+    if JSON.JsonMember(document, document.root, name) < 0 { return BuilderAppend(<<output, fallback) }
+    return TextInto(document, document.root, name, output)
+}
+
+Place :: (filter: string) -> bool {
+    if filter.count < 5 || filter[0:5] != "near:" { return false }
+    area: Geo.Radius
+    if !Geo.Parse(filter[5:], *area) { return false }
+    format: [6]u8 = .[37, 46, 49, 53, 103, 0]
+    latitude: [64]u8
+    longitude: [64]u8
+    radius: [64]u8
+    if FormatRaw(*latitude[0], 64, *format[0], area.latitude) == null ||
+        FormatRaw(*longitude[0], 64, *format[0], area.longitude) == null ||
+        FormatRaw(*radius[0], 64, *format[0], area.km) == null { return false }
+    out: Vec(u8)
+    BuilderPrint(*out, "near:%,%,%", TextUntilNul(latitude[:]), TextUntilNul(longitude[:]), TextUntilNul(radius[:]))
+    return TextView(VecSlice(out, 0, out.count)) == filter
+}
+
+// Saved searches and file names keep their interior whitespace. Match the
+// existing Python policy using the canonical Unicode whitespace property.
+Trim :: (value: string) -> string {
+    at: s32
+    start: s32 = -1
+    end: s32
+    while at < value.count {
+        point := UTF8.Decode(value, at)
+        if !point.valid { return "" }
+        if !Unicode.IsSpace(point.value) { if start < 0 { start = at }; end = point.after }
+        at = point.after
+    }
+    return ifx start < 0 then "" else value[start:end]
+}
+
+Members :: (lib: *Store.Library, name: string, ids: *Vec(string)) -> bool {
+    statement: *void
+    sql := "SELECT p.id FROM photos p,json_each(p.albums) j WHERE j.value=? AND p.trashed=0 AND p.hidden=0 AND coalesce(json_extract(p.metadata,'$.photosLive.photo'),'')='' AND (json_extract(p.metadata,'$.photosLive.video') IS NULL OR EXISTS(SELECT 1 FROM photos m WHERE m.id=json_extract(p.metadata,'$.photosLive.video') AND m.kind='video' AND m.hidden=0 AND m.trashed=0 AND json_extract(m.metadata,'$.photosLive.photo')=p.id)) ORDER BY p.taken DESC,p.id"
+    if SQL.SqlitePrepareText(lib.db, sql, -1, *statement, null) != SQL.SQLITE_OK { return false }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if SQL.SqliteBindTextString(statement, 1, name, cast(s32)name.count) != SQL.SQLITE_OK { return false }
+    while true {
+        code := SQL.SqliteStep(statement)
+        if code == SQL.SQLITE_DONE { return true }
+        if code != SQL.SQLITE_ROW { return false }
+        VecPush(<<ids, Column(statement, 0))
+    }
+}
+
+Less :: (left: Entry, right: Entry, order: string) -> bool {
+    if left.pinned != right.pinned { return left.pinned }
+    if order == "name" {
+        compared := Compare(left.folded, right.folded)
+        if compared != 0 { return compared < 0 }
+    } else if left.created != right.created {
+        return ifx order == "newest" then left.created > right.created else left.created < right.created
+    }
+    return Compare(left.id, right.id) < 0
+}
+
+#scope_export
+AlbumName :: (value: string) -> string { return Store.AlbumName(value) }
+IsPlace :: (filter: string) -> bool { return Place(filter) }
+
+EditAlbum :: (lib: *Store.Library, name: string, action: string, value: string = "",
+    search: string = "", source: string = "") -> string, string {
+    if lib == null || lib.db == null { return "", "Photo library is not open" }
+    if !SQL.SqliteGetAutocommit(lib.db) { return "", "Finish the current library operation before editing albums" }
+    selected := name
+    replacement := value
+    rules := search
+    creating := action == "create" || action == "smart_create"
+    if creating { selected = ""; replacement = AlbumName(value) }
+    else { selected = AlbumName(name) }
+    if (creating && replacement == "") || (!creating && selected == "") { return "", "Enter an album name of at most 512 bytes" }
+    if action == "rename" {
+        replacement = AlbumName(value)
+        if replacement == "" { return "", "Enter an album name of at most 512 bytes" }
+    }
+    if action == "smart_create" || action == "filter" {
+        candidate := ifx action == "smart_create" then search else value
+        trimmed := Trim(candidate)
+        if candidate.count > 512 || trimmed == "" { return "", "Choose a nonempty search of at most 512 bytes" }
+        for byte: candidate { if byte == 0 { return "", "Choose a nonempty search of at most 512 bytes" } }
+        validate: Vec(u8)
+        BuilderPrint(*validate, "{\"view\":\"validate\",\"sort\":\"newest\",\"search\":")
+        JSON.JsonQuoteInto(*validate, candidate, false); BuilderPrint(*validate, "}")
+        checked: JSON.JsonDocument
+        defer { JSON.JsonReset(*checked) }
+        if !JSON.JsonRead(*checked, Engine.Query(lib.db, TextView(VecSlice(validate, 0, validate.count)))) { return "", "Could not validate the album search" }
+        errorBytes: Vec(u8)
+        if !TextInto(*checked, checked.root, "error", *errorBytes) { return "", "Could not read album search validation" }
+        if errorBytes.count > 0 { return "", BuilderFinish(errorBytes) }
+        if action == "smart_create" { rules = trimmed } else { replacement = trimmed }
+    }
+    request: Vec(u8)
+    BuilderPrint(*request, "{\"operation\":"); JSON.JsonQuoteInto(*request, action, false)
+    BuilderPrint(*request, ",\"name\":"); JSON.JsonQuoteInto(*request, selected, false)
+    BuilderPrint(*request, ",\"value\":"); JSON.JsonQuoteInto(*request, replacement, false)
+    BuilderPrint(*request, ",\"search\":"); JSON.JsonQuoteInto(*request, rules, false)
+    BuilderPrint(*request, ",\"source\":"); JSON.JsonQuoteInto(*request, source, false)
+    BuilderPrint(*request, "}")
+    response: JSON.JsonDocument
+    defer { JSON.JsonReset(*response) }
+    responseBytes: Vec(u8)
+    if !Editor.ApplyAlbumInto(*responseBytes,lib.db,TextView(VecSlice(request,0,request.count))) ||
+        !JSON.JsonRead(*response,TextView(VecSlice(responseBytes,0,responseBytes.count))) { return "", "Album edit returned an invalid response" }
+    errorBytes: Vec(u8)
+    if !TextInto(*response, response.root, "error", *errorBytes) { return "", "Could not read album edit response" }
+    if errorBytes.count > 0 { return "", BuilderFinish(errorBytes) }
+    if Number(*response, response.root, "saved") != 1 { return "", "Album edit could not finish" }
+    return ifx creating || action == "rename" then replacement else selected, ""
+}
+
+RenameAlbum :: (lib: *Store.Library, old: string, new: string) -> string {
+    previous := AlbumName(old)
+    replacement := AlbumName(new)
+    if previous == "" || replacement == "" { return "Enter an album name of at most 512 bytes" }
+    if previous == replacement { return "" }
+    selected, error := EditAlbum(lib, previous, "rename", replacement)
+    unused selected
+    return error
+}
+
+EditMany :: (lib: *Store.Library, ids: []string, action: string, value: string,
+    authorize: Editor.Authorize = Editor.DenyAuthorization, context: *void = null,
+    release: Editor.ReleaseAuthorization = Editor.NoRelease) -> string {
+    output: Vec(u8)
+    if !EditManyInto(*output,lib,ids,action,value,authorize,context,release) { return "" }
+    return BuilderFinish(output)
+}
+
+EditManyInto :: (output: *Vec(u8), lib: *Store.Library, ids: []string, action: string, value: string,
+    authorize: Editor.Authorize = Editor.DenyAuthorization, context: *void = null,
+    release: Editor.ReleaseAuthorization = Editor.NoRelease) -> bool {
+    if output == null || output.count != 0 { return false }
+    if lib == null || lib.db == null { return Editor.ErrorInto(output,"Photo library is not open") }
+    if !SQL.SqliteGetAutocommit(lib.db) { return Editor.ErrorInto(output,"Finish the current library operation before editing photos") }
+    if ids.count < 1 || ids.count > 1000 { return Editor.ErrorInto(output,"Select between 1 and 1000 photos") }
+    replacement := value
+    if action == "album_add" || action == "album_remove" {
+        replacement = AlbumName(value)
+        if replacement == "" { return Editor.ErrorInto(output,"Enter an album name of at most 512 bytes") }
+    }
+    if action == "rename" {
+        if value.count > 512 { return Editor.ErrorInto(output,"Enter a file name without a folder path") }
+        for byte: value { if byte < 32 { return Editor.ErrorInto(output,"Enter a file name without a folder path") } }
+        replacement = Trim(value)
+    }
+    if action == "similar_cleanup" {
+        if !Editor.Identity(value) { return Editor.ErrorInto(output,"Choose a separate reference photo and distinct similar matches") }
+        for i: 0..ids.count-1 {
+            if ids[i] == value { return Editor.ErrorInto(output,"Choose a separate reference photo and distinct similar matches") }
+            for j: 0..i-1 { if ids[i] == ids[j] { return Editor.ErrorInto(output,"Choose a separate reference photo and distinct similar matches") } }
+        }
+    }
+    request: Vec(u8)
+    if !BuilderAppend(request,"{\"action\":") || !JSON.JsonQuoteInto(*request,action,false) ||
+        !BuilderAppend(request,",\"value\":") || !JSON.JsonQuoteInto(*request,replacement,false) ||
+        !BuilderAppend(request,",\"ids\":[") { return false }
+    for i: 0..ids.count-1 {
+        if (i != 0 && !BuilderAppend(request,",")) || !JSON.JsonQuoteInto(*request,ids[i],false) { return false }
+    }
+    if !BuilderAppend(request,"]}") { return false }
+    return Editor.ApplyPhotosInto(output,lib.db,TextView(VecSlice(request,0,request.count)),authorize,context,release)
+}
+
+// Ordinary service edits use the actual process-wide Hidden guard. Provider
+// injection above remains available for orchestration with additional policy.
+EditManyAuthorized :: (lib: *Store.Library, ids: []string, action: string, value: string = "",
+    token: string = "", registry: *Access.Registry = null) -> string {
+    context: GuardContext = .{lib=lib, token=token, registry=registry}
+    return EditMany(lib, ids, action, value, GuardAuthorize, cast(*void)*context, GuardRelease)
+}
+
+// Caller-owned counterpart for the persistent service's real authorization.
+EditManyAuthorizedInto :: (output: *Vec(u8), lib: *Store.Library, ids: []string, action: string, value: string = "",
+    token: string = "", registry: *Access.Registry = null) -> bool {
+    context: GuardContext = .{lib=lib,token=token,registry=registry}
+    return EditManyInto(output,lib,ids,action,value,GuardAuthorize,cast(*void)*context,GuardRelease)
+}
+
+AlbumDetails :: (lib: *Store.Library, name: string) -> string, string {
+    if lib == null || lib.db == null { return "", "Photo library is not open" }
+    statement: *void
+    query: Vec(u8)
+    BuilderPrint(*query, "SELECT % FROM albums WHERE name=? AND deleted=0", AlbumJSON)
+    if SQL.SqlitePrepareText(lib.db, TextView(VecSlice(query, 0, query.count)), -1, *statement, null) != SQL.SQLITE_OK { return "", "Could not read album" }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if SQL.SqliteBindTextString(statement, 1, name, cast(s32)name.count) != SQL.SQLITE_OK { return "", "Could not read album" }
+    code := SQL.SqliteStep(statement)
+    if code == SQL.SQLITE_DONE { return "", "Album not found" }
+    if code != SQL.SQLITE_ROW { return "", "Could not read album" }
+    return Column(statement, 0), ""
+}
+
+AlbumList :: (lib: *Store.Library, request: string) -> string {
+    if lib == null || lib.db == null { return Copy("[]") }
+    Store.ClearError(lib)
+    input: JSON.JsonDocument
+    defer { JSON.JsonReset(*input) }
+    if !JSON.JsonRead(*input, request) || JSON.JsonKindOf(*input, input.root) != JSON.JsonKind.Object {
+        return Fail(lib, "Choose a valid album filter and ordering")
+    }
+    modeBytes: Vec(u8); orderBytes: Vec(u8); searchBytes: Vec(u8)
+    if !FieldInto(*input, "album_mode", "active", *modeBytes) ||
+        !FieldInto(*input, "album_sort", "name", *orderBytes) ||
+        !FieldInto(*input, "search", "", *searchBytes) { return Fail(lib, "Could not read album filter") }
+    mode := TextView(VecSlice(modeBytes, 0, modeBytes.count))
+    order := TextView(VecSlice(orderBytes, 0, orderBytes.count))
+    search := TextView(VecSlice(searchBytes, 0, searchBytes.count))
+    if (mode != "active" && mode != "archived" && mode != "empty" && mode != "all" && mode != "places") ||
+        (order != "name" && order != "newest" && order != "oldest") {
+        return Fail(lib, "Choose a valid album filter and ordering")
+    }
+    for byte: search { if byte == 0 { return Copy("[]") } }
+    foldedSearch := Fold(search)
+    if search != "" && foldedSearch == "" { return Fail(lib, "Could not compare album names") }
+    if SQL.SqliteExecText(lib.db, "SAVEPOINT photos_album_list") != SQL.SQLITE_OK { return Fail(lib, "Could not read albums") }
+    released := false
+    defer {
+        if !released {
+            unused SQL.SqliteExecText(lib.db, "ROLLBACK TO photos_album_list")
+            unused SQL.SqliteExecText(lib.db, "RELEASE photos_album_list")
+        }
+    }
+    // Finalize this selection before calling the in-process query engine,
+    // whose SQLite function registration must not meet an active statement.
+    query: Vec(u8)
+    BuilderPrint(*query, "SELECT % FROM albums WHERE deleted=0", AlbumJSON)
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db, TextView(VecSlice(query, 0, query.count)), -1, *statement, null) != SQL.SQLITE_OK { return Fail(lib, "Could not read albums") }
+    albums: Vec(string)
+    while true {
+        code := SQL.SqliteStep(statement)
+        if code == SQL.SQLITE_DONE { break }
+        if code != SQL.SQLITE_ROW { unused SQL.SqliteFinalize(statement); return Fail(lib, "Could not read albums") }
+        VecPush(albums, Column(statement, 0))
+    }
+    unused SQL.SqliteFinalize(statement)
+    output: JSON.JsonDocument
+    defer { JSON.JsonReset(*output) }
+    array := JSON.JsonNewArray(*output)
+    entries: Vec(Entry)
+    index: s64 = 0
+    while index < albums.count {
+        album: JSON.JsonDocument
+        defer { JSON.JsonReset(*album) }
+        if !JSON.JsonRead(*album, albums[index]) { return Fail(lib, "Could not read album properties") }
+        index += 1
+        nameBytes: Vec(u8); filterBytes: Vec(u8)
+        if !TextInto(*album, album.root, "name", *nameBytes) || !TextInto(*album, album.root, "filter", *filterBytes) { return Fail(lib, "Could not read album properties") }
+        name := TextView(VecSlice(nameBytes, 0, nameBytes.count))
+        filter := TextView(VecSlice(filterBytes, 0, filterBytes.count))
+        place := Place(filter)
+        if mode == "places" && !place { continue }
+        folded := Fold(name)
+        if !Contains(folded, foldedSearch) { continue }
+        archived := Number(*album, album.root, "archived") != 0
+        if (mode == "active" && archived) || (mode == "archived" && !archived) { continue }
+        ids: Vec(string)
+        count: s64 = 0
+        if filter == "" {
+            if !Members(lib, name, *ids) { return Fail(lib, "Could not read album members") }
+            count = ids.count
+        } else {
+            smart: Vec(u8)
+            BuilderPrint(*smart, "{\"view\":\"photos\",\"filter\":")
+            JSON.JsonQuoteInto(*smart, filter, false)
+            BuilderPrint(*smart, ",\"sort\":\"newest\",\"limit\":1}")
+            matched: JSON.JsonDocument
+            defer { JSON.JsonReset(*matched) }
+            if !JSON.JsonRead(*matched, Engine.Query(lib.db, TextView(VecSlice(smart, 0, smart.count)))) { return Fail(lib, "Could not query smart album") }
+            errorBytes: Vec(u8)
+            if !TextInto(*matched, matched.root, "error", *errorBytes) { return Fail(lib, "Could not read smart album result") }
+            if errorBytes.count > 0 { return Fail(lib, TextView(VecSlice(errorBytes, 0, errorBytes.count))) }
+            count = Number(*matched, matched.root, "count")
+            child := JSON.JsonFirst(*matched, JSON.JsonMember(*matched, matched.root, "ids"))
+            while child >= 0 {
+                idBytes: Vec(u8)
+                if !JSON.JsonStringInto(*matched, child, *idBytes) || !VecPush(ids, BuilderFinish(idBytes)) { return Fail(lib, "Could not read smart album members") }
+                child = JSON.JsonNext(*matched, child)
+            }
+        }
+        if mode == "empty" && (archived || count != 0) { continue }
+        selectedBytes: Vec(u8)
+        if !TextInto(*album, album.root, "cover", *selectedBytes) { return Fail(lib, "Could not read album cover") }
+        selected := TextView(VecSlice(selectedBytes, 0, selectedBytes.count))
+        cover := ""
+        member: s64 = 0
+        while member < ids.count {
+            if ids[member] == selected { cover = selected; break }
+            member += 1
+        }
+        if cover == "" && ids.count > 0 { cover = ids[0] }
+        preview := LibraryFiles.Thumbnail(lib, cover)
+        thumbnail := ifx cover != "" && Tree.IsFile(preview) then preview else ""
+        node := JSON.JsonCopy(*output, *album, album.root)
+        unused JSON.JsonSet(*output, node, "count", JSON.JsonNewInteger(*output, count))
+        unused JSON.JsonSet(*output, node, "smart", JSON.JsonNewInteger(*output, ifx filter != "" then 1 else 0))
+        unused JSON.JsonSet(*output, node, "place", JSON.JsonNewInteger(*output, ifx place then 1 else 0))
+        unused JSON.JsonSet(*output, node, "thumbnail", JSON.JsonNewString(*output, thumbnail))
+        createdNode := JSON.JsonMember(*album, album.root, "created")
+        createdBytes: Vec(u8)
+        if !JSON.JsonNumberTextInto(*album, createdNode, *createdBytes) { return Fail(lib, "Could not read album creation time") }
+        created, createdValid := Float.ParseFloat64(TextView(VecSlice(createdBytes, 0, createdBytes.count)))
+        if !createdValid { return Fail(lib, "Could not read album creation time") }
+        // JSON floats retain their original spelling; SQLite supplies REAL.
+        idBytes: Vec(u8)
+        if !TextInto(*album, album.root, "id", *idBytes) { return Fail(lib, "Could not read album identity") }
+        entry: Entry = .{node = node, pinned = Number(*album, album.root, "pinned") != 0,
+            created = created, folded = folded, id = BuilderFinish(idBytes)}
+        VecPush(entries, entry)
+    }
+    index = 1
+    while index < entries.count {
+        entry := entries[index]
+        at := index
+        while at > 0 && Less(entry, entries[at - 1], order) { entries[at] = entries[at - 1]; at -= 1 }
+        entries[at] = entry
+        index += 1
+    }
+    index = 0
+    while index < entries.count { unused JSON.JsonAppend(*output, array, entries[index].node); index += 1 }
+    if SQL.SqliteExecText(lib.db, "RELEASE photos_album_list") != SQL.SQLITE_OK { return Fail(lib, "Could not read albums") }
+    released = true
+    return JSON.JsonWrite(*output, array, JSON.JsonCompactStyle(false, true))
+}

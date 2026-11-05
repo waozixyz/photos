@@ -30,18 +30,54 @@ Verify :: (path: string, identity: string, expected: s64) -> bool {
     }
     return offset == expected && TextFromCString(ChecksumText(checksum)) == identity
 }
+ParseSize :: (text: string, expected: *s64) -> bool {
+    if text.count < 1 || text.count > 19 { return false }
+    expected.* = 0
+    for byte: text {
+        if byte < 48 || byte > 57 { return false }
+        digit := cast(s64)byte-48
+        if expected.* > (9223372036854775807-digit)/10 { return false }
+        expected.* = expected.* * 10+digit
+    }
+    return true
+}
+// A callable import seam uses the same native SHA-256 reader under supervision.
+// NOFOLLOW and NONBLOCK avoid following a replaced link or blocking on a FIFO.
+DigestSource :: (source: string, expected: s64) -> s32 {
+    name: [4096]u8
+    if !CopyCString(source,name[:]) || PathIsLink(source) { return Failure("Choose a regular original source") }
+    descriptor := Open(*name[0],0xA0800)
+    if descriptor < 0 { return Failure("Cannot open the original source") }
+    original: FileHandle = .{descriptor,true}
+    defer { unused CloseFile(original) }
+    if FileSize(original) != expected { return Failure("Source changed while importing; retry later") }
+    checksum := ChecksumNew(2)
+    if checksum == null { return Failure("Cannot check the original identity") }
+    defer { ChecksumFree(checksum) }
+    chunk: [65536]u8; total: s64
+    while true {
+        count := ReadAt(original,chunk[:],total)
+        if count < 0 { return Failure("Cannot read the original; retry the import") }
+        if count == 0 { break }
+        if count > expected-total { return Failure("Source changed while importing; retry later") }
+        total += count
+        ChecksumUpdate(checksum,*chunk[0],cast(isize)count)
+    }
+    if total != expected { return Failure("Source changed while importing; retry later") }
+    print("{\"id\":\"%\"}\n",TextFromCString(ChecksumText(checksum)))
+    return 0
+}
 main :: (argc: s32, argv: **u8) -> s32 {
+    if argc == 4 && TextFromCString(argv[1]) == "--digest" {
+        expected: s64
+        if !ParseSize(TextFromCString(argv[3]),*expected) { return Failure("Choose a valid original byte size") }
+        return DigestSource(TextFromCString(argv[2]),expected)
+    }
     if argc != 6 { return Failure("Supply a source, destination, original identity, private temporary copy and byte size") }
     source := TextFromCString(argv[1]); destination := TextFromCString(argv[2]); identity := TextFromCString(argv[3])
     if !Identity(identity) || source == destination || source.count == 0 || destination.count == 0 || destination[0] != 47 { return Failure("Choose a valid original import") }
     sizeText := TextFromCString(argv[5]); expected: s64
-    if sizeText.count < 1 || sizeText.count > 19 { return Failure("Choose a valid original byte size") }
-    for byte: sizeText {
-        if byte < 48 || byte > 57 { return Failure("Choose a valid original byte size") }
-        digit := cast(s64)byte-48
-        if expected > (9223372036854775807-digit)/10 { return Failure("Choose a valid original byte size") }
-        expected = expected*10+digit
-    }
+    if !ParseSize(sizeText,*expected) { return Failure("Choose a valid original byte size") }
     if PathIsLink(source) || PathIsLink(destination) { return Failure("Original import refuses symbolic links") }
     if PathExists(destination) {
         if !Verify(destination,identity,expected) { return Failure("Existing original does not match its identity; it was preserved") }

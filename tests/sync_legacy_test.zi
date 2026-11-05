@@ -1,0 +1,244 @@
+using Legacy :: #import "sync_legacy";
+using Client :: #import "sync_client";
+Fixture :: #import "sync_client_test";
+Store :: #import "library_store";
+Types :: #import "service_types";
+Kit :: #import "kit";
+Test :: #import "sync_crypto_test";
+Tx :: #import "sync_transaction_test";
+Wire :: #import "sync_crypto";
+Entity :: #import "entity_crypto";
+Keys :: #import "daochi_client/keys";
+Native :: #import "daochi_client/crypto_native";
+SQL :: #import "sqlite/SQLite";
+Files :: #import "std/file";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+c :: #system_library "c";
+Sleep :: (microseconds: u32) -> s32 #foreign c "usleep";
+DuringDelete :: struct { database: string; change_manifest: bool }
+SaveDuringDelete :: (context: *void) -> bool {
+    change:=cast(*DuringDelete)context
+    db: *void
+    if SQL.SqliteOpenText(change.database,*db,SQL.SQLITE_OPEN_READWRITE)!=SQL.SQLITE_OK { return false }
+    defer { unused SQL.SqliteClose(db) }
+    unused SQL.SqliteBusyTimeout(db,50)
+    saved:=SQL.SqliteExecText(db,"INSERT OR REPLACE INTO settings VALUES('saved_while_deleting','true')")==SQL.SQLITE_OK
+    if change.change_manifest {
+        saved=saved && SQL.SqliteExecText(db,"UPDATE photos SET manifest=json_set(manifest,'$.unknown.concurrent',true) WHERE name='Retire'")==SQL.SQLITE_OK
+    }
+    unused Sleep(150000)
+    return saved
+}
+Plan :: struct { items: [16]Fixture.Step; count: s64 }
+Push :: (plan: *Plan, step: Fixture.Step) { plan.items[plan.count]=step; plan.count+=1 }
+LoginPlan :: (plan: *Plan,public: []u8,token: string) {
+    Push(plan,Fixture.StepFor("GET","/api/v1/node",200,Fixture.NodeJSON))
+    Push(plan,Fixture.StepFor("GET",Fixture.Build("/api/v1/sync/challenge?user_id=",Fixture.Hash(public)),200,Fixture.Build(Fixture.Build("{\"nonce\":\"",Fixture.Nonce),"\"}")))
+    Push(plan,Fixture.StepFor("POST","/api/v1/sync/login",200,Fixture.Build(Fixture.Build("{\"auth_token\":\"",token),"\"}")))
+    Push(plan,Fixture.StepFor("POST","/api/v1/account/devices",200,"{}",false,token))
+}
+Media :: "private.photos.v1.records.media";
+Albums :: "private.photos.v1.records.albums";
+Text :: (out: *Vec(u8)) -> string { return TextFromBytes(Wire.OutputBytes(out)) }
+Integer :: (lib: *Store.Library,sql: string) -> s64 {
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,sql,-1,*statement,null)!=SQL.SQLITE_OK { return -1 }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if SQL.SqliteStep(statement)!=SQL.SQLITE_ROW { return -1 }; return SQL.SqliteColumnInt64(statement,0)
+}
+Record :: (client: *Client.SyncClient,collection: string,id: string,value: string,out: *Vec(u8)) -> bool {
+    aad: Vec(u8); sealed: Vec(u8); cipher: Vec(u8); nonce: Vec(u8); envelope: Vec(u8); encoded: Vec(u8)
+    defer { Wire.ClearOutput(*sealed); Wire.ClearOutput(*cipher); Wire.ClearOutput(*nonce); Wire.ClearOutput(*envelope); Wire.ClearOutput(*encoded) }
+    BuilderPrint(*aad,"{\"account_id\":\"%\",\"app_id\":\"photos\",\"collection\":\"%\",\"id\":\"%\",\"schema\":\"%\"}",
+        TextUntilNul(client.legacy.account_id[:]),collection,id,ifx collection==Media then "photos.media.v1" else "photos.album.v1")
+    if !Wire.SyncEncrypt(client.key[:],Tx.Bytes(value),Wire.OutputBytes(*aad),client.device_key[:24],*sealed) ||
+        !Client.Encode(Wire.OutputBytes(*sealed),*cipher) || !Client.Encode(client.device_key[:24],*nonce) { return false }
+    BuilderPrint(*envelope,"{\"aad\":%,\"alg\":\"xchacha20poly1305\",\"ciphertext\":\"%\",\"key_id\":\"main\",\"nonce\":\"%\"}",Text(*aad),Text(*cipher),Text(*nonce))
+    if !Client.Encode(Wire.OutputBytes(*envelope),*encoded) { return false }
+    Wire.ClearOutput(out)
+    BuilderPrint(out,"{\"collection\":\"%\",\"id\":\"%\",\"key_id\":\"main\",\"nonce\":\"%\",\"ciphertext\":\"%\",\"unknown\":true}",collection,id,Text(*nonce),Text(*encoded))
+    return true
+}
+Photo :: (id: string,name: string) -> string {
+    out: Vec(u8)
+    BuilderPrint(*out,"{\"id\":\"%\",\"name\":\"%\",\"extension\":\".jpg\",\"kind\":\"photo\",\"size\":3,\"taken\":-1,\"width\":2,\"height\":-1,\"favorite\":true,\"hidden\":0,\"trashed\":0,\"caption\":\"café\\n\\u0000\",\"tags\":\"tag\",\"updated\":1,\"metadata\":{\"unknown\":1234567890123456789012345678901234567890},\"albums\":[\"Trips\"],\"edits\":{\"unknown\":{\"x\":true},\"auto_albums\":{\"old\":[]}},\"manifest\":{\"chunks\":[\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"],\"chunk_bytes\":8388608,\"preview\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"preview_id\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"entity\":{\"confirmed\":true},\"unknown\":true}}",id,name)
+    return BuilderFinish(out)
+}
+Page :: (records: string,complete: bool,version: s64 = 10,cursor: string = "null") -> string {
+    out: Vec(u8)
+    BuilderPrint(*out,"{\"status\":\"ok\",\"server_version\":%,\"changes_complete\":%,\"record_cursor\":%,\"changes\":{\"encrypted_records\":%}}",version,ifx complete then "true" else "false",cursor,records)
+    return BuilderFinish(out)
+}
+List :: (one: string,two: string = "") -> string {
+    out: Vec(u8); BuilderPrint(*out,"[%",one)
+    if two!="" { BuilderPrint(*out,",%",two) }; BuilderPrint(*out,"]"); return BuilderFinish(out)
+}
+Run :: (client: *Client.SyncClient,config: *Types.Config,public: []u8,legacyPublic: []u8,seed: []u8) -> s32 {
+    lib:=client.library; id:=Fixture.Hash(Tx.Bytes("photo")); albumId:=Fixture.Hash(Tx.Bytes("album"))
+    photo: Vec(u8); album: Vec(u8); opened: Vec(u8)
+    defer { Wire.ClearOutput(*photo); Wire.ClearOutput(*album); Wire.ClearOutput(*opened) }
+    if !Record(client,Media,id,Photo(id,"Earlier"),*photo) { return 1 }
+    albumValue: Vec(u8); BuilderPrint(*albumValue,"{\"id\":\"%\",\"name\":\"Trips\",\"description\":\"日本語\\n\\u0000\",\"pinned\":true,\"archived\":false,\"deleted\":0}",albumId)
+    if !Record(client,Albums,albumId,Text(*albumValue),*album) { return 2 }
+    kind,recordError:=Legacy.LegacyRecord(client,Wire.OutputBytes(*photo),*opened)
+    if !Kit.Expect(kind==1 && recordError=="" && Text(*opened)==Photo(id,"Earlier"),"released legacy encrypted envelope opens with exact AAD/key") { return 3 }
+    for mode: 0..2 {
+        altered: Vec(u8); unused VecResize(altered,photo.count)
+        for i: 0..photo.count-1 { altered[i]=photo[i] }
+        if mode==0 {
+            at:=Fixture.Find(Text(*altered),id)
+            if at<0 { return 25 }; for i: 0..63 { altered[at+i]=101 }
+        } else if mode==1 {
+            at:=Fixture.Find(Text(*altered),"\"ciphertext\":\"")
+            if at<0 { return 26 }; altered[at+14]=33
+        } else {
+            if !Record(client,Media,id,Photo(Fixture.Pin,"wrong ID"),*altered) { return 27 }
+        }
+        kind,recordError=Legacy.LegacyRecord(client,Wire.OutputBytes(*altered),*opened)
+        if !Kit.Expect(recordError!="" && Test.Wiped(*opened),"moved AAD/tampered envelope/decrypted ID mismatch wipe record output") { return 28 }
+    }
+    // A later bad record must roll back the whole page, including earlier
+    // valid album/photo staging and its checkpoint.
+    malformed:="{\"collection\":\"other\",\"id\":\"bad\"}"
+    badPage:=Page(List(Text(*album),malformed),true)
+    count,error:=Legacy.ApplyLegacyPage(client,Tx.Bytes(badPage),"0","null")
+    if !Kit.Expect(error!="" && count==0 && Integer(lib,"SELECT count(*) FROM photos")==0 && Integer(lib,"SELECT count(*) FROM albums")==0 && Integer(lib,"SELECT count(*) FROM settings WHERE key IN ('legacy_server_version','legacy_record_cursor')")==0,"malformed page retains all records and checkpoint") { return 4 }
+    wrongId: Vec(u8); BuilderPrint(*wrongId,"{\"collection\":\"%\",\"id\":\"%\",\"deleted_at\":1}",Media,id)
+    kind,recordError=Legacy.LegacyRecord(client,Wire.OutputBytes(*wrongId),*opened)
+    if !Kit.Expect(kind==0 && recordError=="" && Test.Wiped(*opened),"old tombstone requires no decryption and changes no local record") { return 5 }
+    cursor: Vec(u8); BuilderPrint(*cursor,"{\"version\":2,\"collection\":\"%\",\"id\":\"%\",\"unknown\":{\"v\":true}}",Media,id)
+    first:=Page(List(Text(*album),Text(*photo)),false,10,Text(*cursor))
+    older: Vec(u8)
+    if !Record(client,Media,id,Photo(id,"Do not replace"),*older) { return 6 }
+    second:=Page(List(Text(*older)),true)
+    steps: Plan; LoginPlan(*steps,legacyPublic,"legacy")
+    Push(*steps,Fixture.StepFor("POST","/api/v1/sync",200,first,true,"legacy"))
+    Push(*steps,Fixture.StepFor("POST","/api/v1/sync",200,second,true,"legacy"))
+    server:=Fixture.Start(steps.items[:steps.count],legacyPublic,seed); Fixture.UseServer(client,server,true)
+    count,error=Legacy.LegacyExchange(client)
+    if !Kit.Expect(error=="" && count==2 && Fixture.Finish(server) && Integer(lib,"SELECT count(*) FROM photos WHERE name='Earlier' AND dirty=0 AND height=-1")==1 &&
+        Integer(lib,"SELECT count(*) FROM albums WHERE name='Trips' AND pinned=1 AND dirty=1")==1 && Integer(lib,"SELECT value='10' FROM settings WHERE key='legacy_server_version'")==1 &&
+        Integer(lib,"SELECT value='null' FROM settings WHERE key='legacy_record_cursor'")==1,"native paged legacy exchange preserves existing photos and atomically advances checkpoint") { return 7 }
+    if !Kit.Expect(Integer(lib,"SELECT json_type(metadata,'$.unknown')='integer' AND instr(metadata,'1234567890123456789012345678901234567890')>0 AND json_type(edits,'$.unknown')='object' AND json_type(edits,'$.auto_albums') IS NULL AND json_type(manifest,'$.entity') IS NULL AND json_type(manifest,'$.chunks')='array' AND json_extract(manifest,'$.preview')='cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' FROM photos")==1,"unknown metadata/edits preserved; only old content references migrate") { return 8 }
+    count,error=Legacy.ApplyLegacyPage(client,Tx.Bytes(second),"0","null")
+    if !Kit.Expect(error!="" && Integer(lib,"SELECT value='10' FROM settings WHERE key='legacy_server_version'")==1,"stale request checkpoint never acknowledged") { return 9 }
+    emptyInvalid:=Page("[]",false,11,Text(*cursor))
+    count,error=Legacy.ApplyLegacyPage(client,Tx.Bytes(emptyInvalid),"10","null")
+    if !Kit.Expect(error!="","empty continuation page rejected") { return 10 }
+    incomplete: Vec(u8); incompleteValue: Vec(u8)
+    BuilderPrint(*incompleteValue,"{\"id\":\"%\",\"name\":\"Incomplete\"}",id)
+    if !Record(client,Media,id,Text(*incompleteValue),*incomplete) { return 29 }
+    count,error=Legacy.ApplyLegacyPage(client,Tx.Bytes(Page(List(Text(*incomplete)),true,11)),"10","null")
+    if !Kit.Expect(error!="" && Integer(lib,"SELECT value='10' FROM settings WHERE key='legacy_server_version'")==1 && Integer(lib,"SELECT count(*) FROM photos WHERE name='Earlier'")==1,"malformed decrypted photo retains current records/cursor") { return 30 }
+    // A caller transaction is preserved when the writer cannot start one.
+    if SQL.SqliteExecText(lib.db,"BEGIN IMMEDIATE; INSERT INTO settings VALUES('outer','true')")!=SQL.SQLITE_OK { return 11 }
+    count,error=Legacy.ApplyLegacyPage(client,Tx.Bytes(Page("[]",true,11)),"10","null")
+    if !Kit.Expect(error!="" && Integer(lib,"SELECT count(*) FROM settings WHERE key='outer'")==1 && SQL.SqliteExecText(lib.db,"ROLLBACK")==SQL.SQLITE_OK,"caller transaction is not rolled back") { return 12 }
+    // Switching to the shared owner account keeps earlier checkpoints exact.
+    if SQL.SqliteExecText(lib.db,"INSERT INTO settings VALUES('server_version','5'),('record_cursor','{\"unknown\":true}'); UPDATE albums SET dirty=0")!=SQL.SQLITE_OK { return 13 }
+    if !Kit.Expect(Legacy.SwitchAccount(client)=="" && Integer(lib,"SELECT count(*) FROM settings WHERE key IN ('server_version','record_cursor')")==0 &&
+        Integer(lib,"SELECT value='10' FROM settings WHERE key='legacy_server_version'")==1 && Integer(lib,"SELECT value='null' FROM settings WHERE key='legacy_record_cursor'")==1 && Integer(lib,"SELECT dirty FROM albums")==1,"account switch preserves existing old checkpoints and queues albums") { return 14 }
+    if !Store.SetSetting(lib,"server_version","7") || Legacy.SwitchAccount(client)!="" || Integer(lib,"SELECT value='7' FROM settings WHERE key='server_version'")!=1 { return 15 }
+
+    // One synthetic original and preview have current entity chunks. Neither
+    // local presence nor a previous successful Verify may authorize deletion.
+    original:="original"; preview:="preview"; contentId:=Fixture.Hash(Tx.Bytes(original)); previewId:=Fixture.Hash(Tx.Bytes(preview))
+    sealedOriginal: Vec(u8); sealedPreview: Vec(u8)
+    defer { Wire.ClearOutput(*sealedOriginal); Wire.ClearOutput(*sealedPreview) }
+    if !Entity.EntitySealChunk(client.owner.private_key[:],"photos",contentId,0,Tx.Bytes(original),*sealedOriginal) ||
+        !Entity.EntitySealChunk(client.owner.private_key[:],"photos",previewId,0,Tx.Bytes(preview),*sealedPreview) { return 16 }
+    originalHash:=Fixture.Hash(Wire.OutputBytes(*sealedOriginal)); previewHash:=Fixture.Hash(Wire.OutputBytes(*sealedPreview))
+    entity: Vec(u8)
+    BuilderPrint(*entity,"{\"confirmed\":true,\"blobs\":[{\"address\":\"%\",\"size\":%}],\"preview\":{\"hash\":\"%\",\"size\":%,\"blobs\":[{\"address\":\"%\",\"size\":%}]}}",originalHash,sealedOriginal.count,previewId,preview.count,previewHash,sealedPreview.count)
+    manifest: Vec(u8)
+    BuilderPrint(*manifest,"{\"entity\":%,\"chunks\":[\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"],\"chunk_bytes\":8388608,\"preview\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"unknown\":{\"keep\":true}}",Text(*entity))
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,"INSERT INTO photos(id,name,extension,kind,size,taken,metadata,albums,updated,manifest) VALUES(?,'Retire','.jpg','photo',?,0,'{}','[]',1,?)",-1,*statement,null)!=SQL.SQLITE_OK { return 17 }
+    inserted:=SQL.SqliteBindTextString(statement,1,contentId,-1)==SQL.SQLITE_OK && SQL.SqliteBindInt64(statement,2,original.count)==SQL.SQLITE_OK && SQL.SqliteBindTextString(statement,3,Text(*manifest),-1)==SQL.SQLITE_OK && SQL.SqliteStep(statement)==SQL.SQLITE_DONE
+    unused SQL.SqliteFinalize(statement); if !inserted { return 18 }
+    count,error=Legacy.Retire(client,config)
+    if !Kit.Expect(count==0 && error=="","retirement disabled without explicit config flag") { return 19 }
+    config.retire_legacy_chunks=true
+    // First fail preview authentication. The old node is closed: a delete
+    // attempt would fail, and the shared verification error must be retained.
+    ownerSteps: Plan; LoginPlan(*ownerSteps,public,"owner")
+    Push(*ownerSteps,Fixture.StepFor("GET",Fixture.Build("/api/v1/blobs/entity/",originalHash),200,Text(*sealedOriginal),true,"owner"))
+    sealedPreview[sealedPreview.count-1]^=1
+    Push(*ownerSteps,Fixture.StepFor("GET",Fixture.Build("/api/v1/blobs/entity/",previewHash),200,Text(*sealedPreview),true,"owner"))
+    ownerServer:=Fixture.Start(ownerSteps.items[:ownerSteps.count],public,seed); Fixture.UseServer(client,ownerServer)
+    count,error=Legacy.Retire(client,config)
+    sealedPreview[sealedPreview.count-1]^=1
+    if !Kit.Expect(count==0 && error=="Encrypted original failed its integrity check" && Fixture.Finish(ownerServer) && Integer(lib,"SELECT count(*) FROM photos WHERE name='Retire' AND json_type(manifest,'$.chunks')='array'")==1,"failed fresh preview verification keeps earlier chunks/manifest") { return 20 }
+    for attempt: 0..2 {
+        ownerSteps.count=0
+        Push(*ownerSteps,Fixture.StepFor("GET",Fixture.Build("/api/v1/blobs/entity/",originalHash),200,Text(*sealedOriginal),true,"owner"))
+        Push(*ownerSteps,Fixture.StepFor("GET",Fixture.Build("/api/v1/blobs/entity/",previewHash),200,Text(*sealedPreview),true,"owner"))
+        ownerServer=Fixture.Start(ownerSteps.items[:ownerSteps.count],public,seed); Fixture.UseServer(client,ownerServer)
+        oldSteps: [1]Fixture.Step; oldSteps[0]=Fixture.StepFor("DELETE","/api/v1/blobs/photos/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",ifx attempt==0 then 500 else 204,"",true,"legacy")
+        change: DuringDelete; change.database=Kit.Join(lib.root,"library.sqlite"); change.change_manifest=attempt==1
+        oldSteps[0].before_reply=SaveDuringDelete; oldSteps[0].context=cast(*void)*change
+        oldServer:=Fixture.Start(oldSteps[:],legacyPublic,seed); Fixture.UseServer(client,oldServer,true)
+        count,error=Legacy.Retire(client,config)
+        if !Kit.Expect(Fixture.Finish(ownerServer) && Fixture.Finish(oldServer) &&
+            (ifx attempt==0 then count==0 && error!="" else ifx attempt==1 then count==0 && error=="Photo changed during retirement; the current manifest was retained" else count==1 && error=="") &&
+            Integer(lib,"SELECT value='true' FROM settings WHERE key='saved_while_deleting'")==1,"delayed DELETE permits local saves; concurrent manifest revision is retained") { return 21 }
+    }
+    if !Kit.Expect(Integer(lib,"SELECT json_type(manifest,'$.chunks') IS NULL AND json_type(manifest,'$.chunk_bytes') IS NULL AND json_type(manifest,'$.unknown')='object' AND json_extract(manifest,'$.unknown.concurrent')=1 AND json_type(manifest,'$.preview')='text' FROM photos WHERE name='Retire'")==1,"retirement preserves old preview/unknown/concurrent manifest fields") { return 22 }
+    // LegacyBlocks feeds the bounded C33 source API without materializing an
+    // original on disk, and preserves its content hash across account migration.
+    oldAAD: Vec(u8); oldBlob: Vec(u8); newBlob: Vec(u8)
+    defer { Wire.ClearOutput(*oldBlob); Wire.ClearOutput(*newBlob) }
+    BuilderPrint(*oldAAD,"{\"account_id\":\"%\",\"app_id\":\"photos\",\"id\":\"%\",\"part\":\"chunk:0\",\"schema\":\"photos.media.v1\"}",TextUntilNul(client.legacy.account_id[:]),contentId)
+    if !Wire.SyncSeal(client.key[:],Tx.Bytes(original),Wire.OutputBytes(*oldAAD),true,*oldBlob) || !Entity.EntitySealChunk(client.owner.private_key[:],"photos",contentId,0,Tx.Bytes(original),*newBlob) { return 23 }
+    oldHash:=Fixture.Hash(Wire.OutputBytes(*oldBlob)); newHash:=Fixture.Hash(Wire.OutputBytes(*newBlob))
+    oldSteps: [1]Fixture.Step; oldSteps[0]=Fixture.StepFor("GET",Fixture.Build("/api/v1/blobs/photos/",oldHash),200,Text(*oldBlob),true,"legacy")
+    oldServer:=Fixture.Start(oldSteps[:],legacyPublic,seed); Fixture.UseServer(client,oldServer,true)
+    ownerSteps.count=0
+    Push(*ownerSteps,Fixture.StepFor("HEAD",Fixture.Build("/api/v1/blobs/entity/",newHash),404,"",true,"owner"))
+    put:=Fixture.StepFor("PUT",Fixture.Build("/api/v1/blobs/entity/",newHash),201,"",true,"owner"); put.body_hash=newHash; Push(*ownerSteps,put)
+    ownerServer=Fixture.Start(ownerSteps.items[:ownerSteps.count],public,seed); Fixture.UseServer(client,ownerServer)
+    sourceState: Legacy.LegacyBlockSource; defer { Legacy.LegacyBlocksClose(*sourceState) }
+    oldManifest: Vec(u8); BuilderPrint(*oldManifest,"{\"chunks\":[\"%\"]}",oldHash)
+    source,sourceError:=Legacy.LegacyBlocks(client,contentId,Text(*oldManifest),*sourceState)
+    migrated: Client.BlobList
+    bytes,putError:=Client.PutContent(client,contentId,source,*migrated)
+    if !Kit.Expect(sourceError=="" && putError=="" && bytes==original.count && migrated.items.count==1 && Fixture.Finish(oldServer) && Fixture.Finish(ownerServer),"legacy source streams directly into owner entity chunks") { return 24 }
+    Legacy.LegacyBlocksClose(*sourceState)
+    if !Kit.Expect(sourceState.client==null && sourceState.photo_id=="" && sourceState.hashes.count==0 && sourceState.hashes.capacity==0,"source close clears owned metadata and borrowed references") { return 25 }
+    Legacy.LegacyBlocksClose(*sourceState)
+    return 0
+}
+
+#program_export
+main :: () -> s32 {
+    root:=Kit.TempDirectory("sync-legacy")
+    if root=="" { return 100 }; defer { unused Kit.Cleanup(root) }
+    public: Vec(u8); private: Vec(u8); seed: Vec(u8)
+    defer { Wire.ClearOutput(*private); Wire.ClearOutput(*seed) }
+    if !Test.Fixture("account-public.bin",*public) || !Test.Fixture("account-secret.bin",*private) || !Test.Fixture("key.bin",*seed) { return 101 }
+    keys: Keys.AccountKeys; legacyPublic: [1312]u8
+    defer { Keys.SecureWipe(cast(*u8)*keys,size_of(Keys.AccountKeys)) }
+    if Keys.CreateAccountKeys(*keys)==0 || !Tx.Unhex(TextUntilNul(keys.public_key_hex[:]),legacyPublic[:]) { return 102 }
+    libraryRoot:=Kit.Library(Kit.Join(root,"library")); lib,error:=Store.Open(libraryRoot)
+    if lib==null || error!="" { return 103 }; defer { Store.Close(lib) }
+    config: Types.Config; config.account_database=Kit.Join(root,"owner.sqlite")
+    if !Fixture.AccountDatabase(config.account_database,Wire.OutputBytes(*public),Wire.OutputBytes(*private)) { return 104 }
+    Fixture.Configure(*config,1)
+    identity: Vec(u8); device: Vec(u8)
+    defer { Wire.ClearOutput(*identity); Wire.ClearOutput(*device) }
+    BuilderPrint(*identity,"{\"content_key\":\"%\",\"public\":\"%\",\"private\":\"%\",\"unknown\":true}",Tx.Hex(Wire.OutputBytes(*seed)),TextUntilNul(keys.public_key_hex[:]),TextUntilNul(keys.private_key_hex[:]))
+    BuilderPrint(*device,"{\"key\":\"%\",\"client\":\"photos-existing-device\"}",Tx.Hex(Wire.OutputBytes(*seed)))
+    identityPath:=Kit.Join(libraryRoot,"private/identity.json"); devicePath:=Kit.Join(libraryRoot,"private/device.json")
+    if !Files.WriteEntireFile(identityPath,Text(*identity)) || !Files.WriteEntireFile(devicePath,Text(*device)) { return 105 }
+    client,openError:=Client.ClientOpen(lib,*config)
+    if client==null || openError!="" { return 106 }; defer { Client.ClientClose(client) }
+    code:=Run(client,*config,Wire.OutputBytes(*public),legacyPublic[:],Wire.OutputBytes(*seed))
+    after,read:=Files.ReadEntireFile(identityPath); deviceAfter,deviceRead:=Files.ReadEntireFile(devicePath)
+    if code==0 && !Kit.Expect(read && deviceRead && after==Text(*identity) && deviceAfter==Text(*device),"legacy migration preserves identity and device files") { return 107 }
+    if code==0 { print("sync_legacy: local tests passed\n") }
+    return code
+}

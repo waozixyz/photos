@@ -1,0 +1,125 @@
+Editor :: #import "library_edit";
+Albums :: #import "library_albums";
+Access :: #import "access_registry";
+Vault :: #import "vault";
+Store :: #import "library_store";
+Kit :: #import "kit";
+SQL :: #import "sqlite/SQLite";
+Tree :: #import "std/file_tree_linux";
+#import "std/byte_text_linux"
+#import "std/json_scan"
+#import "std/text_buffer"
+
+Id :: "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a";
+Peer :: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+Missing :: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+
+Context :: struct {
+    db: *void
+    calls: s32
+    releases: s32
+    selected: s64
+    hidden: bool
+    deny: bool
+    short: bool
+    transaction: bool
+    released_after_transaction: bool
+}
+Authorize :: (opaque: *void, ids: []string, hidden: bool) -> Editor.Authorization {
+    context := cast(*Context)opaque
+    context.calls += 1; context.selected = ids.count; context.hidden = hidden
+    context.transaction = !SQL.SqliteGetAutocommit(context.db)
+    if context.deny { return .{error="Hidden is locked; authenticate before changing hidden photos"} }
+    return .{until=Editor.Monotonic()+(ifx context.short then 0.001 else 5.0)}
+}
+Release :: (opaque: *void) {
+    context := cast(*Context)opaque
+    context.releases += 1
+    context.released_after_transaction = SQL.SqliteGetAutocommit(context.db)
+}
+Number :: (db: *void, sql: string) -> s64 {
+    statement: *void
+    if SQL.SqlitePrepareText(db, sql, -1, *statement, null) != SQL.SQLITE_OK { return -1 }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if SQL.SqliteStep(statement) != SQL.SQLITE_ROW { return -1 }
+    return SQL.SqliteColumnInt64(statement, 0)
+}
+Saved :: (response: string, expected: s64) -> bool {
+    count := ReadNumber(response, FieldAt(response, 0, "updated"))
+    return count.valid && count.value == cast(float64)expected && FieldAt(response, 0, "error") < 0
+}
+Failed :: (response: string) -> bool { return FieldAt(response, 0, "error") >= 0 }
+
+Cases :: (lib: *Store.Library) -> bool {
+    context: Context = .{db=lib.db}
+    ids: [2]string = .[Id, Missing]
+    response := Albums.EditMany(lib, ids[:1], "favorite_set", "0", Authorize, cast(*void)*context, Release)
+    if !Saved(response, 1) || Number(lib.db, "SELECT favorite FROM photos") != 0 ||
+        context.calls != 1 || context.releases != 1 || context.hidden || !context.transaction || !context.released_after_transaction { return false }
+    // A missing selection fails before authorization; no partial batch mutates.
+    response = Albums.EditMany(lib, ids[:], "favorite_set", "1", Authorize, cast(*void)*context, Release)
+    if !Failed(response) || context.calls != 1 || Number(lib.db, "SELECT favorite FROM photos") != 0 || !SQL.SqliteGetAutocommit(lib.db) { return false }
+    if SQL.SqliteExecText(lib.db, "BEGIN; INSERT INTO settings VALUES('caller_edit','true')") != SQL.SQLITE_OK { return false }
+    response = Albums.EditMany(lib, ids[:1], "favorite_set", "1", Authorize, cast(*void)*context, Release)
+    if !Failed(response) || SQL.SqliteGetAutocommit(lib.db) || context.calls != 1 { return false }
+    unused SQL.SqliteExecText(lib.db, "ROLLBACK")
+    if Store.Setting(lib, "caller_edit") != "" { return false }
+    // Real reciprocal Live Photo components are selected in the same snapshot.
+    if SQL.SqliteExecText(lib.db, "INSERT INTO photos SELECT 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','peer.mp4','.mp4','video',size,taken,width,height,'{}',albums,0,0,0,0,'','',updated,1,'{}','{}' FROM photos LIMIT 1; UPDATE photos SET metadata=json_object('photosLive',json_object('video','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')) WHERE kind='photo'; UPDATE photos SET metadata=json_object('photosLive',json_object('photo','485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a')) WHERE kind='video'; UPDATE photos SET hidden=1") != SQL.SQLITE_OK { return false }
+    context.deny = true
+    response = Albums.EditMany(lib, ids[:1], "favorite_set", "1", Authorize, cast(*void)*context, Release)
+    if !Failed(response) || context.selected != 2 || !context.hidden || !context.released_after_transaction ||
+        context.releases != 2 || Number(lib.db, "SELECT sum(favorite) FROM photos") != 0 { return false }
+    context.deny = false
+    response = Albums.EditMany(lib, ids[:1], "caption", "Captión 日本語\n\0text", Authorize, cast(*void)*context, Release)
+    if !Saved(response, 2) || Number(lib.db, "SELECT count(*) FROM photos WHERE hex(caption)='4361707469C3B36E20E697A5E69CACE8AA9E0A0074657874'") != 2 { return false }
+    // Expiry occurs during actual SQLite work, after authorization succeeds.
+    if SQL.SqliteExecText(lib.db, "CREATE TRIGGER slow_edit AFTER UPDATE OF favorite ON photos BEGIN SELECT sum(x) FROM (WITH RECURSIVE work(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM work WHERE x<200000) SELECT x FROM work); END") != SQL.SQLITE_OK { return false }
+    context.short = true
+    response = Albums.EditMany(lib, ids[:1], "favorite_set", "1", Authorize, cast(*void)*context, Release)
+    if !Failed(response) || Number(lib.db, "SELECT sum(favorite) FROM photos") != 0 || !context.released_after_transaction { return false }
+    unused SQL.SqliteExecText(lib.db, "DROP TRIGGER slow_edit")
+    context.short = false
+    // Failure on the second component rolls back the first before releasing.
+    if SQL.SqliteExecText(lib.db, "CREATE TRIGGER fail_second BEFORE UPDATE OF favorite ON photos WHEN old.kind='video' BEGIN SELECT RAISE(ABORT,'second component denied'); END") != SQL.SQLITE_OK { return false }
+    response = Albums.EditMany(lib, ids[:1], "favorite_set", "1", Authorize, cast(*void)*context, Release)
+    if !Failed(response) || Number(lib.db, "SELECT sum(favorite) FROM photos") != 0 || !context.released_after_transaction { return false }
+    unused SQL.SqliteExecText(lib.db, "DROP TRIGGER fail_second")
+    response = Albums.EditMany(lib, ids[:1], "favorite_set", "1", Authorize, cast(*void)*context, Release)
+    if !Saved(response, 2) || Number(lib.db, "SELECT sum(favorite) FROM photos") != 2 || !context.released_after_transaction { return false }
+    // The public core never silently authorizes an edit without its provider.
+    response = Albums.EditMany(lib, ids[:1], "favorite_set", "0")
+    if !Failed(response) || Number(lib.db, "SELECT sum(favorite) FROM photos") != 2 || !SQL.SqliteGetAutocommit(lib.db) { return false }
+    // The service adapter uses real root-scoped access tokens, not an allow stub.
+    registry: Access.Registry
+    if !Access.Initialize(*registry) { return false }
+    defer { Access.Close(*registry) }
+    response = Albums.EditManyAuthorized(lib, ids[:1], "favorite_set", "0", "", *registry)
+    if !Failed(response) || Number(lib.db, "SELECT sum(favorite) FROM photos") != 2 { return false }
+    token, error := Access.Grant(lib.root, Access.HIDDEN, "", *registry)
+    if error != "" { return false }
+    response = Albums.EditManyAuthorized(lib, ids[:1], "favorite_set", "0", token, *registry)
+    if !Saved(response, 2) || Number(lib.db, "SELECT sum(favorite) FROM photos") != 0 { return false }
+    Vault.Lock(lib, token, *registry)
+    response = Albums.EditManyAuthorized(lib, ids[:1], "favorite_set", "1", token, *registry)
+    return Failed(response) && Number(lib.db, "SELECT sum(favorite) FROM photos") == 0 && SQL.SqliteGetAutocommit(lib.db)
+}
+
+#program_export
+main :: () -> s32 {
+    root := Kit.TempDirectory("library-edit")
+    if root == "" { return 1 }
+    defer { unused Kit.Cleanup(root) }
+    db: *void
+    if SQL.SqliteOpenText(Tree.JoinPath(root,"library.sqlite"),*db,SQL.SQLITE_OPEN_READWRITE|SQL.SQLITE_OPEN_CREATE) != SQL.SQLITE_OK { return 2 }
+    loaded := Kit.LoadSql(db,"tests/fixtures/golden/library-v0.1.59.sql")
+    unused SQL.SqliteClose(db)
+    if !loaded { return 3 }
+    lib, error := Store.Open(root)
+    unused error
+    if lib == null { return 4 }
+    defer { Store.Close(lib) }
+    if !Kit.Expect(Cases(lib), "in-process photo writer snapshot, Live Photo expansion, denial, expiry and rollback guard ordering") { return 5 }
+    print("Photos photo writer: snapshot/authorization/Live Photo/expiry/rollback cases passed\n")
+    return 0
+}

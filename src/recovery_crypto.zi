@@ -3,8 +3,41 @@
 Wire :: #import "sync_crypto";
 UTF8 :: #import "std/utf8";
 #import "std/byte_text_linux"
+using Vectors :: #import "std/vec";
 c :: #system_library "c";
 Native :: #import "daochi_client/crypto_native";
+
+// The recovery file layer owns PHOTOS-RECOVERY\x01 and identity JSON. This is
+// exactly its existing salt[16] + nonce[24] + ciphertext/tag payload.
+RecoveryCrypt :: (password: []u8, data: []u8, seal: bool, out: *Vec(u8)) -> bool {
+    Wire.ClearOutput(out)
+    if password.count < 12 || password.count > 1024 || !UTF8.Valid(TextFromBytes(password)) { return false }
+    characters: s64
+    for byte: password {
+        if byte == 0 { return false }
+        if (byte & 192) != 128 { characters += 1 }
+    }
+    if characters < 12 || (seal && (data.count < 1 || data.count > 65536)) ||
+        (!seal && (data.count < 57 || data.count > 65592)) || !Native.Initialize() { return false }
+    key: [32]u8; header: [40]u8
+    defer { Native.Clear(key[:]); Native.Clear(header[:]) }
+    if seal {
+        if !Native.RandomBytes(header[:]) { return false }
+    } else {
+        for i: 0..39 { header[i] = data[i] }
+    }
+    // Argon2id v1.3, three passes, 64 MiB; never read work factors from data.
+    if !Native.DerivePassword(password, header[:16], key[:], 3, 67108864) { return false }
+    aad: [18]u8 = .{112,104,111,116,111,115,45,114,101,99,111,118,101,114,121,45,118,49}
+    size := ifx seal then data.count+56 else data.count-56
+    if !Wire.PrepareOutput(out, size) { return false }
+    result := Wire.OutputBytes(out)
+    if seal {
+        for i: 0..39 { result[i] = header[i] }
+        if Native.Seal(data, aad[:], key[:], header[16:], result[40:]) == data.count+16 { return true }
+    } else if Native.Open(data[40:], aad[:], key[:], header[16:], result) == size { return true }
+    Wire.ClearOutput(out); return false
+}
 Allocate :: (size: usize) -> *void #foreign c "malloc";
 Read :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign c "read";
 main :: () -> s32 {

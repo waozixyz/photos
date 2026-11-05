@@ -1,0 +1,286 @@
+Lifetime :: #import "access_lifetime";
+Guest :: #import "guest";
+Gallery :: #import "gallery_query";
+FilesPolicy :: #import "library_files";
+Store :: #import "library_store";
+Vault :: #import "vault";
+App :: #import "app_lock";
+Access :: #import "access_registry";
+Kit :: #import "kit";
+SQL :: #import "sqlite/SQLite";
+JSON :: #import "std/json_document";
+Crypto :: #import "crypto/sha256";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+#import "std/byte_text_linux"
+#import "std/c_string"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+c :: #system_library "c";
+Link :: (target: *u8, path: *u8) -> s32 #foreign c "symlink";
+Authorizer :: #type (context: *void, action: s32, first: *u8, second: *u8, database: *u8, trigger: *u8) -> s32 #c_call;
+SetAuthorizer :: (database: *void, callback: Authorizer, context: *void) -> s32 #foreign c "sqlite3_set_authorizer";
+denials: s32;
+Authorize :: (context: *void, action: s32, first: *u8, second: *u8, database: *u8, trigger: *u8) -> s32 {
+    if action == 18 && first != null && TextFromCString(first) == "guest_selection" { denials += 1; return 1 }
+    return 0
+}
+Allow :: (context: *void, action: s32, first: *u8, second: *u8, database: *u8, trigger: *u8) -> s32 { return 0 }
+Bytes :: (text: string) -> []u8 { descriptor := cast(*TextDescriptor)*text; return BytesFromPointer(descriptor.data,cast(u64)text.count) }
+Text :: (document: *JSON.JsonDocument, node: s32, key: string) -> string { return JSON.JsonString(document,JSON.JsonMember(document,node,key)) }
+Number :: (document: *JSON.JsonDocument, key: string) -> s64 { value,ok := JSON.JsonInteger(document,JSON.JsonMember(document,document.root,key)); return ifx ok then value else -1 }
+Execute :: (lib: *Store.Library, sql: string) -> bool { return SQL.SqliteExecText(lib.db,sql) == SQL.SQLITE_OK }
+Change :: (lib: *Store.Library, id: string, fields: string) -> bool {
+    sql: Vec(u8); BuilderPrint(*sql,"UPDATE photos SET % WHERE id='%'",fields,id); return Execute(lib,BuilderFinish(sql))
+}
+Scalar :: (lib: *Store.Library, query: string) -> s64 {
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,query,-1,*statement,null) != SQL.SQLITE_OK { return -1 }
+    defer { unused SQL.SqliteFinalize(statement) }
+    return ifx SQL.SqliteStep(statement) == SQL.SQLITE_ROW then SQL.SqliteColumnInt64(statement,0) else -1
+}
+StorageCases :: (lib: *Store.Library, scope: string) -> bool {
+    request: Vec(u8); BuilderPrint(*request,"{\"guest_scope\":%}",scope)
+    text := BuilderFinish(request)
+    for mode: 0..2 {
+        policy: Vec(u8); BuilderPrint(*policy,"PRAGMA temp_store=%",mode)
+        if !Execute(lib,BuilderFinish(policy)) || !Execute(lib,"CREATE TEMP TABLE caller_keep(value TEXT); INSERT INTO caller_keep VALUES('caller sentinel')") { return false }
+        result := Gallery.Page(lib,text)
+        if (mode == 2 && lib.error.count > 0) || (mode != 2 && lib.error != "Cannot read Guest view selection") ||
+            Scalar(lib,"SELECT count(*) FROM caller_keep WHERE value='caller sentinel'") != 1 || Scalar(lib,"PRAGMA temp_store") != mode { return false }
+        if !Execute(lib,"BEGIN IMMEDIATE; INSERT INTO settings VALUES('guest_outer_fixture','42')") { return false }
+        result = Gallery.Page(lib,text)
+        if (mode == 2 && lib.error.count > 0) || (mode != 2 && lib.error != "Cannot read Guest view selection") ||
+            Scalar(lib,"SELECT count(*) FROM settings WHERE key='guest_outer_fixture'") != 1 || SQL.SqliteGetAutocommit(lib.db) { unused Execute(lib,"ROLLBACK"); return false }
+        if !Execute(lib,"ROLLBACK") || Scalar(lib,"SELECT count(*) FROM settings WHERE key='guest_outer_fixture'") != 0 { return false }
+        // A caller's colliding table has a deliberately different schema.
+        if !Execute(lib,"CREATE TEMP TABLE guest_selection(sentinel TEXT); INSERT INTO guest_selection VALUES('private caller value')") { return false }
+        result = Gallery.Page(lib,text)
+        if lib.error != "Cannot read Guest view selection" || Scalar(lib,"SELECT count(*) FROM guest_selection WHERE sentinel='private caller value'") != 1 ||
+            Scalar(lib,"SELECT count(*) FROM caller_keep") != 1 || Scalar(lib,"PRAGMA temp_store") != mode { return false }
+        if !Execute(lib,"DROP TABLE guest_selection; DROP TABLE caller_keep") { return false }
+    }
+    if !Execute(lib,"PRAGMA temp_store=MEMORY") { return false }
+    // Deny INSERT preparation after this request's CREATE has succeeded.
+    // Cleanup must remove its partial table and permit the following query.
+    deny: Authorizer = Authorize; allow: Authorizer = Allow
+    if SetAuthorizer(lib.db,deny,null) != 0 { return false }
+    rejected := Gallery.Page(lib,text)
+    if SetAuthorizer(lib.db,allow,null) != 0 { return false }
+    if denials < 1 || lib.error != "Cannot read Guest view selection" || Scalar(lib,"SELECT count(*) FROM sqlite_temp_master WHERE name='guest_selection'") != 0 { return false }
+    for repeat: 0..2 {
+        page := Gallery.Page(lib,text)
+        if lib.error.count > 0 || Scalar(lib,"SELECT count(*) FROM sqlite_temp_master WHERE name='guest_selection'") != 0 { return false }
+    }
+    malformed := Gallery.Page(lib,"{\"guest_scope\":{\"version\":1,\"kind\":\"selection\",\"ids\":[true]}}")
+    return lib.error.count > 0 && Scalar(lib,"SELECT count(*) FROM sqlite_temp_master WHERE name='guest_selection'") == 0
+}
+Route :: (lib: *Store.Library, request: string, result: *JSON.JsonDocument, services: *Guest.Services) -> bool {
+    response,handled := Guest.GuestRoute(lib,request,services)
+    if !handled || !JSON.JsonRead(result,response) { print("Guest route did not return JSON\n"); return false }
+    return true
+}
+Selection :: (ids: []string, action: string = "guest_start") -> string {
+    request: Vec(u8); BuilderPrint(*request,"{\"action\":%,\"gallery_format\":2,\"ids\":[",JSON.JsonQuote(action))
+    for i: 0..ids.count-1 { if i != 0 { BuilderPrint(*request,",") }; BuilderPrint(*request,"%",JSON.JsonQuote(ids[i])) }
+    BuilderPrint(*request,"]}"); return BuilderFinish(request)
+}
+Open :: (id: string, action: string = "open") -> string {
+    request: Vec(u8); BuilderPrint(*request,"{\"action\":%,\"gallery_format\":2,\"id\":%}",JSON.JsonQuote(action),JSON.JsonQuote(id)); return BuilderFinish(request)
+}
+Context :: struct { hide: bool; calls: s32 }
+Decode :: (raw: *void, lib: *Store.Library, id: string) -> string {
+    context := cast(*Context)raw; context.calls += 1
+    if context.hide && !Change(lib,id,"hidden=1") { return "Cannot apply synthetic privacy change" }
+    return ""
+}
+Playback :: (raw: *void, lib: *Store.Library, request: string) -> string {
+    context := cast(*Context)raw; context.calls += 1
+    input: JSON.JsonDocument; unused JSON.JsonRead(*input,request)
+    if JSON.JsonCount(*input,input.root) != 2 { return "{\"error\":\"Unexpected guest playback request\"}" }
+    id := Text(*input,input.root,"id")
+    if context.hide { unused Change(lib,id,"hidden=1") }
+    out: Vec(u8); BuilderPrint(*out,"{\"playback_id\":%,\"playback_path\":\"synthetic-playback-only\",\"private_totals\":999}",JSON.JsonQuote(id))
+    return BuilderFinish(out)
+}
+Exit :: (lib: *Store.Library, services: *Guest.Services, password: string) -> bool {
+    request: Vec(u8); BuilderPrint(*request,"{\"action\":\"guest_exit\",\"value\":%}",JSON.JsonQuote(password))
+    result: JSON.JsonDocument
+    return Route(lib,BuilderFinish(request),*result,services) && Number(*result,"guest_exit_authorized") == 1 && Guest.Scope(lib).count == 0
+}
+main :: () -> s32 {
+    root := Kit.TempDirectory("guest")
+    if root.count == 0 { return 1 }
+    defer { unused Kit.Cleanup(root) }
+    path := Kit.Library(Tree.JoinPath(root,"library"))
+    lib,error := Store.Open(path)
+    if lib == null || error.count > 0 { return 2 }
+    defer { Store.Close(lib) }
+    registry: Access.Registry
+    if !Access.Initialize(*registry) { return 3 }
+    defer { Access.Close(*registry) }
+    context: Context; services: Guest.Services
+    services.context = cast(*void)*context; services.registry = *registry
+    ids: Vec(string)
+    for i: 0..71 {
+        seed: Vec(u8); BuilderPrint(*seed,"synthetic guest photo %",i)
+        digest := Crypto.Sha256Of(BuilderFinish(seed)); hex: [65]u8
+        unused Crypto.BytesToHex(*digest[0],32,*hex[0],65)
+        owned: Vec(u8); BuilderPrint(*owned,"%",TextUntilNul(hex[:]))
+        id := BuilderFinish(owned); unused VecPush(ids,id)
+        sql: Vec(u8); BuilderPrint(*sql,"INSERT INTO photos(id,name,extension,kind,size,taken,metadata,albums,updated) VALUES('%','Photo %','.png','photo',15,1704067200,'{}','[\"Family\"]',1)",id,i)
+        if !Execute(lib,BuilderFinish(sql)) { return 4 }
+        row,row_error := FilesPolicy.Photo(lib,id)
+        original := FilesPolicy.Original(lib,row)
+        if row_error.count > 0 || !Tree.CreateDirectories(Tree.PathParent(original),448) || !Files.WriteEntireFile(original,"synthetic bytes") { return 5 }
+    }
+    result: JSON.JsonDocument
+    selection := Selection(VecSlice(ids,0,65))
+    if !Route(lib,selection,*result,*services) || Text(*result,result.root,"error") != "Set up App lock or a Hidden password first; it protects leaving Guest view" || Guest.Scope(lib).count > 0 { return 6 }
+    password := "synthetic guest password"
+    token,auth_error := Vault.VaultAuthenticate(lib,Bytes(password),true,*registry)
+    if auth_error.count > 0 { return 7 }
+    marker_before,marker_ok := Files.ReadEntireFile(Vault.Path(lib))
+    // Publication failures leave the original rows and password untouched.
+    if !Tree.CreateDirectories(Guest.Path(lib),448) { return 8 }
+    if !Route(lib,selection,*result,*services) || Text(*result,result.root,"error").count == 0 { return 9 }
+    unused Tree.RemoveTree(Guest.Path(lib))
+    if !Route(lib,selection,*result,*services) || Number(*result,"count") != 65 || JSON.JsonCount(*result,JSON.JsonMember(*result,result.root,"photos")) != 60 || Vault.Unlocked(lib,token,*registry) { print("Start: %\n",Text(*result,result.root,"error")); return 10 }
+    if (Tree.PathStatus(Guest.Path(lib)).mode & 511) != 384 { return 11 }
+    for page: 0..2 {
+        if !Route(lib,"{\"action\":\"query\",\"offset\":60,\"view\":\"hidden\",\"hidden_access\":1}",*result,*services) || Number(*result,"count") != 65 ||
+            JSON.JsonCount(*result,JSON.JsonMember(*result,result.root,"photos")) != 5 { print("Page: %\n",Text(*result,result.root,"error")); return 12 }
+        first := JSON.JsonFirst(*result,JSON.JsonMember(*result,result.root,"photos"))
+        if Text(*result,first,"id") != ids[60] || Number(*result,"total") != 65 || Number(*result,"pending") != 0 ||
+            JSON.JsonMember(*result,result.root,"bytes") >= 0 || JSON.JsonMember(*result,result.root,"album_detail") >= 0 { return 13 }
+    }
+    invalid_offsets: [4]string = .["{\"offset\":true}","{\"offset\":-1}","{\"offset\":1.0}","{\"offset\":2147483648}"]
+    for request: invalid_offsets { if !Route(lib,request,*result,*services) || Text(*result,result.root,"error") != "Choose a valid guest page" { return 54 } }
+    if Scalar(lib,"SELECT count(*) FROM sqlite_temp_master WHERE name='guest_selection'") != 0 { return 14 }
+    if !StorageCases(lib,Guest.Scope(lib)) { print("Guest TEMP storage preservation failed\n"); return 53 }
+    // The private scope survives a new library handle and registry restart.
+    reopened,open_error := Store.Open(lib.root)
+    if reopened == null { return 15 }
+    response,handled := Guest.GuestRoute(reopened,"{\"action\":\"query\",\"offset\":60}",*services)
+    valid_reopen := handled && JSON.JsonRead(*result,response) && Number(*result,"count") == 65
+    Store.Close(reopened)
+    if !valid_reopen { return 16 }
+    denied: [10]string = .["favorite","hidden","trash","caption","export","import","sync","vault_unlock","guest_start","album_create"]
+    for action: denied {
+        if !Route(lib,Open(ids[0],action),*result,*services) || Text(*result,result.root,"error") != "Guest view permits viewing only; authenticate to leave" || JSON.JsonCount(*result,JSON.JsonMember(*result,result.root,"photos")) != 0 { return 17 }
+    }
+    if !Route(lib,Open(ids[70]),*result,*services) || Text(*result,result.root,"error") != "This item is outside Guest view or is no longer available" { return 18 }
+    if !Route(lib,Open(ids[64]),*result,*services) || JSON.JsonCount(*result,JSON.JsonMember(*result,result.root,"detail")) != 1 { return 19 }
+    if !Change(lib,ids[0],"hidden=1") || !Change(lib,ids[1],"trashed=1") { return 20 }
+    if !Route(lib,"{\"action\":\"query\"}",*result,*services) || Number(*result,"count") != 63 { return 21 }
+    if Exit(lib,*services,"wrong password") || !Exit(lib,*services,password) || Vault.Unlocked(lib,token,*registry) { return 22 }
+    // Selection deduplicates but never admits private or paired video inputs.
+    if !Route(lib,Selection(VecSlice(ids,0,2)),*result,*services) || Text(*result,result.root,"error") != "Restore and unhide every selected item before starting Guest view" { return 23 }
+    if !Change(lib,ids[0],"hidden=0") || !Change(lib,ids[1],"trashed=0") { return 24 }
+    pair: Vec(u8); BuilderPrint(*pair,"metadata='{\"photosLive\":{\"video\":\"%\"}}'",ids[71])
+    // Reciprocal exact links are scoped by the native predicate.
+    if !Change(lib,ids[0],BuilderFinish(pair)) { return 25 }
+    back: Vec(u8); BuilderPrint(*back,"kind='video',extension='.mp4',metadata='{\"photosLive\":{\"photo\":\"%\"}}'",ids[0])
+    if !Change(lib,ids[71],BuilderFinish(back)) { return 26 }
+    one: [1]string = .[ids[71]]
+    if !Route(lib,Selection(one[:]),*result,*services) || Text(*result,result.root,"error").count == 0 { return 27 }
+    one[0] = ids[0]
+    if !Route(lib,Selection(one[:]),*result,*services) || Number(*result,"count") != 1 { return 28 }
+    if !Change(lib,ids[71],"hidden=1") || !Route(lib,"{\"action\":\"query\"}",*result,*services) || Number(*result,"count") != 0 { return 29 }
+    if !Exit(lib,*services,password) { return 30 }
+    if !Change(lib,ids[0],"metadata='{}'") || !Change(lib,ids[71],"metadata='{}',hidden=0") { return 31 }
+    // Frozen smart rule and stable album identity survive rename/rule changes.
+    album := Crypto.Sha256Of("synthetic guest album"); album_hex: [65]u8
+    unused Crypto.BytesToHex(*album[0],32,*album_hex[0],65)
+    create: Vec(u8); BuilderPrint(*create,"INSERT INTO albums(id,name,created,updated,filter) VALUES('%','Favorites',1,1,'is:favorite')",TextUntilNul(album_hex[:]))
+    if !Execute(lib,BuilderFinish(create)) || !Change(lib,ids[2],"favorite=1") || !Change(lib,ids[3],"favorite=1") { return 32 }
+    if !Route(lib,"{\"action\":\"guest_start\",\"value\":\"album\",\"album\":\"Favorites\"}",*result,*services) || Number(*result,"count") != 2 { return 33 }
+    if !Execute(lib,"UPDATE albums SET name='Renamed',filter='type:photo'") || !Route(lib,"{}",*result,*services) || Number(*result,"count") != 2 { return 34 }
+    if !Change(lib,ids[2],"favorite=0") || !Route(lib,"{}",*result,*services) || Number(*result,"count") != 1 { return 35 }
+    if !Exit(lib,*services,password) { return 36 }
+    family_digest := Crypto.Sha256Of("synthetic guest regular album"); family_hex: [65]u8
+    unused Crypto.BytesToHex(*family_digest[0],32,*family_hex[0],65)
+    family_sql: Vec(u8); BuilderPrint(*family_sql,"INSERT INTO albums(id,name,created,updated,filter) VALUES('%','Family',1,1,'')",TextUntilNul(family_hex[:]))
+    if !Execute(lib,BuilderFinish(family_sql)) || !Route(lib,"{\"action\":\"guest_start\",\"value\":\"album\",\"album\":\"Family\"}",*result,*services) || Number(*result,"count") != 72 { return 59 }
+    if !Route(lib,Open(ids[71]),*result,*services) || JSON.JsonCount(*result,JSON.JsonMember(*result,result.root,"detail")) != 1 ||
+        !Change(lib,ids[71],"albums='[]'") || !Route(lib,Open(ids[71]),*result,*services) || Text(*result,result.root,"error") != "This item is outside Guest view or is no longer available" { return 60 }
+    if !Exit(lib,*services,password) || !Change(lib,ids[71],"albums='[\"Family\"]'") { return 61 }
+    // Codec/playback dependencies fail explicitly; controlled boundary tests
+    // verify a slow provider cannot publish a newly private asset.
+    one[0] = ids[4]
+    if !Change(lib,ids[4],"extension='.heic'") { return 37 }
+    row,row_error := FilesPolicy.Photo(lib,ids[4]); codec := FilesPolicy.Original(lib,row)
+    if !Files.WriteEntireFile(codec,"synthetic codec source") || !Route(lib,Selection(one[:]),*result,*services) { return 38 }
+    if !Route(lib,Open(ids[4]),*result,*services) || Text(*result,result.root,"error") != "Photos photo decoding is not ready" { return 39 }
+    services.decode = Decode; context.hide = true
+    if !Route(lib,Open(ids[4]),*result,*services) || Text(*result,result.root,"error") != "Guest photo access ended" || JSON.JsonCount(*result,JSON.JsonMember(*result,result.root,"photos")) != 0 { return 40 }
+    if !Exit(lib,*services,password) || !Change(lib,ids[4],"hidden=0,extension='.png'") { return 41 }
+    one[0] = ids[71]
+    if !Route(lib,Selection(one[:]),*result,*services) || !Route(lib,Open(ids[71],"playback_check"),*result,*services) || Text(*result,result.root,"error") != "Photos playback is not ready" { return 42 }
+    services.playback = Playback; context.hide = true
+    if !Route(lib,Open(ids[71],"playback_check"),*result,*services) || Text(*result,result.root,"error") != "Guest playback access ended" || JSON.JsonMember(*result,result.root,"playback_path") >= 0 { return 43 }
+    if !Exit(lib,*services,password) || !Change(lib,ids[71],"hidden=0") { return 44 }
+    // Malformed and linked markers remain scoped until real authentication.
+    bad: [3]string = .["{","{\"version\":1,\"kind\":\"selection\",\"ids\":[]}","{\"version\":1,\"kind\":\"album\",\"id\":\"bad\",\"filter\":\"\"}"]
+    for marker: bad {
+        if !Files.WriteEntireFile(Guest.Path(lib),marker) || !Route(lib,"{}",*result,*services) || Number(*result,"count") != 0 || !Exit(lib,*services,password) { return 45 }
+    }
+    outside := Tree.JoinPath(root,"outside-marker")
+    if !Files.WriteEntireFile(outside,"unrelated owner data") { return 46 }
+    source: [4096]u8; target: [4096]u8
+    if !CopyCString(outside,source[:]) || !CopyCString(Guest.Path(lib),target[:]) || Link(*source[0],*target[0]) != 0 { return 47 }
+    if !Route(lib,"{}",*result,*services) || Number(*result,"count") != 0 || !Exit(lib,*services,password) { return 48 }
+    unchanged,unchanged_ok := Files.ReadEntireFile(outside)
+    if !unchanged_ok || unchanged != "unrelated owner data" { return 49 }
+    // An active app lock cannot be bypassed by starting a presentation scope.
+    app_request: Vec(u8); BuilderPrint(*app_request,"{\"action\":\"app_lock_enable\",\"value\":%}",JSON.JsonQuote(password))
+    enabled,enable_handled := App.AppLockRoute(lib,BuilderFinish(app_request),*registry)
+    if !enable_handled || !Route(lib,Selection(one[:]),*result,*services) || Text(*result,result.root,"error") != "Photos is locked" || Guest.Scope(lib).count > 0 { return 50 }
+    unlock_request: Vec(u8); BuilderPrint(*unlock_request,"{\"action\":\"app_lock_unlock\",\"value\":%}",JSON.JsonQuote(password))
+    unlocked,unlock_handled := App.AppLockRoute(lib,BuilderFinish(unlock_request),*registry)
+    app_result: JSON.JsonDocument
+    if !unlock_handled || !JSON.JsonRead(*app_result,unlocked) { return 55 }
+    app_token := Text(*app_result,app_result.root,"app_lock_token")
+    authorized: JSON.JsonDocument; unused JSON.JsonRead(*authorized,Selection(one[:]))
+    unused JSON.JsonSet(*authorized,authorized.root,"app_lock_token",JSON.JsonNewString(*authorized,app_token))
+    if !Route(lib,JSON.JsonWrite(*authorized,authorized.root,JSON.JsonCompactStyle(false)),*result,*services) || Number(*result,"guest_active") != 1 || Number(*result,"count") != 1 { return 56 }
+    App.Revoke(lib,*registry)
+    if App.Unlocked(lib,app_token,false,*registry) || !Route(lib,"{}",*result,*services) || Number(*result,"count") != 1 || !Exit(lib,*services,password) { return 57 }
+    // Large persisted scopes keep order and never create library-owned tables.
+    large: JSON.JsonDocument; large.root = JSON.JsonNewObject(*large)
+    unused JSON.JsonSet(*large,large.root,"version",JSON.JsonNewInteger(*large,1))
+    unused JSON.JsonSet(*large,large.root,"kind",JSON.JsonNewString(*large,"selection"))
+    large_ids := JSON.JsonNewArray(*large)
+    for i: 0..999 {
+        id: string
+        if i < 72 { id = ids[i] }
+        else {
+            absent: Vec(u8); BuilderPrint(*absent,"absent synthetic guest %",i)
+            digest := Crypto.Sha256Of(BuilderFinish(absent)); encoded: [65]u8
+            unused Crypto.BytesToHex(*digest[0],32,*encoded[0],65)
+            copy: Vec(u8); BuilderPrint(*copy,"%",TextUntilNul(encoded[:]))
+            id = BuilderFinish(copy)
+        }
+        unused JSON.JsonAppend(*large,large_ids,JSON.JsonNewString(*large,id))
+    }
+    unused JSON.JsonSet(*large,large.root,"ids",large_ids)
+    if !Files.WriteEntireFile(Guest.Path(lib),Store.Packed(JSON.JsonWrite(*large,large.root,JSON.JsonCompactStyle(false)))) ||
+        !Route(lib,"{\"offset\":60}",*result,*services) || Number(*result,"count") != 72 ||
+        JSON.JsonCount(*result,JSON.JsonMember(*result,result.root,"photos")) != 12 ||
+        Scalar(lib,"SELECT count(*) FROM sqlite_master WHERE name='guest_selection'") != 0 ||
+        Scalar(lib,"SELECT count(*) FROM sqlite_temp_master WHERE name='guest_selection'") != 0 || !Exit(lib,*services,password) { return 58 }
+    marker_after,marker_after_ok := Files.ReadEntireFile(Vault.Path(lib))
+    if !marker_ok || !marker_after_ok || marker_before != marker_after || Scalar(lib,"SELECT count(*) FROM photos") != 72 { return 51 }
+    // Every immutable original remains the original synthetic byte sequence.
+    index: s32
+    while index < ids.count {
+        original: Vec(u8); BuilderPrint(*original,"originals/%/%.png",ids[index][0:2],ids[index])
+        raw,ok := Files.ReadEntireFile(Tree.JoinPath(lib.root,BuilderFinish(original)))
+        if !ok || raw != "synthetic bytes" { return 52 }
+        index += 1
+    }
+    if !Lifetime.Check() { return 66 }
+    print("Photos Guest core: persistent scoped paging, privacy, album identity/rules, real authentication and race rechecks passed; real codec/playback integration pending\n")
+    return 0
+}

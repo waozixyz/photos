@@ -1,0 +1,76 @@
+Tensor :: #import "clip_image_tensor";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+Zlib :: #import "std/zlib_linux";
+Raster :: #import "std/image";
+Process :: #import "std/process_run_linux";
+Kit :: #import "kit";
+Auth :: #import "vault_auth";
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+c :: #system_library "c";
+Copy :: (target: *void, source: *void, size: usize) -> *void #foreign c "memcpy";
+
+Compare :: (name: string) -> bool {
+    source: Vec(u8); BuilderPrint(*source,"tests/fixtures/clip-image/%",name)
+    path := BuilderFinish(source); defer { Auth.ReleaseOwned(path,false) }
+    target: Vec(u8); BuilderPrint(*target,"%.f32.zlib",path)
+    golden_path := BuilderFinish(target); defer { Auth.ReleaseOwned(golden_path,false) }
+    packed: Vec(u8); expected: Vec(u8); actual: Vec(u8)
+    if !Files.ReadFileInto(golden_path,*packed) || !Zlib.ZlibDecompress(VecSlice(packed,0,packed.count),*expected,602112,47) ||
+        expected.count != 602112 || !Tensor.TensorFromFile(path,*actual) || actual.count != 602112 { print("CLIP image % failed to load\n",name); return false }
+    maximum: float64
+    for at: 0..150527 {
+        a: float32; b: float32
+        unused Copy(cast(*void)*a,cast(*void)*actual[at*4],4)
+        unused Copy(cast(*void)*b,cast(*void)*expected[at*4],4)
+        difference := cast(float64)a-cast(float64)b
+        if difference < 0.0 { difference = -difference }
+        if difference > maximum { maximum = difference }
+        if a != a || b != b || difference > 0.0001 { print("CLIP image % pixel % difference %\n",name,at,difference); return false }
+    }
+    return true
+}
+RunCLI :: (arguments: []string) -> s32 {
+    options: Process.ProcessOptions; options.arguments = arguments; options.new_session = true
+    options.input_path = "/dev/null"; options.output_path = "/dev/null"; options.error_path = "/dev/null"
+    environment: [5]string = .["DISPLAY","WAYLAND_DISPLAY","XAUTHORITY","DBUS_SESSION_BUS_ADDRESS","SESSION_MANAGER"]
+    options.environment = environment[:]
+    child: Process.ProcessRun
+    return ifx Process.RunProcess(options,*child) then child.code else -1
+}
+CLI :: () -> bool {
+    root := Kit.TempDirectory("clip-image-cli"); if root.count == 0 { return false }
+    defer { unused Kit.Cleanup(root); Auth.ReleaseOwned(root,false) }
+    target: Vec(u8); BuilderPrint(*target,"%/tensor",root)
+    path := BuilderFinish(target); defer { Auth.ReleaseOwned(path,false) }
+    arguments: [8]string = .["prlimit","--as=1610612736","--cpu=60","--fsize=1048576","--","build/clip-image-tensor/clip_image_tensor","tests/fixtures/clip-image/orientation-6.png",path]
+    if RunCLI(arguments[:]) != 0 || Tree.PathStatus(path,false).size != 602112 || (Tree.PathStatus(path,false).mode & 511) != 384 { return false }
+    actual: Vec(u8); expected: Vec(u8); packed: Vec(u8)
+    if !Files.ReadFileInto(path,*actual) || !Files.ReadFileInto("tests/fixtures/clip-image/orientation-6.png.f32.zlib",*packed) ||
+        !Zlib.ZlibDecompress(VecSlice(packed,0,packed.count),*expected,602112,47) || actual.count != expected.count { return false }
+    for at: 0..actual.count-1 { if actual[at] != expected[at] { return false } }
+    // Exclusive private output never overwrites an existing file.
+    if RunCLI(arguments[:]) <= 0 || Tree.PathStatus(path,false).size != 602112 { return false }
+    if !Files.RemoveFile(path) { return false }
+    arguments[6] = "tests/fixtures/clip-image/missing.png"
+    if RunCLI(arguments[:]) <= 0 || Files.PathExists(path) { return false }
+    // A kernel allocation limit must turn a real pixel decode into a clean
+    // helper failure, leaving the application and target untouched.
+    arguments[1] = "--as=16777216"; arguments[6] = "tests/fixtures/clip-image/odd.png"
+    return RunCLI(arguments[:]) > 0 && !Files.PathExists(path)
+}
+#program_export
+main :: () -> s32 {
+    names: [17]string = .["alpha.png","odd.png","portrait.png","black.png","white.png","palette.png","gray-alpha.png",
+        "orientation-1.jpg","orientation-2.jpg","orientation-3.jpg","orientation-4.jpg","orientation-5.jpg","orientation-6.jpg","orientation-7.jpg","orientation-8.jpg","orientation-6.png","orientation-8.png"]
+    for name: names { if !Compare(name) { return 1 } }
+    output: Vec(u8); unused VecPush(output,99)
+    invalid: Raster.Image
+    if Tensor.TensorFromImage(*invalid,*output) || output.count != 0 || Tensor.TensorFromFile("tests/fixtures/clip-image/missing.png",*output) || output.count != 0 { return 2 }
+    image := Raster.NewImage(7,9,10,20,30,0)
+    for repeat: 0..99 { if !Tensor.TensorFromImage(*image,*output) || output.count != 602112 || image.pixels[3] != 0 { return 3 } }
+    if !CLI() { return 4 }
+    print("CLIP image: 17 independent tensors within 1e-4, alpha/palette/gray/odd/EXIF, 100 reuses, actual bounded CLI parity/private/exclusive output and allocation-limit failure passed\n")
+    return 0
+}

@@ -10,12 +10,14 @@ LivePhoto :: #import "live_photo";
 Presentation :: #import "presentation";
 Guest :: #import "guest_scope";
 Clock :: #import "std/date_time_linux";
+JSON :: #import "std/json_document";
 #import "std/date_parse"
 #import "std/byte_text_linux"
 #import "std/json_scan"
 #import "std/text_buffer"
 libc :: #system_library "libc";
 Read :: (fd: s32, output: *u8, count: usize) -> s64 #foreign libc "read";
+Release :: (memory: *void) #foreign libc "free";
 
 Decode :: (json: string, key: string, bytes: []u8) -> bool {
     at := FieldAt(json, 0, key)
@@ -30,24 +32,49 @@ Number :: (json: string, key: string, default_value: s32) -> s32 {
     return cast(s32)value.value
 }
 Storage :: #import "storage";
-Failure :: (message: string) -> s32 { print("{\"error\":\"%\"}\n", message); return 1 }
+Failure :: (message: string) -> string {
+    output: Vec(u8); BuilderPrint(*output,"{\"error\":")
+    if !JSON.JsonQuoteInto(*output,message,false) { return "" }
+    BuilderPrint(*output,"}")
+    return BuilderFinish(output)
+}
+// Set private TEMP policy only before caller work exists. Changing SQLite's
+// temp_store destroys its temporary schema, so incompatible callers fail closed.
+PrepareGuestSelection :: (database: *void) -> bool {
+    if database == null { return false }
+    reserved: *void
+    if SqlitePrepareText(database,"SELECT count(*) FROM sqlite_temp_master WHERE name='guest_selection'",-1,*reserved,null) != SQLITE_OK { return false }
+    occupied := SqliteStep(reserved) != SQLITE_ROW || SqliteColumnInt64(reserved,0) != 0
+    unused SqliteFinalize(reserved)
+    if occupied { return false }
+    policy: *void
+    if SqlitePrepareText(database,"PRAGMA temp_store",-1,*policy,null) != SQLITE_OK { return false }
+    mode: s32 = -1
+    if SqliteStep(policy) == SQLITE_ROW { mode = SqliteColumnInt(policy,0) }
+    unused SqliteFinalize(policy)
+    if mode == 2 { return true }
+    if mode < 0 || !SqliteGetAutocommit(database) { return false }
+    objects: *void
+    if SqlitePrepareText(database,"SELECT count(*) FROM sqlite_temp_master",-1,*objects,null) != SQLITE_OK { return false }
+    empty := SqliteStep(objects) == SQLITE_ROW && SqliteColumnInt64(objects,0) == 0
+    unused SqliteFinalize(objects)
+    return empty && SqliteExecText(database,"PRAGMA temp_store=MEMORY") == SQLITE_OK
+}
 Prepare :: (database: *void, sql: string, query: *Search.Predicate, statement: **void) -> bool {
     if SqlitePrepareText(database, sql, -1, statement, null) != SQLITE_OK { return false }
     for i: 0..query.count - 1 {
-        if SqliteBindTextString(statement.*, cast(s32)i + 1, TextUntilNul(query.parameters[i].bytes[:]), -1) != SQLITE_OK { return false }
+        if SqliteBindTextString(statement.*, cast(s32)i + 1, TextUntilNul(query.parameters[i].bytes[:]), -1) != SQLITE_OK {
+            unused SqliteFinalize(statement.*); statement.* = null; return false
+        }
     }
     return true
 }
-main :: (argc: s32, argv: **u8) -> s32 {
-    if argc != 2 { return Failure("Supply the private library database") }
-    input: [131073]u8; length: s32
-    while length < 131072 {
-        amount := Read(0, *input[length], cast(usize)(131072 - length))
-        if amount < 0 { return Failure("Cannot read gallery request") }; if amount == 0 { break }; length += cast(s32)amount
-    }
-    if length == 0 || length >= 131072 { return Failure("Gallery request exceeds its limit") }
-    json := TextFromBytes(input[:length])
-    if Space(json, ValueEnd(json, 0, 0)) != length || json[0] != 123 { return Failure("Choose a valid gallery request") }
+// In-process entry. The caller retains ownership of its database connection.
+Query :: (database: *void, json: string) -> string { return ReadPage(database, json, "") }
+
+ReadPage :: (database: *void, json: string, path: string) -> string {
+    if json.count == 0 || json.count >= 131072 { return Failure("Gallery request exceeds its limit") }
+    if Space(json, ValueEnd(json, 0, 0)) != cast(s32)json.count || json[0] != #char "{" { return Failure("Choose a valid gallery request") }
     guest: Guest.Scope; Guest.ReadScope(json,*guest)
     if guest.error != "" { return Failure(guest.error) }
     view: [32]u8; search: [513]u8; album: [513]u8; sort: [16]u8; memory: [11]u8; filter: [513]u8; person: [65]u8; birth: [11]u8; jump: [11]u8
@@ -110,7 +137,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
             // Compare birthday cutoffs as calendar dates, including older years.
             cutoff: Vec(u8); BuilderPrint(*cutoff,"%-%-",year+3,value[5:7])
             BuilderPrint(*cutoff,"%",ifx month == 2 && day == 29 then "28" else value[8:10])
-            Search.AddSQL(*query," AND strftime('%Y-%m-%d',taken,'unixepoch')>=?"); Search.Bind(*query,BuilderFinish(cutoff))
+            Search.AddSQL(*query," AND strftime('%Y-%m-%d',taken,'unixepoch')>=?"); Search.Bind(*query,TextView(VecSlice(cutoff,0,cutoff.count)))
         }
     }
     if name == "memories" {
@@ -131,10 +158,14 @@ main :: (argc: s32, argv: **u8) -> s32 {
         Locations.Filter(*query, map_bounds)
     }
     if query.error != "" { return Failure(query.error) }
-    if name == "validate" { print("{\"valid\":1}\n"); return 0 }
-    database: *void
-    if SqliteOpenText(TextFromCString(argv[1]),*database,1) != SQLITE_OK { if database != null { unused SqliteClose(database) }; return Failure("Cannot open the private gallery database") }
-    defer { unused SqliteClose(database) }
+    if name == "validate" { out: Vec(u8); BuilderPrint(*out,"{\"valid\":1}"); return BuilderFinish(out) }
+    owned := database == null && path.count > 0
+    if owned && SqliteOpenText(path, *database, 1) != SQLITE_OK {
+        if database != null { unused SqliteClose(database) }
+        return Failure("Cannot open the private gallery database")
+    }
+    if database == null { return Failure("Cannot open the private gallery database") }
+    defer { if owned { unused SqliteClose(database) } }
     if !Geo.Register(database) { return Failure("Cannot initialize local radius search") }
     if slideshow && !Presentation.Register(database) { return Failure("Cannot initialize slideshow ordering") }
     if name == "semantic" {
@@ -144,9 +175,13 @@ main :: (argc: s32, argv: **u8) -> s32 {
         Search.AddSQL(*query,Semantic.RankSQL); Search.AddSQL(*query," >= 0.20")
     }
     unused SqliteBusyTimeout(database,10000)
-    if !Guest.Populate(*guest,database) { return Failure("Cannot read Guest view selection") }
-    if SqliteExecText(database,"BEGIN") != SQLITE_OK { return Failure("Cannot open a gallery snapshot") }
-    defer { unused SqliteExecText(database,"ROLLBACK") }
+    // Only this request's successfully created table belongs to this cleanup.
+    guest_selection_created: bool
+    if guest.active && guest.selection && !PrepareGuestSelection(database) { return Failure("Cannot read Guest view selection") }
+    defer { if guest_selection_created { unused SqliteExecText(database,"DROP TABLE temp.guest_selection") } }
+    if !Guest.Populate(*guest,database,*guest_selection_created) { return Failure("Cannot read Guest view selection") }
+    if SqliteExecText(database,"SAVEPOINT photos_gallery_page") != SQLITE_OK { return Failure("Cannot open a gallery snapshot") }
+    defer { unused SqliteExecText(database,"ROLLBACK TO photos_gallery_page; RELEASE photos_gallery_page") }
     if name == "similar_groups" {
         if jump[0] != 0 { return Failure("Similar groups have their own review order; open the timeline to jump to a date") }
         error := SimilarGroups.Populate(database); if error != "" { return Failure(error) }
@@ -167,10 +202,10 @@ main :: (argc: s32, argv: **u8) -> s32 {
     lane_years: [256]s32; lane_count: s32; lane_year := Number(json,"lane_year",0)
     if name == "lane" {
         copy: Vec(u8); for i: 0..query.sql.count-1 { unused VecPush(copy,query.sql[i]) }
-        initial := BuilderFinish(copy); years: Vec(u8)
+        initial := TextView(VecSlice(copy,0,copy.count)); years: Vec(u8)
         BuilderPrint(*years,"SELECT cast(strftime('%',taken,'unixepoch') AS INTEGER) y FROM photos WHERE % GROUP BY y HAVING count(*)>=4 ORDER BY y","%Y",initial)
         statement: *void
-        if !Prepare(database,BuilderFinish(years),*query,*statement) { return Failure("Cannot prepare Memory Lane") }
+        if !Prepare(database,TextView(VecSlice(years,0,years.count)),*query,*statement) { return Failure("Cannot prepare Memory Lane") }
         while true {
             result := SqliteStep(statement)
             if result == SQLITE_DONE { break }
@@ -190,8 +225,10 @@ main :: (argc: s32, argv: **u8) -> s32 {
             } else { Search.AddSQL(*query," AND cast(strftime('%Y',taken,'unixepoch') AS INTEGER)=?"); Search.BindNumber(*query,cast(s64)lane_year) }
         }
     }
-    where := BuilderFinish(query.sql)
-    sql: Vec(u8); BuilderPrint(*sql,"SELECT COUNT(*) FROM photos WHERE %",where); count_sql := BuilderFinish(sql)
+    where_bytes: Vec(u8)
+    for index: 0..query.sql.count-1 { unused VecPush(where_bytes,query.sql[index]) }
+    where := TextView(VecSlice(where_bytes,0,where_bytes.count))
+    sql: Vec(u8); BuilderPrint(*sql,"SELECT COUNT(*) FROM photos WHERE %",where); count_sql := TextView(VecSlice(sql,0,sql.count))
     statement: *void
     if !Prepare(database,count_sql,*query,*statement) { return Failure("Cannot prepare the gallery query") }
     if SqliteStep(statement) != SQLITE_ROW { unused SqliteFinalize(statement); return Failure("Cannot count gallery matches") }
@@ -202,7 +239,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
         if !day.valid || name == "semantic" || name == "map" || name == "lane" { return Failure("Choose a gallery date in YYYY-MM-DD format") }
         jump_sql: Vec(u8); BuilderPrint(*jump_sql,"SELECT count(*) FROM photos WHERE % AND taken%?",where,ifx order == "newest" then ">=" else "<")
         Search.BindNumber(*query,day.seconds + (ifx order == "newest" then 86400 else 0))
-        if !Prepare(database,BuilderFinish(jump_sql),*query,*statement) { return Failure("Cannot jump to the gallery date") }
+        if !Prepare(database,TextView(VecSlice(jump_sql,0,jump_sql.count)),*query,*statement) { return Failure("Cannot jump to the gallery date") }
         if SqliteStep(statement) != SQLITE_ROW { unused SqliteFinalize(statement); return Failure("Cannot locate the gallery date") }
         target := SqliteColumnInt64(statement,0); unused SqliteFinalize(statement); statement = null; query.count -= 1
         if matches == 0 { page = 0 } else { page = cast(s32)(ifx target >= matches then matches-1 else target) }
@@ -217,7 +254,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if name == "semantic" || (name == "similar" && similar_ready) { BuilderPrint(*rows,"% DESC,",Semantic.RankSQL) }
     if name == "large" { BuilderPrint(*rows,"% DESC,",Storage.LargeBytesSQL) }
     BuilderPrint(*rows,"taken %,id LIMIT % OFFSET %",ifx order == "newest" || name == "large" then "DESC" else "ASC",limit,page)
-    rows_sql := BuilderFinish(rows)
+    rows_sql := TextView(VecSlice(rows,0,rows.count))
     if !Prepare(database,rows_sql,*query,*statement) { return Failure("Cannot prepare the gallery page") }
     defer { unused SqliteFinalize(statement) }
     output: Vec(u8); BuilderPrint(*output,"{\"count\":%,\"memory_date\":\"%\",\"ids\":[",matches,TextUntilNul(memory[:]))
@@ -234,7 +271,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
         if name == "similar_groups" { BuilderPrint(*sizes,"% %",ifx count == 1 then "" else ",",SqliteColumnInt64(statement,1)) }
     }
     BuilderPrint(*output,"]")
-    if name == "large" || name == "similar_groups" { BuilderPrint(*output,",\"%\":[%]",ifx name == "large" then "storage_sizes" else "group_sizes",BuilderFinish(sizes)) }
+    if name == "large" || name == "similar_groups" { BuilderPrint(*output,",\"%\":[%]",ifx name == "large" then "storage_sizes" else "group_sizes",TextView(VecSlice(sizes,0,sizes.count))) }
     if slideshow { BuilderPrint(*output,",\"slide_offset\":%",page) }
     if !guest.active && jump[0] != 0 { BuilderPrint(*output,",\"jump_offset\":%",page) }
     if name == "lane" {
@@ -245,6 +282,7 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if name == "map" && Number(json, "map_gallery", 0) == 0 {
         unused SqliteFinalize(statement); statement = null
         cluster_sql := Locations.ClusterSQL(where, map_bounds)
+        defer { descriptor := cast(*TextDescriptor)*cluster_sql; if descriptor.data != null { Release(cast(*void)descriptor.data) } }
         if !Prepare(database, cluster_sql, *query, *statement) { return Failure("Cannot prepare map locations") }
         BuilderPrint(*output,",\"markers\":["); marker_count: s32
         while true {
@@ -256,5 +294,21 @@ main :: (argc: s32, argv: **u8) -> s32 {
         }
         BuilderPrint(*output,"]")
     }
-    BuilderPrint(*output,"}"); response := BuilderFinish(output); print("%\n",response); return 0
+    BuilderPrint(*output,"}"); return BuilderFinish(output)
+}
+
+// Preserve the helper's line-oriented CLI for existing callers.
+main :: (argc: s32, argv: **u8) -> s32 {
+    if argc != 2 { print("%\n", Failure("Supply the private library database")); return 1 }
+    input: [131073]u8; length: s32
+    while length < 131072 {
+        amount := Read(0, *input[length], cast(usize)(131072 - length))
+        if amount < 0 { print("%\n", Failure("Cannot read gallery request")); return 1 }
+        if amount == 0 { break }
+        length += cast(s32)amount
+    }
+    request := TextFromBytes(input[:length])
+    response := ReadPage(null, request, TextFromCString(argv[1]))
+    print("%\n", response)
+    return ifx FieldAt(response, 0, "error") >= 0 then 1 else 0
 }

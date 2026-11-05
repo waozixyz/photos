@@ -3,6 +3,22 @@
 using Oqs :: #import "oqs/Oqs";
 Wire :: #import "sync_crypto";
 #import "std/byte_text_linux"
+using Vectors :: #import "std/vec";
+
+AccountSign :: (secret: []u8, message: []u8, out: *Vec(u8)) -> bool {
+    Wire.ClearOutput(out)
+    if secret.count != Oqs.MlDsa44SecretKeyBytes || message.count < 0 || message.count > 1048576 ||
+        !Wire.PrepareOutput(out, Oqs.MlDsa44SignatureBytes) { return false }
+    if Oqs.MlDsa44Sign(Wire.OutputBytes(out), message, secret) != Oqs.MlDsa44SignatureBytes {
+        Wire.ClearOutput(out); return false
+    }
+    return true
+}
+
+AccountVerify :: (public: []u8, message: []u8, signature: []u8) -> bool {
+    return public.count == Oqs.MlDsa44PublicKeyBytes && signature.count == Oqs.MlDsa44SignatureBytes &&
+        message.count >= 0 && message.count <= 1048576 && Oqs.MlDsa44Verify(message, signature, public)
+}
 c :: #system_library "c";
 Allocate :: (bytes: usize) -> *void #foreign c "malloc";
 Read :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign c "read";

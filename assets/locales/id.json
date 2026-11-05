@@ -1,0 +1,17 @@
+{
+  "photos_today": "Hari ini",
+  "photos_yesterday": "Kemarin",
+  "photos_date": "{d} {M} {y}",
+  "photos_month_1": "Januari",
+  "photos_month_2": "Februari",
+  "photos_month_3": "Maret",
+  "photos_month_4": "April",
+  "photos_month_5": "Mei",
+  "photos_month_6": "Juni",
+  "photos_month_7": "Juli",
+  "photos_month_8": "Agustus",
+  "photos_month_9": "September",
+  "photos_month_10": "Oktober",
+  "photos_month_11": "November",
+  "photos_month_12": "Desember"
+}

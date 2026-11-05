@@ -1,0 +1,221 @@
+// One in-process owner of access tokens and attempt windows. Nothing persists.
+Clock :: #import "std/timer_linux";
+Mutex :: #import "std/mutex_linux";
+Crypto :: #import "crypto/sha256";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+c :: #system_library "c";
+sodium :: #system_library "sodium";
+InitRaw :: () -> s32 #foreign sodium "sodium_init";
+Random :: (bytes: *u8, count: usize) #foreign sodium "randombytes_buf";
+Wipe :: (bytes: *u8, count: usize) #foreign sodium "sodium_memzero";
+Equal :: (left: *u8, right: *u8, count: usize) -> s32 #foreign sodium "sodium_memcmp";
+Initializer :: #type () #c_call;
+Once :: (control: *s32, initialize: Initializer) -> s32 #foreign c "pthread_once";
+
+#scope_export
+HIDDEN :: 1;
+APP :: 2;
+Session :: struct { used: bool; kind: u8; root: [32]u8; token: [32]u8; stamp: [32]u8; until: s64 }
+Attempt :: struct { used: bool; kind: u8; root: [32]u8; since: s64; count: s32 }
+Registry :: struct {
+    sessions: [256]Session
+    attempts: [128]Attempt
+    duration: s64
+    attempt_window: s64
+    last: s64
+    guard: Mutex.Mutex
+    opened: bool
+}
+Reply :: struct { code: u8; token: [32]u8; until: s64 }
+Clear :: (entry: *Session) {
+    Wipe(*entry.root[0],32); Wipe(*entry.token[0],32); Wipe(*entry.stamp[0],32)
+    entry.used = false; entry.kind = 0; entry.until = 0
+}
+ClearAttempt :: (entry: *Attempt) {
+    Wipe(*entry.root[0],32); entry.used = false; entry.kind = 0; entry.since = 0; entry.count = 0
+}
+ClearRegistryInside :: (registry: *Registry) {
+    for i: 0..255 { Clear(*registry.sessions[i]) }
+    for i: 0..127 { ClearAttempt(*registry.attempts[i]) }
+}
+
+#scope_file
+Zero :: (bytes: []u8) -> bool { value: u8; for byte: bytes { value |= byte }; return value == 0 }
+shared: Registry;
+shared_once: s32;
+shared_ready: bool;
+InitializeShared :: () { shared_ready = Initialize(*shared) }
+
+#scope_export
+Initialize :: (registry: *Registry, duration: s64 = 600000, attempt_window: s64 = 60000) -> bool {
+    if registry == null || registry.opened || duration < 1 || duration > 600000 ||
+        attempt_window < 1 || attempt_window > 60000 || InitRaw() < 0 { return false }
+    if !Mutex.Open(*registry.guard) { return false }
+    registry.duration = duration; registry.attempt_window = attempt_window; registry.last = 0
+    ClearRegistryInside(registry); registry.opened = true
+    return true
+}
+Default :: () -> *Registry {
+    initializer: Initializer = InitializeShared
+    if Once(*shared_once, initializer) != 0 || !shared_ready { return null }
+    return *shared
+}
+Reset :: (registry: *Registry) {
+    if registry == null || !registry.opened || !Mutex.Lock(*registry.guard) { return }
+    ClearRegistryInside(registry); registry.last = 0
+    unused Mutex.Unlock(*registry.guard)
+}
+// Callers stop and join users before closing an explicitly owned registry.
+Close :: (registry: *Registry) {
+    if registry == null || !registry.opened { return }
+    Reset(registry)
+    unused Mutex.Close(*registry.guard); registry.opened = false
+}
+Handle :: (registry: *Registry, header: []u8, reply: []u8) -> bool {
+    if reply.count > 0 { Wipe(*reply[0], cast(usize)reply.count) }
+    if registry == null || !registry.opened || !Mutex.Lock(*registry.guard) { return false }
+    defer { unused Mutex.Unlock(*registry.guard) }
+    valid := header.count == 100 && reply.count == 41 && HandleInside(registry, header, reply)
+    if !valid { ClearRegistryInside(registry); registry.last = 0; if reply.count > 0 { Wipe(*reply[0], cast(usize)reply.count) } }
+    return valid
+}
+
+#scope_file
+HandleInside :: (registry: *Registry, header: []u8, reply: []u8) -> bool {
+        op := header[1]; kind := header[2]
+        if header[0] != 1 || op < 1 || op > 8 || kind < 1 || kind > 2 || header[3] > 1 ||
+            (header[3] != 0 && op != 2) || Zero(header[4:36]) ||
+            (kind == 1 && !Zero(header[68:100])) || (kind == 2 && op <= 2 && Zero(header[68:100])) ||
+            ((op == 1 || op >= 4) && !Zero(header[36:68])) { return false }
+        now := Clock.MonotonicMilliseconds()
+        if now < 0 || now < registry.last || now > 9223372036854175807 { return false }; registry.last = now
+        slot: s32 = -1; free: s32 = -1
+        for i: 0..255 {
+            entry := *registry.sessions[i]
+            if entry.used && entry.until <= now { Clear(entry) }
+            if !entry.used { if free < 0 { free = cast(s32)i }; continue }
+            if entry.kind != kind || Equal(*entry.root[0],*header[4],32) != 0 { continue }
+            if op == 4 { Clear(entry); continue }
+            if Equal(*entry.token[0],*header[36],32) == 0 { slot = cast(s32)i }
+        }
+        until: s64
+        if op == 1 {
+            if free < 0 { reply[0] = 2 }
+            else {
+                token: [32]u8; defer { Wipe(*token[0],32) }
+                unique: bool
+                for retry: 0..3 {
+                    Random(*token[0],32); unique = !Zero(token[:])
+                    for i: 0..255 { if registry.sessions[i].used && Equal(*registry.sessions[i].token[0],*token[0],32) == 0 { unique = false } }
+                    if unique { break }
+                }
+                if !unique { return false }
+                entry := *registry.sessions[free]; entry.used = true; entry.kind = kind; until = now+registry.duration; entry.until = until
+                for i: 0..31 { entry.root[i] = header[4+i]; entry.token[i] = token[i]; entry.stamp[i] = header[68+i]; reply[1+i] = token[i] }
+                reply[0] = 1
+            }
+        } else if op == 2 || op == 5 {
+            if slot >= 0 {
+                entry := *registry.sessions[slot]
+                if Equal(*entry.stamp[0],*header[68],32) != 0 { Clear(entry) }
+                else {
+                    if header[3] == 1 { entry.until = now+registry.duration }
+                    until = entry.until; reply[0] = 1
+                }
+            }
+        } else if op == 3 { if slot >= 0 { Clear(*registry.sessions[slot]) }; reply[0] = 1 }
+        else if op == 4 { reply[0] = 1 }
+        else {
+            slot = -1; free = -1
+            for i: 0..127 {
+                entry := *registry.attempts[i]
+                if entry.used && now-entry.since >= registry.attempt_window { ClearAttempt(entry) }
+                if !entry.used { if free < 0 { free = cast(s32)i }; continue }
+                if entry.kind == kind && Equal(*entry.root[0],*header[4],32) == 0 { slot = cast(s32)i }
+            }
+            if op == 8 { if slot >= 0 { ClearAttempt(*registry.attempts[slot]) }; reply[0] = 1 }
+            else if slot >= 0 && registry.attempts[slot].count >= 5 { reply[0] = 3 }
+            else if op == 6 { reply[0] = ifx slot >= 0 || free >= 0 then 1 else 2 }
+            else if slot < 0 && free < 0 { reply[0] = 2 }
+            else {
+                if slot < 0 {
+                    slot = free; registry.attempts[slot].used = true; registry.attempts[slot].kind = kind; registry.attempts[slot].since = now
+                    for i: 0..31 { registry.attempts[slot].root[i] = header[4+i] }
+                }
+                registry.attempts[slot].count += 1; reply[0] = 1
+            }
+        }
+        for i: 0..7 { reply[33+i] = cast(u8)((cast(u64)until >> cast(u32)((7-i)*8)) & 255) }
+    return true
+}
+Hex :: (value: string) -> bool {
+    if value.count != 64 { return false }
+    for byte: value { if !((byte >= #char "0" && byte <= #char "9") || (byte >= #char "a" && byte <= #char "f")) { return false } }
+    return true
+}
+
+#scope_export
+Request :: (op: s32, kind: s32, root: string, token: string = "", stamp: string = "", renew: bool = false, registry: *Registry = null) -> Reply, string {
+    response: Reply
+    if op < 1 || op > 8 || (kind != HIDDEN && kind != APP) || root.count == 0 || root.count > 16384 ||
+        (token.count > 0 && !Hex(token)) || (stamp.count > 0 && !Hex(stamp)) { return response, "Invalid local access session" }
+    for byte: root { if byte == 0 { return response, "Invalid local access session" } }
+    owned := registry
+    if owned == null { owned = Default() }
+    if owned == null { return response, "Photos access sessions are unavailable; unlock again when the service returns" }
+    header: [100]u8; reply: [41]u8
+    defer { Wipe(*header[0],100); Wipe(*reply[0],41) }
+    header[0] = 1; header[1] = cast(u8)op; header[2] = cast(u8)kind; header[3] = ifx renew then 1 else 0
+    digest := Crypto.Sha256Of(root)
+    for i: 0..31 { header[4+i] = digest[i] }
+    if token.count > 0 { unused Crypto.HexToBytes(token, *header[36], 32) }
+    if stamp.count > 0 { unused Crypto.HexToBytes(stamp, *header[68], 32) }
+    if !Handle(owned, header[:], reply[:]) { return response, "Photos access sessions are unavailable; unlock again when the service returns" }
+    response.code = reply[0]
+    for i: 0..31 { response.token[i] = reply[1+i] }
+    for i: 0..7 { response.until = response.until * 256 + cast(s64)reply[33+i] }
+    if response.code == 2 { return response, "Local access session capacity reached; wait or restart Photos" }
+    if response.code == 3 { return response, "Too many attempts; wait one minute before trying again" }
+    return response, ""
+}
+Grant :: (root: string, kind: s32, stamp: string = "", registry: *Registry = null) -> string, string {
+    response, error := Request(1, kind, root, "", stamp, false, registry)
+    defer { Wipe(*response.token[0], 32) }
+    if error.count > 0 { return "", error }
+    if response.code != 1 || Zero(response.token[:]) { return "", "Photos could not grant local access" }
+    encoded: [65]u8
+    unused Crypto.BytesToHex(*response.token[0], 32, *encoded[0], 65)
+    output: Vec(u8); BuilderPrint(*output, "%", TextUntilNul(encoded[:]))
+    Wipe(*encoded[0], 65)
+    return BuilderFinish(output), ""
+}
+Deadline :: (root: string, kind: s32, token: string, stamp: string = "", renew: bool = false, registry: *Registry = null) -> s64 {
+    if token.count != 64 { return 0 }
+    response, error := Request(2, kind, root, token, stamp, renew, registry)
+    return ifx error.count == 0 && response.code == 1 then response.until else 0
+}
+Lock :: (root: string, kind: s32, token: string, registry: *Registry = null) {
+    if !Hex(token) { return }
+    response, error := Request(3, kind, root, token, "", false, registry)
+    if error.count > 0 { owned := registry; if owned == null { owned = Default() }; Reset(owned) }
+}
+Revoke :: (root: string, kind: s32, registry: *Registry = null) {
+    response, error := Request(4, kind, root, "", "", false, registry)
+    if error.count > 0 { owned := registry; if owned == null { owned = Default() }; Reset(owned) }
+}
+CheckAttempts :: (root: string, kind: s32, registry: *Registry = null) -> string {
+    response, error := Request(6, kind, root, "", "", false, registry)
+    return error
+}
+FailedAttempt :: (root: string, kind: s32, registry: *Registry = null) -> string {
+    response, error := Request(7, kind, root, "", "", false, registry)
+    return error
+}
+ClearAttempts :: (root: string, kind: s32, registry: *Registry = null) -> string {
+    response, error := Request(8, kind, root, "", "", false, registry)
+    return error
+}

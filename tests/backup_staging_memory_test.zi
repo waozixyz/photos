@@ -1,0 +1,59 @@
+Stage :: #import "backup_staging";
+Fixture :: #import "backup_fixture";
+Files :: #import "std/file";
+Kit :: #import "kit";
+#import "std/byte_text_linux"
+c :: #system_library "c";
+// glibc mallinfo2: ten size_t fields, including mmap and in-use arena bytes.
+Allocator :: struct { arena: usize; ordblks: usize; smblks: usize; hblks: usize; hblkhd: usize; usmblks: usize; fsmblks: usize; uordblks: usize; fordblks: usize; keepcost: usize }
+MallInfo :: () -> Allocator #foreign c "mallinfo2";
+Limit :: struct { current: u64; maximum: u64 }
+GetLimit :: (resource: s32,result: *Limit) -> s32 #foreign c "getrlimit";
+SetLimit :: (resource: s32,value: *Limit) -> s32 #foreign c "setrlimit";
+
+#scope_file
+Once :: (file: Files.FileHandle,size: s64,root: string,cancel: bool) -> bool {
+    account: [32]u8; key: [32]u8
+    permission: Fixture.Permission; permission.cancel=cancel; permission.limit=ifx size==0 then 2 else 4
+    manifest:=Fixture.PrepareWithCallback(file.fd,size,root,account[:],key[:],cast(*void)*permission,Fixture.Current)
+    defer { Fixture.Close(*manifest) }
+    return (ifx cancel then manifest.text=="" else manifest.text!="") && permission.calls==permission.limit
+}
+Run :: (root: string) -> s32 {
+    source:=Kit.Join(root,"source")
+    binary: [27]u8; label:="binary synthetic original"
+    for index: 0..label.count-1 { binary[index+1]=label[index] }; binary[26]=255
+    for mode: 0..3 {
+        content:=TextFromBytes(ifx mode%2==0 then binary[:0] else binary[:])
+        cancel:=mode>=2
+        if !Files.WriteEntireFile(source,content) { return 1 }
+        file:=Files.OpenRead(source)
+        if !file.valid { return 2 }; defer { unused Files.CloseFile(file) }
+        stage:=Fixture.Directory(Kit.Join(root,ifx mode==0 then "stage0" else ifx mode==1 then "stage1" else ifx mode==2 then "stage2" else "stage3"))
+        if stage=="" { return 3 }
+        for iteration: 0..15 { if !Once(file,content.count,stage,cancel) { return 4 } }
+        before:=MallInfo()
+        for iteration: 0..127 { if !Once(file,content.count,stage,cancel) { return 5 } }
+        after:=MallInfo()
+        retained:=ifx after.uordblks>before.uordblks then after.uordblks-before.uordblks else cast(usize)0
+        mapped:=ifx after.hblkhd>before.hblkhd then after.hblkhd-before.hblkhd else cast(usize)0
+        print("staging retained_bytes=%, mapped_bytes=%, cancelled=%\n",retained,mapped,cancel)
+        restored,valid:=Files.ReadEntireFile(source)
+        if !Kit.Expect(retained<=32768 && mapped<=32768 && valid && restored==content && Fixture.Count(stage)==(ifx cancel then 0 else 1),"actual allocator remains bounded across 128 retries/cancellations; source and stage preserved") { return 6 }
+    }
+    return 0
+}
+
+#program_export
+main :: () -> s32 {
+    // This executable owns its address-space limit; no running app is touched.
+    limit: Limit
+    if GetLimit(9,*limit)!=0 { return 100 }
+    if limit.current>100663296 { limit.current=100663296 }
+    if SetLimit(9,*limit)!=0 { return 101 }
+    root:=Kit.TempDirectory("backup-staging-memory")
+    if root=="" { return 102 }; defer { unused Kit.Cleanup(root) }
+    result:=Run(root)
+    if result==0 { print("backup_staging_memory: local tests passed\n") }
+    return result
+}

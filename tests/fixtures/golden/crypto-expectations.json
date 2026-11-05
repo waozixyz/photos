@@ -1,0 +1,18 @@
+{
+  "account_algorithm": "ML-DSA-44",
+  "account_public_bytes": 1312,
+  "account_secret_bytes": 2560,
+  "account_signature_bytes": 2420,
+  "entity_chunk_bytes": 8388608,
+  "entity_chunk_index": 0,
+  "entity_kind": "photos",
+  "notes": [
+    "All keys, passwords and content are public synthetic test data.",
+    "Python primitives create these files without invoking Photos pipe helpers."
+  ],
+  "recovery_argon2id_version": 19,
+  "recovery_magic": "PHOTOS-RECOVERY\\x01",
+  "recovery_memory_bytes": 67108864,
+  "recovery_passes": 3,
+  "synthetic_only": true
+}

@@ -1,0 +1,70 @@
+// A dedicated process measures native heap allocation across real in-process
+// SQLite mutations and caller-owned success/error reply buffers.
+Editor :: #import "library_edit";
+Kit :: #import "kit";
+SQL :: #import "sqlite/SQLite";
+#import "std/json_scan"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+c :: #system_library "c";
+HeapInfo :: struct {
+    arena: usize; blocks: usize; small: usize; mappings: usize; mapped: usize
+    unused_high: usize; free_fast: usize; used: usize; free: usize; releasable: usize
+}
+Heap :: () -> HeapInfo #foreign c "mallinfo2";
+
+Permit :: (context: *void, ids: []string, hidden: bool) -> Editor.Authorization {
+    unused context; unused ids; unused hidden
+    return .{until=Editor.Monotonic()+5.0}
+}
+
+Cycle :: (db: *void) -> bool {
+    requests: [4]string = .[
+        "{\"action\":\"favorite_set\",\"value\":\"1\",\"ids\":[\"485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a\"]}",
+        "{\"action\":\"location\",\"value\":\"12.5,-44.25\",\"ids\":[\"485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a\"]}",
+        "{\"action\":\"rename\",\"value\":\"Synthetic 日本語.jpg\",\"ids\":[\"485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a\"]}",
+        "{\"action\":\"unsupported\",\"value\":\"\",\"ids\":[]}"]
+    output: Vec(u8)
+    for at: 0..3 {
+        VecClear(output)
+        if !Editor.ApplyPhotosInto(*output,db,requests[at],Permit) { return false }
+        text := TextView(VecSlice(output,0,output.count))
+        if at == 3 {
+            if FieldAt(text,0,"error") < 0 { return false }
+        } else {
+            count := ReadNumber(text,FieldAt(text,0,"updated"))
+            if !count.valid || count.value != 1.0 || FieldAt(text,0,"error") >= 0 { return false }
+        }
+        if !SQL.SqliteGetAutocommit(db) { return false }
+    }
+    VecClear(output)
+    if !Editor.ApplyAlbumInto(*output,db,"{\"operation\":\"description\",\"name\":\"Fixture album\",\"value\":\"Synthetic loop\",\"search\":\"\",\"source\":\"\"}") { return false }
+    text := TextView(VecSlice(output,0,output.count))
+    count := ReadNumber(text,FieldAt(text,0,"saved"))
+    return count.valid && count.value == 1.0 && SQL.SqliteGetAutocommit(db)
+}
+
+#program_export
+main :: () -> s32 {
+    db: *void
+    if SQL.SqliteOpenText(":memory:",*db,SQL.SQLITE_OPEN_READWRITE|SQL.SQLITE_OPEN_CREATE) != SQL.SQLITE_OK { return 1 }
+    defer { unused SQL.SqliteClose(db) }
+    if !Kit.LoadSql(db,"tests/fixtures/golden/library-v0.1.59.sql") { return 2 }
+    occupied: Vec(u8)
+    BuilderAppend(occupied,"unchanged")
+    if Editor.ApplyPhotosInto(*occupied,db,"{}",Permit) || Editor.ApplyAlbumInto(*occupied,db,"{}") ||
+        TextView(VecSlice(occupied,0,occupied.count)) != "unchanged" ||
+        Editor.ApplyPhotosInto(null,db,"{}",Permit) || Editor.ApplyAlbumInto(null,db,"{}") { return 6 }
+    for at: 0..63 { if !Cycle(db) { print("warm cycle % failed\n",at); return 3 } }
+    before := Heap()
+    for at: 0..999 { if !Cycle(db) { print("measured cycle % failed\n",at); return 4 } }
+    after := Heap()
+    growth := ifx after.used > before.used then after.used-before.used else 0
+    // The former detached SQL/name/location/reply buffers grew by hundreds of
+    // KiB here. Allow bounded allocator/SQLite bookkeeping after warm-up.
+    print("Photos in-process editor: 5000 replies, heap before %, after %, growth % bytes\n",before.used,after.used,growth)
+    if !Kit.Expect(growth <= 32768,"editor heap remains bounded across repeated success/error requests") { return 5 }
+    return 0
+}

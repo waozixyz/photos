@@ -1,0 +1,180 @@
+Transport :: #import "sync_http";
+Frames :: #import "sync_frame";
+Wire :: #import "sync_crypto";
+Test :: #import "sync_crypto_test";
+Http :: #import "std/net_http";
+Socket :: #import "std/socket_linux";
+Text :: #import "std/text";
+Timer :: #import "std/timer_linux";
+#import "std/byte_text_linux"
+#import "std/c_string"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+c :: #system_library "c";
+SocketAddress :: struct { family: u16; port: u16; address: u32; zero: [8]u8; }
+PollFd :: struct { fd: s32; events: s16; revents: s16; }
+OpenSocket :: (domain: s32,type: s32,protocol: s32) -> s32 #foreign c "socket";
+CloseSocket :: (fd: s32) -> s32 #foreign c "close";
+Poll :: (fds: *PollFd,count: u64,timeout: s32) -> s32 #foreign c "poll";
+Bind :: (fd: s32,address: *SocketAddress,size: u32) -> s32 #foreign c "bind";
+Listen :: (fd: s32,count: s32) -> s32 #foreign c "listen";
+Address :: (fd: s32,address: *SocketAddress,size: *u32) -> s32 #foreign c "getsockname";
+Accept :: (fd: s32,address: *void,size: *u32) -> s32 #foreign c "accept";
+Fork :: () -> s32 #foreign c "fork";
+Wait :: (pid: s32,status: *s32,options: s32) -> s32 #foreign c "waitpid";
+Exit :: (code: s32) #foreign c "_exit";
+Sleep :: (microseconds: u32) -> s32 #foreign c "usleep";
+SetEnv :: (name: *u8,value: *u8,overwrite: s32) -> s32 #foreign c "setenv";
+
+Bytes :: (text: string) -> []u8 {
+    d:=cast(*TextDescriptor)*text; return BytesFromPointer(d.data,cast(u64)text.count)
+}
+Server :: struct { fd: s32; pid: s32; port: u16; }
+// A bounded child serves exactly one synthetic response on ephemeral loopback.
+// These native test-only functions never run in the production transport.
+Start :: (body: string,status: s32 = 200,extra: string = "",partial: bool = false,delay: u32 = 0,expected: string = "") -> Server {
+    result: Server; result.fd = -1; result.pid = -1
+    fd:=OpenSocket(2,524289,0)
+    if fd<0 { return result }
+    result.fd = fd
+    endpoint: SocketAddress; endpoint.family = 2; endpoint.address = 16777343
+    size: u32 = 16
+    if Bind(fd,*endpoint,16)!=0 || Listen(fd,1)!=0 || Address(fd,*endpoint,*size)!=0 {
+        unused CloseSocket(fd); result.fd = -1; return result
+    }
+    result.port = cast(u16)((endpoint.port>>8)|((endpoint.port&255)<<8))
+    pid:=Fork()
+    if pid<0 { unused CloseSocket(fd); result.fd = -1; return result }
+    if pid==0 {
+        waiter: [1]PollFd; waiter[0].fd = fd; waiter[0].events = 1
+        if Poll(*waiter[0],1,3000)<=0 { Exit(1) }
+        connection:=Accept(fd,null,null)
+        unused CloseSocket(fd)
+        if connection<0 { Exit(2) }
+        client: Socket.LinuxSocket; client.fd = connection; client.valid = true
+        request: [16384]u8; count: s64; received:=false
+        while count<request.count {
+            amount:=Socket.SocketReceive(client,request[count: ],1000)
+            if amount<=0 { break }; count+=amount
+            if Text.ContainsFoldASCII(TextFromBytes(request[: count]),"\r\n\r\n") { received = true; break }
+        }
+        if !received || (expected!="" && !Text.ContainsFoldASCII(TextFromBytes(request[: count]),expected)) {
+            unused Socket.SocketClose(*client); Exit(3)
+        }
+        if delay>0 { unused Sleep(delay) }
+        response: Vec(u8)
+        BuilderPrint(*response,"HTTP/1.1 % Synthetic\r\nContent-Length: %\r\nConnection: close\r\n%\r\n%",status,body.count+ifx partial then 5 else 0,extra,body)
+        text:=BuilderFinish(response)
+        unused Socket.SocketSendAll(client,Bytes(text),1000)
+        unused Socket.SocketClose(*client); Exit(0)
+    }
+    result.pid = pid
+    unused CloseSocket(fd); result.fd = -1
+    return result
+}
+Finish :: (server: Server) -> bool {
+    if server.pid<0 { return false }
+    status: s32; return Wait(server.pid,*status,0)==server.pid && status==0
+}
+Base :: (port: u16) -> Frames.SyncFrame {
+    frame: Frames.SyncFrame; frame.version = 1; frame.method = 1; frame.timeout_ms = 60000
+    frame.port = port; frame.path = "/api/v1/node"; frame.response_limit = 4096; return frame
+}
+Set :: (name: string,value: string) -> bool {
+    n: [128]u8; v: [1024]u8
+    return CopyCString(name,n[: ]) && CopyCString(value,v[: ]) && SetEnv(*n[0],*v[0],1)==0
+}
+
+#program_export
+main :: () -> s32 {
+    node:="{\"node_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"known_nodes\":[]}"
+    server:=Start(node); frame:=Base(server.port)
+    response,error:=Transport.HttpRequest(frame)
+    if !Test.Expect(Finish(server) && error=="" && response.code==0 && response.status==200 &&
+        TextFromBytes(response.body)==node,"real in-process loopback GET") { return 1 }
+    Transport.ClearResponse(*response)
+    if !Test.Expect(Set("http_proxy","http://127.0.0.1:1") && Set("ALL_PROXY","http://127.0.0.1:1") && Set("NO_PROXY",""),"synthetic proxy environment") { return 1 }
+    pin: [32]u8; for i: 0..31 { pin[i] = 170 }
+    server = Start(node); frame = Base(server.port); frame.version = 2; frame.pin = pin[: ]
+    response,error = Transport.HttpRequest(frame)
+    if !Test.Expect(Finish(server) && error=="" && response.code==0,"proxy bypass and pinned node policy") { return 1 }; Transport.ClearResponse(*response)
+    for mode: 0..2 {
+        data:=ifx mode==0 then node else ifx mode==1 then "{\"node_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"known_nodes\":[{\"sync\":{\"direction\":\"push\",\"apps\":[\"entity\"]}}]}" else "{}"
+        if mode==0 { pin[0]^=1 }
+        server = Start(data); frame = Base(server.port); frame.version = 2; frame.pin = pin[: ]
+        response,error = Transport.HttpRequest(frame)
+        if mode==0 { pin[0]^=1 }
+        expected:=ifx mode==0 then 6 else ifx mode==1 then 7 else 6
+        if !Test.Expect(Finish(server) && error!="" && response.code==expected && (response.body.count==0 && response.storage==null),"pin/outward/malformed node failures expose no response") { return 1 }
+    }
+    binary: [5]u8 = .{0,255,1,128,0}
+    server = Start(TextFromBytes(binary[: ]),201,"",false,0,"Authorization: Bearer synthetic")
+    frame = Base(server.port); frame.method = 3; frame.path = "/api/v1/blobs/entity/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; frame.body = binary[: ]
+    headers: [1]Http.HttpHeader; headers[0].name = "Authorization"; headers[0].value = "Bearer synthetic"; frame.headers = headers[: ]
+    response,error = Transport.HttpRequest(frame)
+    if !Test.Expect(Finish(server) && error=="" && response.status==201 && Test.Equal(response.body,binary[: ]),"binary PUT and account header") { return 1 }; Transport.ClearResponse(*response)
+    server = Start("1234"); frame = Base(server.port); frame.response_limit = 4
+    response,error = Transport.HttpRequest(frame)
+    if !Test.Expect(Finish(server) && error=="" && response.body.count==4,"inclusive decoded response bound") { return 1 }; Transport.ClearResponse(*response)
+    server = Start("12345"); frame = Base(server.port); frame.response_limit = 4
+    response,error = Transport.HttpRequest(frame)
+    if !Test.Expect(Finish(server) && response.code==3 && error!="" && (response.body.count==0 && response.storage==null),"oversized response clears partial body") { return 1 }
+    server = Start("partial",200,"",true); frame = Base(server.port)
+    response,error = Transport.HttpRequest(frame)
+    if !Test.Expect(Finish(server) && response.code==4 && error!="" && (response.body.count==0 && response.storage==null),"truncated HTTP body rejected") { return 1 }
+    server = Start("",302,"Location: https://example.invalid/private\r\n"); frame = Base(server.port)
+    response,error = Transport.HttpRequest(frame)
+    if !Test.Expect(Finish(server) && response.code==0 && response.status==302 && error!="","redirect returned without following") { return 1 }; Transport.ClearResponse(*response)
+    server = Start("expired",401); frame = Base(server.port)
+    response,error = Transport.HttpRequest(frame)
+    if !Test.Expect(Finish(server) && response.code==0 && response.status==401 && error!="" &&
+        TextFromBytes(response.body)=="expired","HTTP error preserves status/body for reauthentication") { return 1 }; Transport.ClearResponse(*response)
+    server = Start("slow",200,"",false,200000); frame = Base(server.port); frame.timeout_ms = 30
+    started:=Timer.MonotonicMilliseconds(); response,error = Transport.HttpRequest(frame)
+    if !Test.Expect(Finish(server) && response.code==4 && error!="" && (response.body.count==0 && response.storage==null) &&
+        Timer.MonotonicMilliseconds()-started<2000,"network deadline bounds stalled requests") { return 1 }
+    server = Start("retry"); frame = Base(server.port); response,error = Transport.HttpRequest(frame)
+    if !Test.Expect(Finish(server) && error=="" && response.status==200,"retry after transport failure") { return 1 }; Transport.ClearResponse(*response)
+    server = Start("{\"app_id\":\"photos\",\"status\":\"active\"}"); frame = Base(server.port); frame.path="/api/v1/apps/photos"
+    response,error = Transport.HttpRequest(frame)
+    if !Test.Expect(Finish(server) && error=="" && response.status==200,"fixed Photos registration GET") { return 1 }; Transport.ClearResponse(*response)
+    server = Start("{\"app_id\":\"photos\",\"status\":\"active\"}",201,"",false,0,"X-Daochi-Admin: synthetic-operator")
+    frame = Base(server.port); frame.path="/api/v1/apps"; frame.method=2; frame.body=Bytes("{\"app_id\":\"photos\"}")
+    admin: [1]Http.HttpHeader; admin[0].name="X-Daochi-Admin"; admin[0].value="synthetic-operator"; frame.headers=admin[:]
+    response,error = Transport.HttpRequest(frame)
+    if !Test.Expect(Finish(server) && error=="" && response.status==201,"operator header accepted only for registration POST") { return 1 }; Transport.ClearResponse(*response)
+    for mode: 0..6 {
+        invalidAdmin: [1]Http.HttpHeader
+        invalidAdmin[0].name="X-Daochi-Admin"
+        invalidAdmin[0].value=ifx mode==6 then "synthetic\r\nInjected: header" else "synthetic-operator"
+        invalidFrame:=Base(1)
+        if mode==0 { invalidFrame.path="/api/v1/apps/photos" }
+        else if mode==1 { invalidFrame.path="/api/v1/sync"; invalidFrame.method=2 }
+        else if mode==2 { invalidFrame.path="/api/v1/blobs/entity/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+        else if mode==3 { invalidFrame.path="/api/v1/apps" }
+        else if mode==4 { invalidFrame.path="/api/v1/apps"; invalidFrame.method=3 }
+        else if mode==5 { invalidFrame.path="/api/v1/apps/other" }
+        else { invalidFrame.path="/api/v1/apps"; invalidFrame.method=2 }
+        invalidFrame.headers=invalidAdmin[:]
+        response,error=Transport.HttpRequest(invalidFrame)
+        if !Test.Expect(response.code==2 && error!="" && response.storage==null,"operator header forbidden on reads/sync/blobs/wrong route/injection") { return 1 }
+    }
+    // Invalid inputs are rejected before a socket is opened; port 1 is never contacted.
+    for mode: 0..10 {
+        invalidFrame:=Base(1)
+        invalidHeaders: [1]Http.HttpHeader
+        invalidHeaders[0].name = ifx mode==10 then "Host" else "Authorization"
+        invalidHeaders[0].value = ifx mode==9 then "Bearer a\r\nInjected: x" else "example.invalid"
+        if mode==0 { invalidFrame.port = 0 } else if mode==1 { invalidFrame.path = "//example.invalid" } else if mode==2 { invalidFrame.method = 6 }
+        else if mode==3 { invalidFrame.timeout_ms = 0 } else if mode==4 { invalidFrame.response_limit = 134217729 }
+        else if mode==5 { invalidFrame.body = binary[: ] } else if mode==6 { invalidFrame.version = 3 }
+        else if mode==7 { invalidFrame.version = 2; invalidFrame.pin = pin[: 31] }
+        else if mode==8 { invalidFrame.version = 2; invalidFrame.pin = pin[: ]; invalidFrame.headers = headers[: ] }
+        else { invalidFrame.headers = invalidHeaders[:] }
+        response,error = Transport.HttpRequest(invalidFrame)
+        if !Test.Expect(response.code==2 && error!="" && (response.body.count==0 && response.storage==null),"unsafe request rejected before network") { return 1 }
+    }
+    print("sync_http: local tests passed\n"); return 0
+}

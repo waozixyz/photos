@@ -1,0 +1,282 @@
+Decode :: #import "decode_service";
+LibraryFiles :: #import "library_files";
+Store :: #import "library_store";
+Images :: #import "image_edit";
+Vault :: #import "vault";
+Access :: #import "access_registry";
+Kit :: #import "kit";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+SQL :: #import "sqlite/SQLite";
+Timer :: #import "std/timer_linux";
+Threads :: #import "std/thread_linux";
+#import "std/c_string"
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+pixbuf :: #system_library "gdk_pixbuf-2.0";
+objects :: #system_library "gobject-2.0";
+LoadPNG :: (path: *u8, error: **void) -> *void #foreign pixbuf "gdk_pixbuf_new_from_file";
+Width :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_width";
+Height :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_height";
+Channels :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_n_channels";
+Pixels :: (image: *void) -> *u8 #foreign pixbuf "gdk_pixbuf_get_pixels";
+Stride :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_rowstride";
+Unref :: (image: *void) #foreign objects "g_object_unref";
+
+Bytes :: (text: string) -> []u8 {
+    descriptor := cast(*TextDescriptor)*text
+    return BytesFromPointer(descriptor.data, cast(u64)text.count)
+}
+Script :: (path: string, text: string) -> bool {
+    return LibraryFiles.Atomic(path, Bytes(text)) && Tree.SetPathMode(path, 448)
+}
+Empty :: (path: string) -> bool {
+    names: Vec(string)
+    return !Files.PathExists(path) || (Tree.ListDirectory(path, *names) && names.count == 0)
+}
+
+Add :: (lib: *Store.Library, fixture: string, extension: string) -> Store.PhotoRow {
+    result: Store.PhotoRow
+    source := Kit.Join("tests/fixtures/codec", fixture)
+    id, error := LibraryFiles.DigestFile(source)
+    if error != "" { return result }
+    result.id = id; result.name = fixture; result.extension = extension; result.kind = "photo"
+    data, valid := Files.ReadEntireFile(source)
+    if !valid || !LibraryFiles.Atomic(LibraryFiles.Original(lib, result), Bytes(data)) { result.id = ""; return result }
+    statement: *void
+    sql := "INSERT INTO photos(id,name,extension,kind,size,taken,width,height,metadata,albums,updated,dirty) VALUES(?,?,?,'photo',?,1,0,0,'{}','[]',1,0)"
+    if SQL.SqlitePrepareText(lib.db,sql,-1,*statement,null) != SQL.SQLITE_OK { result.id = ""; return result }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if SQL.SqliteBindTextString(statement,1,id,cast(s32)id.count) != SQL.SQLITE_OK ||
+        SQL.SqliteBindTextString(statement,2,fixture,cast(s32)fixture.count) != SQL.SQLITE_OK ||
+        SQL.SqliteBindTextString(statement,3,extension,cast(s32)extension.count) != SQL.SQLITE_OK ||
+        SQL.SqliteBindInt64(statement,4,data.count) != SQL.SQLITE_OK || SQL.SqliteStep(statement) != SQL.SQLITE_DONE { result.id = "" }
+    return result
+}
+
+PixelCase :: (path: string, width: s32, height: s32, alpha: bool, raw: bool) -> bool {
+    name: [4096]u8
+    if !CopyCString(path,name[:]) { return false }
+    image := LoadPNG(*name[0],null)
+    if image == null { return false }
+    defer { Unref(image) }
+    if Width(image) != width || Height(image) != height { return false }
+    pixels := Pixels(image); channels := Channels(image); stride := Stride(image)
+    if pixels == null || (channels != 3 && channels != 4) { return false }
+    if alpha {
+        if channels != 4 { return false }
+        left := 20*stride+20*channels; right := 20*stride+75*channels
+        if cast(s32)pixels[left] <= cast(s32)pixels[right]+80 || pixels[right+3] < 108 || pixels[right+3] > 112 { return false }
+    }
+    if raw {
+        colors: [101]u32
+        count: s32
+        for y: 0..height-1 {
+            for x: 0..width-1 {
+                at := y*stride+x*channels
+                value := (cast(u32)pixels[at]<<16)|(cast(u32)pixels[at+1]<<8)|cast(u32)pixels[at+2]
+                seen := false
+                for i: 0..count-1 { if colors[i] == value { seen = true; break } }
+                if !seen { colors[count] = value; count += 1; if count > 100 { return true } }
+            }
+        }
+        return false
+    }
+    return true
+}
+
+CodecCases :: (lib: *Store.Library) -> bool {
+    fixtures: [5]string = .["still.heic","rotated.heic","camera.dng","rotated.dng","still.avif"]
+    extensions: [5]string = .[".heic",".heic",".dng",".dng",".avif"]
+    options: LibraryFiles.FileOptions = .{application_root=Tree.WorkingDirectory()}
+    for at: 0..4 {
+        photo := Add(lib,fixtures[at],extensions[at])
+        if photo.id == "" { return false }
+        original := LibraryFiles.Original(lib,photo)
+        before, beforeError := LibraryFiles.DigestFile(original)
+        path, error := Decode.Display(lib,photo,"",null,options)
+        width: s32 = ifx at == 1 || at == 3 then 64 else 96
+        height: s32 = ifx width == 64 then 96 else 64
+        if error != "" { print("decode %: %\n",fixtures[at],error); return false }
+        if beforeError != "" || path == original || path != Decode.DisplayPath(lib,photo) ||
+            !PixelCase(path,width,height,at == 0,at == 2 || at == 3) || Tree.PathStatus(path).mode != 384 { return false }
+        updated, updateError := LibraryFiles.Photo(lib,photo.id)
+        if updateError != "" || updated.width != width || updated.height != height || !updated.dirty { return false }
+        after, afterError := LibraryFiles.DigestFile(original)
+        if afterError != "" || before != after || after != photo.id { return false }
+        // A valid cache needs no helper and must not mark the row dirty again.
+        if SQL.SqliteExecText(lib.db,"UPDATE photos SET dirty=0") != SQL.SQLITE_OK { return false }
+        missing: LibraryFiles.FileOptions = .{application_root=Kit.Join(lib.root,"missing")}
+        cached, cachedError := Decode.Display(lib,photo,"",null,missing)
+        unchanged, unchangedError := LibraryFiles.Photo(lib,photo.id)
+        if cachedError != "" || cached != path || unchangedError != "" || unchanged.dirty { return false }
+        thumb := Kit.Join(lib.root,"thumb.png")
+        dimensions, thumbError := Decode.DecodeSource(original,extensions[at],thumb,true,options)
+        if thumbError != "" || dimensions.width != width || dimensions.height != height || !PixelCase(thumb,width,height,false,false) { return false }
+    }
+    return true
+}
+
+FailureCases :: (root: string) -> bool {
+    helperRoot := Kit.Join(root,"helpers")
+    if !Tree.CreateDirectories(helperRoot,448) { return false }
+    helper := Kit.Join(helperRoot,"photo_decode")
+    destination := Kit.Join(root,"failure/image.png")
+    options: LibraryFiles.FileOptions = .{application_root=helperRoot,decode_timeout_ms=60}
+    dimensions, absent := Decode.DecodeSource("/missing",".heic",destination,false,options)
+    unused dimensions
+    if absent == "" { return false }
+    scripts: [7]string = .[
+        "#!/bin/sh\nexit 23\n",
+        "#!/bin/sh\nexec sleep 5\n",
+        "#!/bin/sh\nprintf 'not a PNG' > \"$3\"; printf '{\"width\":96,\"height\":64}'\n",
+        "#!/bin/sh\nprintf '{\"width\":true,\"height\":64}'\n",
+        "#!/bin/sh\nprintf '{\"width\":1.5,\"height\":64}'\n",
+        "#!/bin/sh\nprintf '{\"width\":100001,\"height\":64}'\n",
+        "#!/bin/sh\nprintf '{broken'\n"]
+    for text: scripts {
+        if !Script(helper,text) { return false }
+        result, error := Decode.DecodeSource("/missing",".heic",destination,false,options)
+        unused result
+        if error == "" || Files.PathExists(destination) || !Empty(Tree.PathParent(destination)) { return false }
+    }
+    png := Kit.Join(helperRoot,"pixels.png")
+    if !Kit.Png(png,96,64,0xd03080) || !Kit.Png(destination,12,8,0x204060) { return false }
+    before, beforeError := LibraryFiles.DigestFile(destination)
+    if !Script(helper,"#!/bin/sh\nprintf 'partial' > \"$3\"; exit 23\n") { return false }
+    result, error := Decode.DecodeSource("/missing",".heic",destination,false,options)
+    unused result
+    after, afterError := LibraryFiles.DigestFile(destination)
+    if error == "" || beforeError != "" || afterError != "" || before != after { return false }
+    // A successful helper must still provide consistent full-size dimensions.
+    script: Vec(u8)
+    BuilderPrint(*script,"#!/bin/sh\ncp -- \"%\" \"$3\"; printf '{\"width\":64,\"height\":96}'\n",png)
+    if !Script(helper,TextView(VecSlice(script,0,script.count))) { return false }
+    mismatch, mismatchError := Decode.DecodeSource("/missing",".heic",destination,false,options)
+    unused mismatch
+    if mismatchError == "" || !PixelCase(destination,12,8,false,false) { return false }
+    broken := Kit.Join(root,"broken.cr3")
+    if !LibraryFiles.Atomic(broken,Bytes("not a RAW camera file")) { return false }
+    realOptions: LibraryFiles.FileOptions = .{application_root=Tree.WorkingDirectory()}
+    invalid, invalidError := Decode.DecodeSource(broken,".cr3",Kit.Join(root,"invalid/image.png"),false,realOptions)
+    unused invalid
+    data, valid := Files.ReadEntireFile(broken)
+    if invalidError == "" || !valid || data != "not a RAW camera file" || !Empty(Kit.Join(root,"invalid")) { return false }
+    actualHelper := LibraryFiles.HelperProgram(realOptions,"photo_decode","photo-decoder")
+    arguments: [5]string = .[actualHelper,"heif","/missing","/missing","999"]
+    exitCode: s32
+    return !LibraryFiles.RunHelper(arguments[:],2000,null,*exitCode) && exitCode == 2
+}
+
+RollbackCase :: (lib: *Store.Library) -> bool {
+    id, digestError := LibraryFiles.DigestFile("tests/fixtures/codec/rotated.heic")
+    if digestError != "" { return false }
+    photo, error := LibraryFiles.Photo(lib,id)
+    if error != "" || !Files.RemoveFile(Decode.DisplayPath(lib,photo)) ||
+        SQL.SqliteExecText(lib.db,"UPDATE photos SET width=0,height=0,dirty=0") != SQL.SQLITE_OK ||
+        SQL.SqliteExecText(lib.db,"CREATE TEMP TRIGGER fail_decode BEFORE UPDATE OF width ON photos BEGIN SELECT RAISE(ABORT,'synthetic decode rollback'); END") != SQL.SQLITE_OK { return false }
+    defer { unused SQL.SqliteExecText(lib.db,"DROP TRIGGER fail_decode") }
+    options: LibraryFiles.FileOptions = .{application_root=Tree.WorkingDirectory()}
+    path, failed := Decode.Display(lib,photo,"",null,options)
+    updated, readError := LibraryFiles.Photo(lib,id)
+    return path == "" && failed == "Could not update decoded photo dimensions" && readError == "" &&
+        updated.width == 0 && updated.height == 0 && !updated.dirty &&
+        !Files.PathExists(Decode.DisplayPath(lib,photo)) && SQL.SqliteGetAutocommit(lib.db)
+}
+
+LockContext :: struct { lib: *Store.Library; registry: *Access.Registry; token: string; entered: string; release: string; done: bool }
+RevokeDuringDecode :: (opaque: *void) {
+    context := cast(*LockContext)opaque
+    deadline := Timer.MonotonicMilliseconds()+2000
+    while !Files.PathExists(context.entered) && Timer.MonotonicMilliseconds() < deadline { unused Timer.SleepMilliseconds(2) }
+    if !Files.PathExists(context.entered) { return }
+    Vault.Lock(context.lib,context.token,context.registry)
+    context.done = Files.WriteEntireFile(context.release,"ready")
+}
+
+PrivacyCases :: (lib: *Store.Library) -> bool {
+    photo, error := LibraryFiles.Photo(lib,"missing")
+    unused error
+    // Reuse the real HEIC row, replacing only its disposable cache.
+    source := "tests/fixtures/codec/still.heic"
+    id, digestError := LibraryFiles.DigestFile(source)
+    if digestError != "" { return false }
+    photo, error = LibraryFiles.Photo(lib,id)
+    if error != "" || !Files.RemoveFile(Decode.DisplayPath(lib,photo)) { return false }
+    helperRoot := Kit.Join(lib.root,"fake-codec")
+    if !Tree.CreateDirectories(helperRoot,448) { return false }
+    helper := Kit.Join(helperRoot,"photo_decode")
+    marker := Kit.Join(helperRoot,"entered")
+    release := Kit.Join(helperRoot,"release")
+    png := Kit.Join(helperRoot,"pixels.png")
+    if !Kit.Png(png,96,64,0xd03080) { return false }
+    script: Vec(u8)
+    BuilderPrint(*script,"#!/bin/sh\n[ -z \"${DISPLAY+x}${WAYLAND_DISPLAY+x}${XAUTHORITY+x}${DBUS_SESSION_BUS_ADDRESS+x}${SESSION_MANAGER+x}\" ] || exit 91\n[ \"$OMP_NUM_THREADS\" = 2 ] || exit 92\ntouch -- \"%\"\nwhile [ ! -f \"%\" ]; do sleep 0.01; done\ncp -- \"%\" \"$3\"\nprintf '{\"width\":96,\"height\":64}'\n",marker,release,png)
+    if !Script(helper,TextView(VecSlice(script,0,script.count))) ||
+        SQL.SqliteExecText(lib.db,"UPDATE photos SET hidden=1,width=0,height=0,dirty=0") != SQL.SQLITE_OK { return false }
+    options: LibraryFiles.FileOptions = .{application_root=helperRoot,decode_timeout_ms=2000}
+    locked, lockedError := Decode.Display(lib,photo,"",null,options)
+    if locked != "" || lockedError == "" || Files.PathExists(marker) { return false }
+    registry: Access.Registry
+    if !Access.Initialize(*registry) { return false }
+    defer { Access.Close(*registry) }
+    password: [11]u8 = .[115,121,110,116,104,101,116,105,99,33,33]
+    token, authError := Vault.VaultAuthenticate(lib,password[:],true,*registry)
+    if authError != "" { return false }
+    context: LockContext = .{lib=lib,registry=*registry,token=token,entered=marker,release=release}
+    thread: Threads.Thread
+    if !Threads.ThreadStart(*thread,RevokeDuringDecode,cast(*void)*context) { return false }
+    started := Timer.MonotonicMilliseconds()
+    revoked, revokedError := Decode.Display(lib,photo,token,*registry,options)
+    Threads.ThreadWait(*thread)
+    row, rowError := LibraryFiles.Photo(lib,id)
+    if !context.done || Timer.MonotonicMilliseconds()-started >= 1800 || revoked != "" ||
+        revokedError != "Unlock Hidden before changing these photos" || Files.PathExists(Decode.DisplayPath(lib,photo)) ||
+        rowError != "" || row.width != 0 || row.height != 0 || row.dirty { return false }
+    // Another writer may hide a public row while the helper is running.
+    if !Files.RemoveFile(marker) || !Files.RemoveFile(release) ||
+        SQL.SqliteExecText(lib.db,"UPDATE photos SET hidden=0") != SQL.SQLITE_OK { return false }
+    executable := Tree.ResolvePath("/proc/self/exe")
+    VecClear(script)
+    BuilderPrint(*script,"#!/bin/sh\n\"%\" --hide \"%\" || exit 93\ncp -- \"%\" \"$3\"\nprintf '{\"width\":96,\"height\":64}'\n",executable,Kit.Join(lib.root,"library.sqlite"),png)
+    if !Script(helper,TextView(VecSlice(script,0,script.count))) { return false }
+    hidden, hiddenError := Decode.Display(lib,photo,"",*registry,options)
+    if hidden != "" || hiddenError == "" || Files.PathExists(Decode.DisplayPath(lib,photo)) || !SQL.SqliteGetAutocommit(lib.db) { return false }
+    registry.duration = 100
+    expiring, grantError := Access.Grant(lib.root,Access.HIDDEN,"",*registry)
+    if grantError != "" { return false }
+    VecClear(script)
+    BuilderPrint(*script,"#!/bin/sh\nsleep 0.2\ncp -- \"%\" \"$3\"\nprintf '{\"width\":96,\"height\":64}'\n",png)
+    if !Script(helper,TextView(VecSlice(script,0,script.count))) { return false }
+    expired, expiredError := Decode.Display(lib,photo,expiring,*registry,options)
+    return expired == "" && expiredError == "Unlock Hidden before changing these photos" &&
+        !Files.PathExists(Decode.DisplayPath(lib,photo)) && SQL.SqliteGetAutocommit(lib.db)
+}
+
+#program_export
+main :: (argc: s32, argv: **u8) -> s32 {
+    if argc == 3 && TextFromCString(argv[1]) == "--hide" {
+        db: *void
+        if SQL.SqliteOpenText(TextFromCString(argv[2]),*db,SQL.SQLITE_OPEN_READWRITE) != SQL.SQLITE_OK { return 90 }
+        defer { unused SQL.SqliteClose(db) }
+        return ifx SQL.SqliteExecText(db,"UPDATE photos SET hidden=1") == SQL.SQLITE_OK then 0 else 91
+    }
+    root := Kit.TempDirectory("decode-service")
+    if root == "" { return 1 }
+    defer { unused Kit.Cleanup(root) }
+    if Kit.Library(Kit.Join(root,"library")) == "" { return 2 }
+    lib, error := Store.Open(Kit.Join(root,"library"))
+    unused error
+    if lib == null { return 3 }
+    defer { Store.Close(lib) }
+    if !Kit.Expect(Decode.Supported(".heic") && Decode.Supported(".avif") && Decode.Supported(".dng") && !Decode.Supported(".jpg") && !Decode.Supported(".HEIC"),"codec extensions") { return 4 }
+    if !Kit.Expect(CodecCases(lib),"HEIC/AVIF alpha, orientation, RAW pixels, cache, thumbnail and immutable originals") { return 5 }
+    if !Kit.Expect(FailureCases(root),"decoder absence/failure/timeout/dimensions/PNG validation/atomic cleanup") { return 6 }
+    if !Kit.Expect(RollbackCase(lib),"dimension SQL failure rolls back without publishing a cache") { return 8 }
+    if !Kit.Expect(PrivacyCases(lib),"locked decoder suppression and concurrent revoke/hide before publication") { return 7 }
+    print("Photos decode service: real codec pixels/orientation/alpha, immutable originals, atomic failures and concurrent privacy passed\n")
+    return 0
+}

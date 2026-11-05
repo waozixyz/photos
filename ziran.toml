@@ -66,3 +66,11 @@ ref = "master"
 [dependencies.mingcute]
 git = "https://github.com/kryonlabs/mingcute.git"
 ref = "master"
+
+[dependencies.crypto]
+git = "https://github.com/ziranlang/crypto.git"
+ref = "master"
+
+[dependencies.clip_tokenizer]
+git = "https://github.com/ziranlang/clip-tokenizer.git"
+ref = "master"

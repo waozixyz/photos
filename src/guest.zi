@@ -1,0 +1,327 @@
+// Persistent read-only presentation scope. Native SQL owns scope membership.
+Store :: #import "library_store";
+LibraryFiles :: #import "library_files";
+Albums :: #import "library_albums";
+Gallery :: #import "gallery_query";
+Engine :: #import "library_query";
+NativeScope :: #import "guest_scope";
+Vault :: #import "vault";
+App :: #import "app_lock";
+Auth :: #import "vault_auth";
+Access :: #import "access_registry";
+SQL :: #import "sqlite/SQLite";
+JSON :: #import "std/json_document";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+Mutex :: #import "std/mutex_linux";
+#import "std/byte_text_linux"
+#import "std/c_string"
+using Vectors :: #import "std/vec";
+
+#scope_file
+c :: #system_library "c";
+Initializer :: #type () #c_call;
+Once :: (control: *s32, initialize: Initializer) -> s32 #foreign c "pthread_once";
+Open :: (path: *u8, flags: s32, mode: s32) -> s32 #foreign c "open";
+once: s32;
+guard: Mutex.Mutex;
+ready: bool;
+Initialize :: () { ready = Mutex.Open(*guard) }
+Text :: (document: *JSON.JsonDocument, object: s32, key: string) -> string { return JSON.JsonString(document,JSON.JsonMember(document,object,key)) }
+Serialize :: (document: *JSON.JsonDocument, node: s32) -> string {
+    if document.error.count > 0 { return "" }
+    output: Vec(u8)
+    if !JSON.JsonWriteInto(*output,document,node,JSON.JsonCompactStyle(false)) { Auth.WipeOwned(*output); return "" }
+    return BuilderFinish(output)
+}
+Put :: (document: *JSON.JsonDocument, key: string, value: s64) { unused JSON.JsonSet(document,document.root,key,JSON.JsonNewInteger(document,value)) }
+PutText :: (document: *JSON.JsonDocument, key: string, value: string) { unused JSON.JsonSet(document,document.root,key,JSON.JsonNewStringCopy(document,value)) }
+Fail :: (lib: *Store.Library, message: string) -> string { Store.SetError(lib,message); return "" }
+
+#scope_export
+// C39 holds this guard across the complete RPC, including an owner-mode
+// dispatch after GuestRouteLocked passes through. GuestRoute is standalone.
+Enter :: () -> bool { callback: Initializer = Initialize; return Once(*once,callback) == 0 && ready && Mutex.Lock(*guard) }
+Leave :: () { unused Mutex.Unlock(*guard) }
+Path :: (lib: *Store.Library) -> string { return Tree.JoinPath(lib.root,"private/guest-view.json") }
+Identity :: (id: string) -> bool {
+    if id.count != 64 { return false }
+    for byte: id { if !((byte >= 48 && byte <= 57) || (byte >= 97 && byte <= 102)) { return false } }
+    return true
+}
+// Empty means no scope; every malformed existing marker remains locked down.
+// Every nonempty Scope result is owned; callers release it after use.
+Scope :: (lib: *Store.Library) -> string {
+    path := Path(lib); defer { Auth.ReleaseOwned(path,false) }
+    if Tree.PathStatus(path,false).kind == Tree.PathKind.Missing { return "" }
+    raw: Vec(u8)
+    document: JSON.JsonDocument; defer { JSON.JsonReset(*document) }; JSON.JsonSetEraser(*document,Auth.JsonErase)
+    ok := Vault.ReadMarkerInto(path,*raw,100000)
+    text := TextView(VecSlice(raw,0,raw.count))
+    valid := ok && JSON.JsonRead(*document,text,Auth.JsonErase)
+    request: Vec(u8); BuilderPrint(*request,"{\"guest_scope\":%}",text)
+    parsed: NativeScope.Scope; NativeScope.ReadScope(TextView(VecSlice(request,0,request.count)),*parsed)
+    if !valid || !parsed.active || parsed.error.count > 0 {
+        VecClear(raw); BuilderPrint(*raw,"{\"kind\":\"invalid\"}")
+    }
+    return BuilderFinish(raw)
+}
+Active :: (lib: *Store.Library) -> bool { scope := Scope(lib); defer { Auth.ReleaseOwned(scope,false) }; return scope.count > 0 }
+Empty :: (message: string = "Guest view · authenticate to leave") -> string {
+    out: Vec(u8); BuilderPrint(*out,"{\"guest_active\":1,\"vault_configured\":1,\"vault_unlocked\":0,\"vault_token\":\"\",\"photos\":[],\"albums\":[],\"count\":0,\"total\":0,\"pending\":0,\"view\":\"photos\",\"status\":")
+    if !JSON.JsonQuoteInto(*out,message,false) { return "" }
+    BuilderPrint(*out,",\"guest_configured\":1}")
+    return BuilderFinish(out)
+}
+Selected :: (lib: *Store.Library, scope: string, offset: s64 = 0, limit: s32 = 60, photo_id: string = "") -> string {
+    value: JSON.JsonDocument; defer { JSON.JsonReset(*value) }; JSON.JsonSetEraser(*value,Auth.JsonErase)
+    if !JSON.JsonRead(*value,scope,Auth.JsonErase) { return Fail(lib,"Choose a valid Guest view scope") }
+    if JSON.JsonIs(*value,JSON.JsonMember(*value,value.root,"kind"),"invalid") { out: Vec(u8); BuilderPrint(*out,"{\"ids\":[],\"count\":0}"); return BuilderFinish(out) }
+    request: Vec(u8); BuilderPrint(*request,"{\"guest_scope\":%,\"offset\":%,\"limit\":%",scope,offset,limit)
+    if photo_id.count > 0 { BuilderPrint(*request,",\"photo_id\":"); if !JSON.JsonQuoteInto(*request,photo_id,false) { return Fail(lib,"Cannot read Guest view selection") } }
+    BuilderPrint(*request,"}")
+    return Gallery.Page(lib,TextView(VecSlice(request,0,request.count)))
+}
+Allowed :: (lib: *Store.Library, scope: string, id: string) -> bool {
+    if !Identity(id) { return false }
+    page: JSON.JsonDocument; defer { JSON.JsonReset(*page) }; JSON.JsonSetEraser(*page,Auth.JsonErase)
+    selected := Selected(lib,scope,0,1,id); defer { Auth.ReleaseOwned(selected,false) }
+    if !JSON.JsonRead(*page,selected,Auth.JsonErase) || lib.error.count > 0 { return false }
+    ids := JSON.JsonMember(*page,page.root,"ids")
+    item := JSON.JsonFirst(*page,ids)
+    return item >= 0 && JSON.JsonIs(*page,item,id)
+}
+
+#scope_file
+Current :: (lib: *Store.Library, expected: string) -> bool { actual := Scope(lib); defer { Auth.ReleaseOwned(actual,false) }; return actual == expected }
+PrepareScope :: (lib: *Store.Library, scope: string) -> bool {
+    value: JSON.JsonDocument; defer { JSON.JsonReset(*value) }; JSON.JsonSetEraser(*value,Auth.JsonErase)
+    if !JSON.JsonRead(*value,scope,Auth.JsonErase) { return false }
+    return !JSON.JsonIs(*value,JSON.JsonMember(*value,value.root,"kind"),"selection") || Engine.PrepareGuestSelection(lib.db)
+}
+PageInside :: (lib: *Store.Library, scope: string, input: *JSON.JsonDocument, published: bool) -> string {
+    offset_node := JSON.JsonMember(input,input.root,"offset")
+    offset: s64
+    if offset_node >= 0 {
+        number,ok := JSON.JsonInteger(input,offset_node)
+        if !ok || number < 0 || number > 2147483647 { return Fail(lib,"Choose a valid guest page") }
+        offset = number
+    }
+    if !PrepareScope(lib,scope) { return Fail(lib,"Cannot read Guest view selection") }
+    owned := SQL.SqliteGetAutocommit(lib.db)
+    if owned && SQL.SqliteExecText(lib.db,"BEGIN IMMEDIATE") != SQL.SQLITE_OK { return Fail(lib,"Guest view could not finish; authenticate to leave") }
+    defer { if owned { unused SQL.SqliteExecText(lib.db,"ROLLBACK") } }
+    selection: JSON.JsonDocument; defer { JSON.JsonReset(*selection) }; JSON.JsonSetEraser(*selection,Auth.JsonErase)
+    selected := Selected(lib,scope,offset); defer { Auth.ReleaseOwned(selected,false) }
+    if !JSON.JsonRead(*selection,selected,Auth.JsonErase) || lib.error.count > 0 { return "" }
+    empty := Empty(); defer { Auth.ReleaseOwned(empty,false) }
+    output: JSON.JsonDocument; defer { JSON.JsonReset(*output) }; JSON.JsonSetEraser(*output,Auth.JsonErase); unused JSON.JsonRead(*output,empty,Auth.JsonErase)
+    count := JSON.JsonMember(*selection,selection.root,"count")
+    unused JSON.JsonSet(*output,output.root,"count",JSON.JsonCopy(*output,*selection,count))
+    unused JSON.JsonSet(*output,output.root,"total",JSON.JsonCopy(*output,*selection,count))
+    photos := JSON.JsonNewArray(*output)
+    modern_node := JSON.JsonMember(input,input.root,"gallery_format")
+    modern,modern_ok := JSON.JsonInteger(input,modern_node)
+    item := JSON.JsonFirst(*selection,JSON.JsonMember(*selection,selection.root,"ids"))
+    while item >= 0 {
+        id := JSON.JsonString(*selection,item)
+        defer { Auth.ReleaseOwned(id,false) }
+        row: JSON.JsonDocument; defer { JSON.JsonReset(*row) }; JSON.JsonSetEraser(*row,Auth.JsonErase)
+        photo := Gallery.GuestPhoto(lib,id,modern_ok && modern == 2); defer { Auth.ReleaseOwned(photo,false) }
+        if !JSON.JsonRead(*row,photo,Auth.JsonErase) || lib.error.count > 0 { return "" }
+        unused JSON.JsonAppend(*output,photos,JSON.JsonCopy(*output,*row,row.root))
+        item = JSON.JsonNext(*selection,item)
+    }
+    unused JSON.JsonSet(*output,output.root,"photos",photos)
+    if published && !Current(lib,scope) { return Fail(lib,"Guest photo access ended") }
+    return Serialize(*output,output.root)
+}
+Publish :: (lib: *Store.Library, scope: string) -> bool {
+    packed := Store.Packed(scope); descriptor := cast(*TextDescriptor)*packed
+    defer { Auth.ReleaseOwned(packed,false) }
+    path := Path(lib); defer { Auth.ReleaseOwned(path,false) }
+    if !LibraryFiles.Atomic(path,BytesFromPointer(descriptor.data,cast(u64)packed.count)) { return false }
+    parent := Tree.PathParent(path); name: [4096]u8
+    if !CopyCString(parent,name[:]) { return false }
+    file: Files.FileHandle; file.fd = Open(*name[0],65536|524288,0); file.valid = file.fd >= 0
+    if !file.valid { return false }
+    synced := Files.SyncFile(file); unused Files.CloseFile(file)
+    return synced
+}
+
+#scope_export
+Start :: (lib: *Store.Library, request: string, registry: *Access.Registry = null) -> string {
+    if !App.Enabled(lib) && !Vault.Configured(lib) { return Fail(lib,"Set up App lock or a Hidden password first; it protects leaving Guest view") }
+    if !SQL.SqliteGetAutocommit(lib.db) { return Fail(lib,"Finish the current operation before starting Guest view") }
+    input: JSON.JsonDocument; defer { JSON.JsonReset(*input) }; JSON.JsonSetEraser(*input,Auth.JsonErase)
+    if !JSON.JsonRead(*input,request,Auth.JsonErase) { return Fail(lib,"Choose a valid Photos request") }
+    token := Text(*input,input.root,"app_lock_token"); defer { Auth.ReleaseOwned(token) }
+    if App.Enabled(lib) && !App.Unlocked(lib,token,false,registry) { return Fail(lib,"Photos is locked") }
+    if !JSON.JsonIs(*input,JSON.JsonMember(*input,input.root,"value"),"album") && !Engine.PrepareGuestSelection(lib.db) { return Fail(lib,"Cannot read Guest view selection") }
+    if SQL.SqliteExecText(lib.db,"BEGIN IMMEDIATE") != SQL.SQLITE_OK { return Fail(lib,"Guest view could not finish; authenticate to leave") }
+    scope: string
+    defer { Auth.ReleaseOwned(scope,false) }
+    {
+        defer { unused SQL.SqliteExecText(lib.db,"ROLLBACK") }
+        value: JSON.JsonDocument; defer { JSON.JsonReset(*value) }; JSON.JsonSetEraser(*value,Auth.JsonErase); value.root = JSON.JsonNewObject(*value)
+        Put(*value,"version",1)
+        if JSON.JsonIs(*input,JSON.JsonMember(*input,input.root,"value"),"album") {
+            name := Text(*input,input.root,"album"); defer { Auth.ReleaseOwned(name) }
+            if name.count == 0 { return Fail(lib,"Open an album before starting Guest view") }
+            album_text,error := Albums.AlbumDetails(lib,name)
+            defer { Auth.ReleaseOwned(album_text,false) }
+            if error.count > 0 { return Fail(lib,error) }
+            album: JSON.JsonDocument; defer { JSON.JsonReset(*album) }; JSON.JsonSetEraser(*album,Auth.JsonErase); unused JSON.JsonRead(*album,album_text,Auth.JsonErase)
+            album_id := Text(*album,album.root,"id"); defer { Auth.ReleaseOwned(album_id,false) }
+            filter := Text(*album,album.root,"filter"); defer { Auth.ReleaseOwned(filter,false) }
+            PutText(*value,"kind","album"); PutText(*value,"id",album_id); PutText(*value,"filter",filter)
+            scope = Serialize(*value,value.root)
+            selected: JSON.JsonDocument; defer { JSON.JsonReset(*selected) }; JSON.JsonSetEraser(*selected,Auth.JsonErase)
+            page := Selected(lib,scope); defer { Auth.ReleaseOwned(page,false) }
+            if !JSON.JsonRead(*selected,page,Auth.JsonErase) || lib.error.count > 0 { return "" }
+            if JSON.JsonCount(*selected,JSON.JsonMember(*selected,selected.root,"ids")) == 0 { return Fail(lib,"Choose an album with visible photos or videos") }
+        } else {
+            ids := JSON.JsonMember(*input,input.root,"ids")
+            if ids < 0 || JSON.JsonKindOf(*input,ids) == JSON.JsonKind.Null {
+                ids = JSON.JsonNewArray(*input)
+                id := JSON.JsonMember(*input,input.root,"id")
+                if JSON.JsonKindOf(*input,id) == JSON.JsonKind.String && !JSON.JsonIs(*input,id,"") {
+                    unused JSON.JsonAppend(*input,ids,JSON.JsonCopy(*input,*input,id))
+                }
+            }
+            if JSON.JsonKindOf(*input,ids) != JSON.JsonKind.Array || JSON.JsonCount(*input,ids) < 1 || JSON.JsonCount(*input,ids) > 1000 { return Fail(lib,"Choose between 1 and 1000 photos or videos for Guest view") }
+            unique := JSON.JsonNewArray(*value)
+            seen: s32
+            item := JSON.JsonFirst(*input,ids)
+            while item >= 0 {
+                id := JSON.JsonString(*input,item)
+                defer { Auth.ReleaseOwned(id,false) }
+                if !Identity(id) { return Fail(lib,"Choose between 1 and 1000 photos or videos for Guest view") }
+                duplicate: bool
+                prior := JSON.JsonFirst(*value,unique)
+                while prior >= 0 { if JSON.JsonIs(*value,prior,id) { duplicate = true; break }; prior = JSON.JsonNext(*value,prior) }
+                if !duplicate { seen += 1; unused JSON.JsonAppend(*value,unique,JSON.JsonCopy(*value,*input,item)) }
+                item = JSON.JsonNext(*input,item)
+            }
+            PutText(*value,"kind","selection"); unused JSON.JsonSet(*value,value.root,"ids",unique)
+            scope = Serialize(*value,value.root)
+            selected: JSON.JsonDocument; defer { JSON.JsonReset(*selected) }; JSON.JsonSetEraser(*selected,Auth.JsonErase)
+            page := Selected(lib,scope,0,1); defer { Auth.ReleaseOwned(page,false) }
+            if !JSON.JsonRead(*selected,page,Auth.JsonErase) || lib.error.count > 0 { return "" }
+            count,count_ok := JSON.JsonInteger(*selected,JSON.JsonMember(*selected,selected.root,"count"))
+            if !count_ok || count != seen { return Fail(lib,"Restore and unhide every selected item before starting Guest view") }
+        }
+        if App.Enabled(lib) && !App.Unlocked(lib,token,false,registry) { return Fail(lib,"Photos is locked") }
+        packed := Store.Packed(scope)
+        Auth.ReleaseOwned(scope,false); scope = packed
+        if !Publish(lib,scope) { return Fail(lib,"Guest view could not finish; authenticate to leave") }
+        Vault.RevokeAll(lib,registry)
+    }
+    Put(*input,"offset",0)
+    return PageInside(lib,scope,*input,true)
+}
+
+DecodeService :: #type (context: *void, lib: *Store.Library, id: string) -> string;
+PlaybackService :: #type (context: *void, lib: *Store.Library, request: string) -> string;
+// PlaybackService replies are owned JSON; DecodeService errors are borrowed.
+Services :: struct { context: *void; registry: *Access.Registry; decode: DecodeService; playback: PlaybackService }
+
+#scope_file
+WithError :: (message: string) -> string {
+    empty := Empty(); defer { Auth.ReleaseOwned(empty,false) }
+    result: JSON.JsonDocument; defer { JSON.JsonReset(*result) }; JSON.JsonSetEraser(*result,Auth.JsonErase); unused JSON.JsonRead(*result,empty,Auth.JsonErase); PutText(*result,"error",message)
+    return Serialize(*result,result.root)
+}
+Route :: (lib: *Store.Library, request: string, services: *Services) -> string,bool {
+    Store.ClearError(lib)
+    input: JSON.JsonDocument
+    defer { JSON.JsonReset(*input) }
+    if !JSON.JsonRead(*input,request,Auth.JsonErase) || JSON.JsonKindOf(*input,input.root) != JSON.JsonKind.Object { return WithError("Choose a valid Photos request"),true }
+    registry: *Access.Registry
+    if services != null { registry = services.registry }
+    scope := Scope(lib); defer { Auth.ReleaseOwned(scope,false) }
+    raw_action := Text(*input,input.root,"action"); defer { Auth.ReleaseOwned(raw_action) }
+    action := ifx raw_action.count == 0 then "query" else raw_action
+    if scope.count == 0 {
+        if action != "guest_start" { return "",false }
+        response := Start(lib,request,registry)
+        if lib.error.count > 0 { return WithError(lib.error),true }
+        return response,true
+    }
+    if action == "guest_exit" {
+        secret: Vec(u8); defer { Auth.WipeOwned(*secret) }
+        value := JSON.JsonMember(*input,input.root,"value")
+        if JSON.JsonKindOf(*input,value) == JSON.JsonKind.String && !JSON.JsonStringInto(*input,value,*secret) {
+            return WithError("Guest authentication could not finish"),true
+        }
+        bytes: []u8
+        if secret.count <= 1024 { bytes = VecSlice(secret,0,secret.count) }
+        stamp := App.Fingerprint(lib)
+        defer { Auth.ReleaseOwned(stamp,false) }
+        error: string
+        if App.Enabled(lib) { error = App.Authenticate(lib,bytes,registry) }
+        else { token,auth_error := Vault.VaultAuthenticate(lib,bytes,false,registry); defer { Auth.ReleaseOwned(token) }; error = auth_error; if error.count == 0 { Vault.Lock(lib,token,registry) } }
+        if error.count > 0 { return WithError(error),true }
+        current := App.Fingerprint(lib); defer { Auth.ReleaseOwned(current,false) }
+        if stamp.count == 0 || stamp != current { return WithError("Local password settings need recovery; originals and backup keys remain intact"),true }
+        path := Path(lib); defer { Auth.ReleaseOwned(path,false) }
+        if !Current(lib,scope) || !Files.RemoveFile(path) { return WithError("Guest view could not finish; authenticate to leave"),true }
+        return Auth.CloneOwned("{\"guest_active\":0,\"guest_exit_authorized\":1}"),true
+    }
+    if action == "query" {
+        response := PageInside(lib,scope,*input,true)
+        return ifx lib.error.count > 0 then WithError(lib.error) else response,true
+    }
+    if action != "open" && action != "playback_check" { return WithError("Guest view permits viewing only; authenticate to leave"),true }
+    id := Text(*input,input.root,"id"); defer { Auth.ReleaseOwned(id) }
+    if !Allowed(lib,scope,id) { return WithError("This item is outside Guest view or is no longer available"),true }
+    playback: string
+    defer { Auth.ReleaseOwned(playback,false) }
+    if action == "playback_check" {
+        if services == null || services.playback == null { return WithError("Photos playback is not ready"),true }
+        forwarded: JSON.JsonDocument; defer { JSON.JsonReset(*forwarded) }; JSON.JsonSetEraser(*forwarded,Auth.JsonErase); forwarded.root = JSON.JsonNewObject(*forwarded)
+        PutText(*forwarded,"action","playback_check"); PutText(*forwarded,"id",id)
+        forwarded_text := Serialize(*forwarded,forwarded.root); defer { Auth.ReleaseOwned(forwarded_text,false) }
+        playback = services.playback(services.context,lib,forwarded_text)
+        if lib.error.count > 0 { return WithError(lib.error),true }
+    } else if Gallery.NeedsDecode(lib,id) {
+        if services == null || services.decode == null { return WithError("Photos photo decoding is not ready"),true }
+        error := services.decode(services.context,lib,id)
+        if error.count > 0 { return WithError(error),true }
+    }
+    if SQL.SqliteExecText(lib.db,"BEGIN IMMEDIATE") != SQL.SQLITE_OK { return WithError("Guest view could not finish; authenticate to leave"),true }
+    defer { unused SQL.SqliteExecText(lib.db,"ROLLBACK") }
+    if !Current(lib,scope) || !Allowed(lib,scope,id) { return WithError(ifx action == "open" then "Guest photo access ended" else "Guest playback access ended"),true }
+    if action == "playback_check" {
+        result: JSON.JsonDocument; defer { JSON.JsonReset(*result) }; JSON.JsonSetEraser(*result,Auth.JsonErase)
+        if !JSON.JsonRead(*result,playback,Auth.JsonErase) || JSON.JsonKindOf(*result,result.root) != JSON.JsonKind.Object { return WithError("Photos playback returned an invalid response"),true }
+        error := Text(*result,result.root,"error"); defer { Auth.ReleaseOwned(error) }
+        if error.count > 0 { return WithError(error),true }
+        // Only the playback fields are projected from the trusted provider.
+        output: JSON.JsonDocument; defer { JSON.JsonReset(*output) }; JSON.JsonSetEraser(*output,Auth.JsonErase); output.root = JSON.JsonNewObject(*output)
+        path := Text(*result,result.root,"playback_path"); defer { Auth.ReleaseOwned(path,false) }
+        PutText(*output,"playback_id",id); PutText(*output,"playback_path",path)
+        Put(*output,"guest_active",1); Put(*output,"vault_unlocked",0); PutText(*output,"vault_token","")
+        return Serialize(*output,output.root),true
+    }
+    response := PageInside(lib,scope,*input,true)
+    defer { Auth.ReleaseOwned(response,false) }
+    if lib.error.count > 0 { return WithError(lib.error),true }
+    output: JSON.JsonDocument; defer { JSON.JsonReset(*output) }; JSON.JsonSetEraser(*output,Auth.JsonErase); unused JSON.JsonRead(*output,response,Auth.JsonErase)
+    detail := JSON.JsonNewObject(*output)
+    unused JSON.JsonSet(*output,detail,"id",JSON.JsonNewStringCopy(*output,id))
+    unused JSON.JsonSet(*output,output.root,"detail",detail)
+    return Serialize(*output,output.root),true
+}
+
+#scope_export
+GuestRouteLocked :: (lib: *Store.Library, request: string, services: *Services = null) -> string,bool {
+    if lib == null || lib.db == null { return WithError("Photo library is not open"),true }
+    response,handled := Route(lib,request,services); return response,handled
+}
+GuestRoute :: (lib: *Store.Library, request: string, services: *Services = null) -> string,bool {
+    if lib == null || lib.db == null { return WithError("Photo library is not open"),true }
+    if !Enter() { return WithError("Guest view could not finish; authenticate to leave"),true }
+    defer { Leave() }
+    response,handled := Route(lib,request,services); return response,handled
+}

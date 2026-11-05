@@ -1,0 +1,107 @@
+// Real credential routes with caller-owned raw input and output lifetimes.
+App :: #import "app_lock";
+Vault :: #import "vault";
+Guest :: #import "guest";
+Auth :: #import "vault_auth";
+Access :: #import "access_registry";
+Store :: #import "library_store";
+Kit :: #import "kit";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+JSON :: #import "std/json_document";
+Gallery :: #import "gallery_query";
+SQL :: #import "sqlite/SQLite";
+#import "std/byte_text_linux"
+using Vectors :: #import "std/vec";
+
+#scope_file
+root: string;
+library: *Store.Library;
+registry: Access.Registry;
+
+#scope_export
+Prepare :: () -> s32 {
+    root = Kit.TempDirectory("access-lifetime")
+    if root.count == 0 { return 1 }
+    path := Kit.Library(Tree.JoinPath(root,"library"))
+    error: string
+    library,error = Store.Open(path)
+    if library == null || !Access.Initialize(*registry) { return 2 }
+    if SQL.SqliteExecText(library.db,"INSERT INTO photos VALUES('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','fixture.png','.png','photo',1,0,1,1,'{}','[]',0,0,0,0,'','',0,0,'{}','{}')") != SQL.SQLITE_OK { return 8 }
+    if SQL.SqliteExecText(library.db,"INSERT INTO photos VALUES('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','private.png','.png','photo',1,0,1,1,'{}','[]',0,1,0,0,'','',0,0,'{}','{}')") != SQL.SQLITE_OK { return 8 }
+    marker := Guest.Path(library); defer { Auth.ReleaseOwned(marker,false) }
+    if !Files.WriteEntireFile(marker,"{\"kind\":\"invalid\"}") { return 3 }
+    return Exercise()
+}
+State :: (context: *void, lib: *Store.Library, request: string) -> string {
+    unused context; unused lib; unused request
+    return Auth.CloneOwned("{}")
+}
+Kick :: (context: *void, lib: *Store.Library) -> string { unused context; unused lib; return "" }
+GalleryExercise :: () -> s32 {
+    defer { Store.ClearError(library) }
+    services: Gallery.QueryServices
+    services.access_registry = *registry
+    services.semantic_state = State; services.people_state = State
+    services.semantic_kick = Kick; services.people_kick = Kick
+    response := Gallery.UiQuery(library,"{\"view\":\"photos\",\"gallery_format\":2}",*services)
+    defer { Auth.ReleaseOwned(response) }
+    result: JSON.JsonDocument; defer { JSON.JsonReset(*result) }
+    if !JSON.JsonRead(*result,response,Auth.JsonErase) || library.error.count > 0 { return 9 }
+    count,valid := JSON.JsonInteger(*result,JSON.JsonMember(*result,result.root,"count"))
+    return ifx valid && count == 1 && JSON.JsonCount(*result,JSON.JsonMember(*result,result.root,"photos")) == 1 then 42 else 10
+}
+Exercise :: () -> s32 {
+    defer { Store.ClearError(library) }
+    // Literal source has an escape. Only decoded credential copies contain the
+    // complete allocation-tracer canary; original RPC storage is wiped too.
+    inputs: [3]string = .[
+        "{\"action\":\"app_lock_check\",\"value\":\"lifetime-plaintext-can\\u0061ry\"}",
+        "{\"action\":\"guest_exit\",\"value\":\"lifetime-plaintext-can\\u0061ry\"}",
+        "{\"action\":\"app_lock_unlock\",\"value\":\"lifetime-plaintext-can\\u0061ry\\uQ000\"}"]
+    for at: 0..2 {
+        request: Vec(u8); defer { Auth.WipeOwned(*request) }
+        if !VecReserve(request,256) { return 4 }
+        BuilderPrint(*request,"%",inputs[at])
+        response: string; handled: bool
+        if at == 1 { response,handled = Guest.GuestRoute(library,TextView(VecSlice(request,0,request.count))) }
+        else { response,handled = App.AppLockRoute(library,TextView(VecSlice(request,0,request.count)),*registry) }
+        defer { Auth.ReleaseOwned(response) }
+        result: JSON.JsonDocument; defer { JSON.JsonReset(*result) }
+        if !handled || !JSON.JsonRead(*result,response,Auth.JsonErase) || JSON.JsonKindOf(*result,result.root) != JSON.JsonKind.Object { return 5 }
+        if at == 0 {
+            checked,valid := JSON.JsonInteger(*result,JSON.JsonMember(*result,result.root,"app_lock_checked"))
+            if !valid || checked != 1 { return 6 }
+        }
+        if at > 0 && (JSON.JsonKindOf(*result,JSON.JsonMember(*result,result.root,"error")) != JSON.JsonKind.String || JSON.JsonIs(*result,JSON.JsonMember(*result,result.root,"error"),"")) { return 7 }
+    }
+    return 42
+}
+VaultExercise :: () -> s32 {
+    defer { Store.ClearError(library) }
+    inputs: [6]string = .[
+        "{\"action\":\"open\",\"id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+        "{\"action\":\"forget\",\"ids\":[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"]}",
+        "{\"action\":\"open\",\"id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}",
+        "{\"action\":\"forget\",\"ids\":[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"]}",
+        "{\"action\":\"open\",\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "{\"action\":\"forget\",\"ids\":[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"]}"]
+    for at: 0..5 {
+        protected,error := Vault.Protected(library,inputs[at],*registry)
+        if at < 2 && (protected || error.count > 0) { return 11 }
+        if at >= 2 && at < 4 && (protected || error.count == 0) { return 12 }
+        if at >= 4 && (!protected || error.count > 0) { return 13 }
+    }
+    return 42
+}
+Finish :: () {
+    Access.Close(*registry)
+    if library != null { Store.Close(library); library = null }
+    if root.count > 0 { unused Kit.Cleanup(root); Auth.ReleaseOwned(root,false); root = "" }
+}
+Check :: () -> bool {
+    defer { Finish() }
+    if Prepare() != 42 { return false }
+    for repeat: 0..63 { if Exercise() != 42 || GalleryExercise() != 42 || VaultExercise() != 42 { return false } }
+    return true
+}

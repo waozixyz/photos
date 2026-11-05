@@ -1,0 +1,120 @@
+Owner :: #import "owner_account";
+Kit :: #import "kit";
+SQL :: #import "sqlite/SQLite";
+Keys :: #import "daochi_client/keys";
+Files :: #import "std/file";
+#import "std/text_buffer"
+
+#scope_file
+Put :: (db: *void, user: string, key: string, value: string) -> bool {
+    statement: *void
+    if SQL.SqlitePrepareText(db, "INSERT INTO settings VALUES(?,?,?,0)", -1,
+        *statement, null) != SQL.SQLITE_OK { return false }
+    defer { unused SQL.SqliteFinalize(statement) }
+    return SQL.SqliteBindTextString(statement, 1, user, -1) == SQL.SQLITE_OK &&
+        SQL.SqliteBindTextString(statement, 2, key, -1) == SQL.SQLITE_OK &&
+        SQL.SqliteBindTextString(statement, 3, value, -1) == SQL.SQLITE_OK &&
+        SQL.SqliteStep(statement) == SQL.SQLITE_DONE
+}
+
+AddAccount :: (db: *void, user: string, keys: *Keys.AccountKeys) -> bool {
+    return Put(db, user, "sync_public_id", TextUntilNul(keys.public_id[:])) &&
+        Put(db, user, "sync_public_key", TextUntilNul(keys.public_key_hex[:])) &&
+        Put(db, user, "sync_private_key", TextUntilNul(keys.private_key_hex[:]))
+}
+
+Run :: (root: string, keys: *Keys.AccountKeys, other: *Keys.AccountKeys) -> s32 {
+    absent := Kit.Join(root, "absent.sqlite")
+    missing, error := Owner.Load(absent)
+    if !Kit.Expect(!missing.valid && error == Owner.Unavailable && !Files.PathExists(absent),
+        "missing database is read-only and is not created") { return 1 }
+    corrupt := Kit.Join(root, "corrupt.sqlite")
+    if !Files.WriteEntireFile(corrupt, "not a SQLite database") { return 2 }
+    missing, error = Owner.Load(corrupt)
+    if !Kit.Expect(!missing.valid && error == Owner.Unavailable, "invalid database") { return 3 }
+
+    path := Kit.Join(root, "inbe.sqlite")
+    db: *void
+    if SQL.SqliteOpenText(path, *db, SQL.SQLITE_OPEN_READWRITE | SQL.SQLITE_OPEN_CREATE) != SQL.SQLITE_OK { return 4 }
+    defer { unused SQL.SqliteClose(db) }
+    missing, error = Owner.Load(path)
+    if !Kit.Expect(!missing.valid && error == Owner.Unavailable, "missing settings table") { return 5 }
+    if SQL.SqliteExecText(db, "CREATE TABLE settings(user_id TEXT,key TEXT,value TEXT,updated_at INTEGER)") != SQL.SQLITE_OK { return 6 }
+    missing, error = Owner.Load(path)
+    if !Kit.Expect(!missing.valid && error == Owner.Unavailable, "no complete account") { return 7 }
+    if !AddAccount(db, "fixture", keys) ||
+        !Put(db, "unfinished", "sync_public_id", "00") { return 8 }
+    before, read := Files.ReadEntireFile(path)
+    if !read { return 9 }
+    account, accountError := Owner.Load(path)
+    if !Kit.Expect(accountError == "" && account.valid &&
+        TextUntilNul(account.account_id[:]) == TextUntilNul(keys.public_id[:]),
+        "one complete account wins over unrelated partial settings") { return 10 }
+    defer { Owner.Clear(*account) }
+    decoded, decodedError := Owner.FromKeys(account.public_key[:], account.private_key[:])
+    if !Kit.Expect(decoded.valid && decodedError == "" &&
+        TextUntilNul(decoded.account_id[:]) == TextUntilNul(account.account_id[:]),
+        "legacy binary account uses the same public-key digest") { return 11 }
+    Owner.Clear(*decoded)
+    for byte: decoded.private_key {
+        if !Kit.Expect(byte == 0, "explicit account cleanup clears private bytes") { return 12 }
+    }
+    after, readAfter := Files.ReadEntireFile(path)
+    if !Kit.Expect(readAfter && before == after, "account lookup does not mutate Inbe") { return 13 }
+
+    if !AddAccount(db, "another", other) { return 14 }
+    missing, error = Owner.Load(path)
+    if !Kit.Expect(!missing.valid && error == Owner.Unavailable, "multiple complete accounts are ambiguous") { return 15 }
+    if SQL.SqliteExecText(db, "DELETE FROM settings WHERE user_id='another'") != SQL.SQLITE_OK { return 16 }
+    if !Put(db, "fixture", "sync_public_id", "0000000000000000000000000000000000000000000000000000000000000000") { return 17 }
+    missing, error = Owner.Load(path)
+    if !Kit.Expect(!missing.valid && error == Owner.Mismatch, "public id must match public key") { return 18 }
+    if !Put(db, "fixture", "sync_public_id", TextUntilNul(keys.public_id[:])) { return 19 }
+    duplicate, duplicateError := Owner.Load(path)
+    if !Kit.Expect(duplicate.valid && duplicateError == "", "last setting value for a user wins") { return 20 }
+    Owner.Clear(*duplicate)
+    if !Put(db, "fixture", "sync_public_key", "00") { return 21 }
+    missing, error = Owner.Load(path)
+    if !Kit.Expect(!missing.valid && error == Owner.Incomplete, "wrong public-key length") { return 22 }
+    if !Put(db, "fixture", "sync_public_key", TextUntilNul(keys.public_key_hex[:])) { return 23 }
+    if SQL.SqliteExecText(db, "UPDATE settings SET value=upper(value) WHERE key='sync_public_key'") != SQL.SQLITE_OK { return 24 }
+    missing, error = Owner.Load(path)
+    if !Kit.Expect(!missing.valid && error == Owner.Incomplete, "key encoding is lowercase hex") { return 25 }
+    if !Put(db, "fixture", "sync_public_key", TextUntilNul(keys.public_key_hex[:])) ||
+        !Put(db, "fixture", "sync_private_key", TextUntilNul(other.private_key_hex[:])) { return 26 }
+    missing, error = Owner.Load(path)
+    if !Kit.Expect(!missing.valid && error == Owner.Mismatch, "canonical private-key proof rejects mismatched keys") { return 27 }
+    if !Put(db, "fixture", "sync_private_key", "") { return 28 }
+    missing, error = Owner.Load(path)
+    if !Kit.Expect(!missing.valid && error == Owner.Unavailable, "empty final value makes account incomplete") { return 29 }
+    if !Put(db, "fixture", "sync_private_key", TextUntilNul(keys.private_key_hex[:])) { return 30 }
+    if SQL.SqliteExecText(db, "UPDATE settings SET value=x'00FF' WHERE key='sync_private_key'") != SQL.SQLITE_OK { return 31 }
+    missing, error = Owner.Load(path)
+    if !Kit.Expect(!missing.valid && error == Owner.Incomplete, "binary settings are not accepted as hex text") { return 32 }
+    small: [1]u8
+    missing, error = Owner.FromKeys(small[:], small[:])
+    if !Kit.Expect(!missing.valid && error == Owner.Incomplete, "binary account length validation") { return 33 }
+    if !Put(db, "fixture", "sync_private_key", TextUntilNul(keys.private_key_hex[:])) ||
+        !Put(db, "fixture", "sync_public_key", "0") { return 34 }
+    missing, error = Owner.Load(path)
+    if !Kit.Expect(!missing.valid && error == "non-hexadecimal number found in fromhex() arg at position 1",
+        "odd hex retains the existing parser diagnostic") { return 35 }
+    return 0
+}
+
+#program_export
+main :: () -> s32 {
+    root := Kit.TempDirectory("owner-account")
+    if root.count == 0 { return 100 }
+    defer { unused Kit.Cleanup(root) }
+    keys: Keys.AccountKeys
+    other: Keys.AccountKeys
+    defer {
+        Keys.SecureWipe(cast(*u8)*keys, size_of(Keys.AccountKeys))
+        Keys.SecureWipe(cast(*u8)*other, size_of(Keys.AccountKeys))
+    }
+    if Keys.CreateAccountKeys(*keys) == 0 || Keys.CreateAccountKeys(*other) == 0 { return 101 }
+    code := Run(root, *keys, *other)
+    if code == 0 { print("Photos owner account: synthetic lookup, encoding, identity validation and preservation passed\n") }
+    return code
+}

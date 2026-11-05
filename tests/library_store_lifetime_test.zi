@@ -1,0 +1,114 @@
+Store :: #import "library_store";
+SQL :: #import "sqlite/SQLite";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+c :: #system_library "c";
+Free :: (pointer: *void) #foreign c "free";
+root: string;
+legacy: string;
+legacy_path: string;
+fixture: string;
+
+FreeText :: (value: string) {
+    if value.count > 0 { descriptor := cast(*TextDescriptor)*value; Free(cast(*void)descriptor.data) }
+}
+OwnedPath :: (parent: string, name: string) -> string {
+    result: Vec(u8)
+    if !BuilderAppend(result,parent) || !VecPush(result,cast(u8)47) || !BuilderAppend(result,name) { return "" }
+    return BuilderFinish(result)
+}
+
+#scope_export
+#program_export
+PrepareStoreLifetime :: () -> s32 {
+    if !Tree.CreateDirectories("build/tests/tmp",448) { return 0 }
+    root = Tree.CreateTemporaryDirectory("build/tests/tmp","store-life-")
+    if root.count == 0 { return 0 }
+    legacy = OwnedPath(root,"legacy")
+    legacy_path = OwnedPath(legacy,"library.sqlite")
+    if legacy.count == 0 || legacy_path.count == 0 || !Tree.CreateDirectories(legacy,448) { return 0 }
+    text, valid := Files.ReadEntireFile("tests/fixtures/golden/library-legacy.sql")
+    fixture = text
+    if !valid || fixture.count == 0 { return 0 }
+    return 42
+}
+
+#program_export
+ResetStoreLegacy :: (reject: bool = false) -> s32 {
+    unused Files.RemoveFile(legacy_path)
+    db: *void = null
+    if SQL.SqliteOpenText(legacy_path,*db,SQL.SQLITE_OPEN_READWRITE | SQL.SQLITE_OPEN_CREATE) != SQL.SQLITE_OK { if db != null { unused SQL.SqliteClose(db) }; return 0 }
+    defer { unused SQL.SqliteClose(db) }
+    if SQL.SqliteExecText(db,fixture) != SQL.SQLITE_OK { return 0 }
+    if reject && SQL.SqliteExecText(db,"CREATE TRIGGER fail_lifetime BEFORE INSERT ON albums BEGIN SELECT RAISE(ABORT,'lifetime migration failure'); END") != SQL.SQLITE_OK { return 0 }
+    return 42
+}
+
+#program_export
+StoreLifetime :: () -> s32 {
+    lib,error := Store.Open(root)
+    defer { Store.ReleaseResult(*error) }
+    if lib == null { return 0 }
+    defer { Store.Close(lib) }
+    value := "{\"unknown\":9223372036854775808,\"é\":\"夜\"}"
+    if !Store.SetSetting(lib,"lifetime",value) { return 0 }
+    found,exists := Store.LookupSetting(lib,"lifetime")
+    defer { Store.ReleaseResult(*found) }
+    if !exists || found != value { return 0 }
+    Store.ReleaseResult(*found)
+    Store.ReleaseResult(*found)
+    if found != "" || !Store.EnsureAlbum(lib,"Lifetime album") { return 0 }
+    missing,present := Store.LookupSetting(lib,"absent-lifetime")
+    defer { Store.ReleaseResult(*missing) }
+    if present || missing != "" || lib.error != "" { return 0 }
+    if SQL.SqliteExecText(lib.db,"INSERT OR REPLACE INTO settings VALUES('invalid-lifetime','{')") != SQL.SQLITE_OK { return 0 }
+    invalid,accepted := Store.LookupSetting(lib,"invalid-lifetime")
+    defer { Store.ReleaseResult(*invalid) }
+    if accepted || invalid != "" || lib.error != "Invalid Photos setting JSON" { return 0 }
+    return 42
+}
+
+#program_export
+StoreMigrationLifetime :: () -> s32 {
+    lib,error := Store.Open(legacy)
+    defer { Store.ReleaseResult(*error) }
+    if lib == null { return 0 }
+    defer { Store.Close(lib) }
+    marker := Store.Setting(lib,"album_catalog_migrated")
+    defer { Store.ReleaseResult(*marker) }
+    return ifx marker == "true" then 42 else 0
+}
+
+#program_export
+StoreRejectedLifetime :: () -> s32 {
+    lib,error := Store.Open(legacy)
+    defer { Store.ReleaseResult(*error) }
+    if lib != null { Store.Close(lib); return 0 }
+    return ifx error == "lifetime migration failure" then 42 else 0
+}
+
+#program_export
+FinishStoreLifetime :: () {
+    FreeText(fixture); fixture = ""
+    FreeText(legacy_path); legacy_path = ""
+    FreeText(legacy); legacy = ""
+    if root != "" { unused Tree.RemoveTree(root); FreeText(root); root = "" }
+}
+
+#program_export
+main :: () -> s32 {
+    defer { FinishStoreLifetime() }
+    if PrepareStoreLifetime() != 42 { return 1 }
+    for at: 0..63 { if StoreLifetime() != 42 { return 2 } }
+    for at: 0..15 {
+        if ResetStoreLegacy() != 42 || StoreMigrationLifetime() != 42 || StoreMigrationLifetime() != 42 { return 3 }
+        if ResetStoreLegacy(true) != 42 || StoreRejectedLifetime() != 42 || StoreRejectedLifetime() != 42 { return 4 }
+    }
+    print("Photos Store lifetime: settings ownership, repeated fresh/migrated opens, actual migration rejection/retry passed\n")
+    return 0
+}

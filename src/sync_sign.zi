@@ -30,6 +30,7 @@ Nonce :: (context: *void, output: []u8) -> bool {
     return Native.RandomBytes(bytes[:]) && Hex(bytes[:], output)
 }
 
+#scope_export
 SignDevice :: (context: *void, message: string, output: []u8) -> bool {
     if context == null || output.count < 129 { return false }
     descriptor := cast(*TextDescriptor)*message
@@ -38,6 +39,7 @@ SignDevice :: (context: *void, message: string, output: []u8) -> bool {
         BytesFromPointer(descriptor.data, cast(u64)message.count), signature[:]) && Hex(signature[:], output)
 }
 
+#scope_module
 // Validated hex account material for Daochi's ML-DSA signer.
 Account :: (public_key: []u8, private_key: []u8, account: *Keys.AccountKeys) -> bool {
     if public_key.count != PublicBytes || private_key.count != PrivateBytes { return false }

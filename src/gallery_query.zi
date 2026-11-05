@@ -1,0 +1,918 @@
+Auth :: #import "vault_auth";
+// Gallery orchestration stays in Photos; SQLite executes the canonical query.
+Store :: #import "library_store";
+Albums :: #import "library_albums";
+Vault :: #import "vault";
+AppLock :: #import "app_lock";
+Access :: #import "access_registry";
+LibraryFiles :: #import "library_files";
+Tree :: #import "std/file_tree_linux";
+Engine :: #import "library_query";
+SQL :: #import "sqlite/SQLite";
+JSON :: #import "std/json_document";
+Unicode :: #import "std/unicode";
+UTF8 :: #import "std/utf8";
+Files :: #import "std/file";
+Calendar :: #import "std/date_parse";
+Clock :: #import "std/date_time_linux";
+#import "std/byte_text_linux"
+#import "std/json_scan"
+using Vectors :: #import "std/vec";
+
+#scope_file
+Copy :: (text: string) -> string {
+    output: Vec(u8); BuilderPrint(*output, "%", text); return BuilderFinish(output)
+}
+Failure :: (lib: *Store.Library, message: string) -> string {
+    if lib != null { Store.SetError(lib, message) }
+    return Engine.Failure(message)
+}
+
+ReadObject :: (lib: *Store.Library, request: string, document: *JSON.JsonDocument) -> bool {
+    if request.count == 0 || request.count >= 131072 ||
+        !JSON.JsonRead(document, request,Auth.JsonErase) || JSON.JsonKindOf(document, document.root) != JSON.JsonKind.Object {
+        Store.SetError(lib, "Choose a valid gallery request")
+        return false
+    }
+    return true
+}
+ReadCopy :: (document: *JSON.JsonDocument, text: string) -> bool {
+    parsed: JSON.JsonDocument
+    defer { JSON.JsonReset(*parsed) }
+    if !JSON.JsonRead(*parsed,text,Auth.JsonErase) { return false }
+    JSON.JsonReset(document); JSON.JsonSetEraser(document,Auth.JsonErase)
+    document.root = JSON.JsonCopy(document,*parsed,parsed.root)
+    return document.root >= 0
+}
+
+Serialize :: (document: *JSON.JsonDocument, node: s32) -> string {
+    if document.error.count > 0 { return "" }
+    output: Vec(u8)
+    if !JSON.JsonWriteInto(*output,document,node,JSON.JsonCompactStyle(false)) { Auth.WipeOwned(*output); return "" }
+    return BuilderFinish(output)
+}
+
+PutText :: (document: *JSON.JsonDocument, object: s32, key: string, value: string) {
+    unused JSON.JsonSet(document, object, key, JSON.JsonNewStringCopy(document, value))
+}
+PutNumber :: (document: *JSON.JsonDocument, object: s32, key: string, value: s64) {
+    unused JSON.JsonSet(document, object, key, JSON.JsonNewInteger(document, value))
+}
+GetText :: (document: *JSON.JsonDocument, key: string, fallback: string = "") -> string {
+    node := JSON.JsonMember(document, document.root, key)
+    return ifx node < 0 then Copy(fallback) else JSON.JsonString(document, node)
+}
+DefaultText :: (document: *JSON.JsonDocument, key: string, value: string) {
+    if JSON.JsonMember(document, document.root, key) < 0 { PutText(document, document.root, key, value) }
+}
+Truth :: (document: *JSON.JsonDocument, node: s32) -> bool {
+    kind := JSON.JsonKindOf(document, node)
+    if kind == JSON.JsonKind.True { return true }
+    if kind == JSON.JsonKind.String { return !JSON.JsonIs(document,node,"") }
+    if kind == JSON.JsonKind.Array || kind == JSON.JsonKind.Object { return JSON.JsonCount(document, node) > 0 }
+    if kind == JSON.JsonKind.Number {
+        bytes: Vec(u8)
+        if !JSON.JsonNumberTextInto(document,node,*bytes) { return false }
+        parsed := ReadNumber(TextView(VecSlice(bytes,0,bytes.count)),0)
+        return parsed.valid && parsed.value != 0.0
+    }
+    return false
+}
+Setting :: (lib: *Store.Library, key: string, fallback: string) -> string {
+    value, found := Store.LookupSetting(lib, key)
+    return ifx found then value else Copy(fallback)
+}
+Enabled :: (lib: *Store.Library, key: string, fallback: bool = false) -> bool {
+    value, found := Store.LookupSetting(lib, key)
+    defer { Auth.ReleaseOwned(value,false) }
+    if !found { return fallback }
+    document: JSON.JsonDocument; defer { JSON.JsonReset(*document) }; JSON.JsonSetEraser(*document,Auth.JsonErase)
+    return JSON.JsonRead(*document, value,Auth.JsonErase) && Truth(*document, document.root)
+}
+TextSetting :: (lib: *Store.Library, key: string, fallback: string) -> string {
+    value, found := Store.LookupSetting(lib, key)
+    defer { Auth.ReleaseOwned(value,false) }
+    if !found { return fallback }
+    document: JSON.JsonDocument; defer { JSON.JsonReset(*document) }; JSON.JsonSetEraser(*document,Auth.JsonErase)
+    if !JSON.JsonRead(*document, value,Auth.JsonErase) { return "" }
+    return JSON.JsonString(*document, document.root)
+}
+CopyMember :: (target: *JSON.JsonDocument, object: s32, source: *JSON.JsonDocument, key: string) {
+    node := JSON.JsonMember(source, source.root, key)
+    if node >= 0 { unused JSON.JsonSet(target, object, key, JSON.JsonCopy(target, source, node)) }
+}
+Merge :: (target: *JSON.JsonDocument, object: s32, source: *JSON.JsonDocument) {
+    node := JSON.JsonFirst(source, source.root)
+    while node >= 0 {
+        key: Vec(u8)
+        if !JSON.JsonKeyInto(source,node,*key) ||
+            !JSON.JsonSetCopy(target,object,TextView(VecSlice(key,0,key.count)),JSON.JsonCopy(target,source,node)) { return }
+        node = JSON.JsonNext(source, node)
+    }
+}
+Identity :: (value: string) -> bool {
+    if value.count != 64 { return false }
+    for byte: value {
+        if !((byte >= #char "0" && byte <= #char "9") || (byte >= #char "a" && byte <= #char "f")) { return false }
+    }
+    return true
+}
+
+Strip :: (text: string) -> string {
+    first: s64 = -1; last: s64; at: s64
+    while at < text.count {
+        next := at + 4; if next > text.count { next = text.count }
+        point := UTF8.Decode(text[at:next], 0)
+        if !point.valid { return text }
+        if !Unicode.IsSpace(point.value) { if first < 0 { first = at }; last = at + point.after }
+        at += point.after
+    }
+    return ifx first < 0 then "" else text[first:last]
+}
+
+// Python's public library adapter coerces offset/limit before native paging.
+Integer :: (document: *JSON.JsonDocument, key: string, fallback: s64) -> s64, bool {
+    node := JSON.JsonMember(document, document.root, key)
+    if node < 0 { return fallback, true }
+    kind := JSON.JsonKindOf(document, node)
+    if kind == JSON.JsonKind.True { return 1, true }
+    if kind == JSON.JsonKind.False { return 0, true }
+    if kind == JSON.JsonKind.Number {
+        exact, valid := JSON.JsonInteger(document, node)
+        if valid { return exact, true }
+        bytes: Vec(u8)
+        if !JSON.JsonNumberTextInto(document,node,*bytes) { return 0,false }
+        parsed := ReadNumber(TextView(VecSlice(bytes,0,bytes.count)),0)
+        if !parsed.valid { return 0, false }
+        if parsed.value >= 9223372036854775807.0 { return 9223372036854775807, true }
+        if parsed.value <= -9223372036854775808.0 { return -9223372036854775808, true }
+        return cast(s64)parsed.value, true
+    }
+    if kind == JSON.JsonKind.String {
+        bytes: Vec(u8)
+        if !JSON.JsonStringInto(document,node,*bytes) { return 0,false }
+        text := Strip(TextView(VecSlice(bytes,0,bytes.count)))
+        at: s64; negative: bool
+        if text.count > 0 && (text[0] == #char "+" || text[0] == #char "-") { negative = text[0] == #char "-"; at = 1 }
+        value: u64; previous_digit: bool; count: s32
+        maximum: u64 = ifx negative then 9223372036854775808 else 9223372036854775807
+        while at < text.count {
+            if text[at] == #char "_" {
+                if !previous_digit { return 0, false }
+                previous_digit = false; at += 1; continue
+            }
+            end := at + 4; if end > text.count { end = text.count }
+            point := UTF8.Decode(text[at:end], 0)
+            if !point.valid || !Unicode.IsDecimal(point.value) { return 0, false }
+            zero := point.value
+            while zero > 0 && Unicode.IsDecimal(zero - 1) { zero -= 1 }
+            digit := cast(u64)((point.value - zero) % 10)
+            if value > maximum / 10 || (value == maximum / 10 && digit > maximum % 10) { value = maximum }
+            else { value = value * 10 + digit }
+            previous_digit = true; count += 1; at += point.after
+        }
+        if !previous_digit || count > 4300 { return 0, false }
+        if negative && value == 9223372036854775808 { return -9223372036854775808, true }
+        return ifx negative then -cast(s64)value else cast(s64)value, true
+    }
+    return 0, false
+}
+
+#scope_export
+// Guest owns the outer writer-reserving snapshot and exact scope predicate.
+// Reuse the gallery's calendar, immutable original and codec path policies.
+GuestPhoto :: (lib: *Store.Library, identity: string, modern: bool) -> string {
+    photo: JSON.JsonDocument; defer { JSON.JsonReset(*photo) }; JSON.JsonSetEraser(*photo,Auth.JsonErase)
+    if !ReadPhoto(lib,identity,*photo) { return Engine.Failure(lib.error) }
+    if !ComponentsVisible(lib,*photo,false,true) { return Failure(lib,"This item is outside Guest view or is no longer available") }
+    timestamp_text := JSON.JsonNumberText(*photo,JSON.JsonMember(*photo,photo.root,"taken")); defer { Auth.ReleaseOwned(timestamp_text,false) }
+    timestamp := ReadNumber(timestamp_text,0)
+    seconds := cast(s64)timestamp.value
+    if timestamp.value < cast(float64)seconds { seconds -= 1 }
+    date: [10]u8
+    if Calendar.WriteIsoDay(seconds,date[:]) != 10 { return Failure(lib,"Photo date is outside the supported calendar") }
+    output: JSON.JsonDocument; defer { JSON.JsonReset(*output) }; JSON.JsonSetEraser(*output,Auth.JsonErase); output.root = JSON.JsonNewObject(*output)
+    fields: [8]string = .["id","name","favorite","archived","width","height","kind",""]
+    for key: fields[:7] { CopyMember(*output,output.root,*photo,key) }
+    PutText(*output,output.root,"date",TextFromBytes(date[:]))
+    preview := Thumbnail(lib,identity); asset := Display(lib,*photo)
+    defer { Auth.ReleaseOwned(preview,false); Auth.ReleaseOwned(asset,false) }
+    PutText(*output,output.root,"thumbnail",ifx IsFile(preview) then preview else "")
+    PutText(*output,output.root,ifx modern then "display" else "original",ifx IsFile(asset) then asset else "")
+    PutNumber(*output,output.root,"hidden",0); PutNumber(*output,output.root,"trashed",0)
+    if modern && Live(*photo) { PutText(*output,output.root,"kind","live") }
+    return Serialize(*output,output.root)
+}
+NeedsDecode :: (lib: *Store.Library, identity: string) -> bool {
+    photo: JSON.JsonDocument; defer { JSON.JsonReset(*photo) }; JSON.JsonSetEraser(*photo,Auth.JsonErase)
+    if !ReadPhoto(lib,identity,*photo) || !JSON.JsonIs(*photo,JSON.JsonMember(*photo,photo.root,"kind"),"photo") { return false }
+    original := Original(lib,*photo)
+    display := Display(lib,*photo)
+    defer { Auth.ReleaseOwned(original,false); Auth.ReleaseOwned(display,false) }
+    return IsFile(original) && display != original
+}
+
+Authorize :: #type (context: *void, lib: *Store.Library, request: string) -> bool;
+ReadService :: #type (context: *void, lib: *Store.Library, request: string) -> string;
+// ReadService replies are owned JSON strings; callers release them. RunService
+// errors remain borrowed. Embedders copy a static reply before returning it.
+RunService :: #type (context: *void, lib: *Store.Library) -> string;
+QueryServices :: struct {
+    context: *void
+    package_root: string
+    access_registry: *Access.Registry
+    authorized: Authorize
+    access_state: ReadService
+    semantic_page: ReadService
+    semantic_state: ReadService
+    people_state: ReadService
+    semantic_kick: RunService
+    people_kick: RunService
+    album_list: ReadService
+    album_details: ReadService
+}
+
+Page :: (lib: *Store.Library, request: string) -> string {
+    if lib == null || lib.db == null { return Failure(lib, "Cannot open the private gallery database") }
+    Store.ClearError(lib)
+    response := Engine.Query(lib.db, request)
+    document: JSON.JsonDocument; defer { JSON.JsonReset(*document) }; JSON.JsonSetEraser(*document,Auth.JsonErase)
+    if !JSON.JsonRead(*document, response,Auth.JsonErase) { Auth.ReleaseOwned(response,false); return Failure(lib, "The gallery query could not finish; try again") }
+    error := JSON.JsonMember(*document, document.root, "error")
+    if Truth(*document, error) { text := JSON.JsonString(*document,error); defer { Auth.ReleaseOwned(text,false) }; Store.SetError(lib,text) }
+    return response
+}
+
+Validate :: (lib: *Store.Library, search: string) -> string {
+    if lib != null { Store.ClearError(lib) }
+    trimmed := Strip(search)
+    if trimmed.count == 0 || search.count > 512 {
+        Store.SetError(lib, "Choose a nonempty search of at most 512 bytes"); return ""
+    }
+    for byte: search {
+        if byte == 0 { Store.SetError(lib, "Choose a nonempty search of at most 512 bytes"); return "" }
+    }
+    request: JSON.JsonDocument; defer { JSON.JsonReset(*request) }; JSON.JsonSetEraser(*request,Auth.JsonErase)
+    request.root = JSON.JsonNewObject(*request)
+    PutText(*request, request.root, "view", "validate")
+    PutText(*request, request.root, "search", search)
+    PutText(*request, request.root, "sort", "newest")
+    text := Serialize(*request,request.root); defer { Auth.ReleaseOwned(text,false) }
+    response := Page(lib,text); defer { Auth.ReleaseOwned(response,false) }
+    return ifx lib != null && lib.error.count == 0 then trimmed else ""
+}
+
+#scope_file
+Prepare :: (lib: *Store.Library, sql: string, value: string, bind: bool = true) -> *void {
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db, sql, -1, *statement, null) != SQL.SQLITE_OK {
+        Store.SetError(lib, TextFromCString(SQL.SqliteErrorMessage(lib.db))); return null
+    }
+    if bind && SQL.SqliteBindTextString(statement, 1, value, cast(s32)value.count) != SQL.SQLITE_OK {
+        Store.SetError(lib, TextFromCString(SQL.SqliteErrorMessage(lib.db)))
+        unused SQL.SqliteFinalize(statement); return null
+    }
+    return statement
+}
+
+Column :: (statement: *void, index: s32) -> string {
+    bytes := SQL.SqliteColumnText(statement, index)
+    if bytes == null { return "" }
+    return Copy(TextFromBytes(BytesFromPointer(bytes, cast(u64)SQL.SqliteColumnBytes(statement, index))))
+}
+
+PhotoJSON :: "SELECT json_object('id',id,'name',name,'extension',extension,'kind',kind,'size',size,'taken',taken,'width',width,'height',height,'metadata',metadata,'albums',albums,'favorite',favorite,'hidden',hidden,'archived',archived,'trashed',trashed,'caption',caption,'tags',tags,'updated',updated,'dirty',dirty,'manifest',manifest,'edits',edits) FROM photos WHERE id=?";
+ReadPhoto :: (lib: *Store.Library, identity: string, photo: *JSON.JsonDocument) -> bool {
+    statement := Prepare(lib, PhotoJSON, identity)
+    if statement == null { return false }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if SQL.SqliteStep(statement) != SQL.SQLITE_ROW { Store.SetError(lib, "Photo not found"); return false }
+    text_2 := Column(statement, 0); defer { Auth.ReleaseOwned(text_2,false) }
+    // A parsed document borrows unescaped source spans. Deep-copy before this
+    // function releases its SQLite text so hydration owns every later view.
+    parsed: JSON.JsonDocument
+    defer { JSON.JsonReset(*parsed) }
+    if !JSON.JsonRead(*parsed,text_2,Auth.JsonErase) { return false }
+    JSON.JsonReset(photo); JSON.JsonSetEraser(photo,Auth.JsonErase)
+    photo.root = JSON.JsonCopy(photo,*parsed,parsed.root)
+    return photo.root >= 0
+}
+
+Flag :: (photo: *JSON.JsonDocument, key: string) -> bool {
+    return Truth(photo, JSON.JsonMember(photo, photo.root, key))
+}
+
+// A pair is published only when both originals have reciprocal, exact links.
+ComponentsVisible :: (lib: *Store.Library, photo: *JSON.JsonDocument, hidden: bool, derived: bool) -> bool {
+    if Flag(photo, "hidden") && (!hidden || derived) || (derived && Flag(photo, "trashed")) { return false }
+    metadata: JSON.JsonDocument; defer { JSON.JsonReset(*metadata) }; JSON.JsonSetEraser(*metadata,Auth.JsonErase)
+    text_3 := GetText(photo, "metadata"); defer { Auth.ReleaseOwned(text_3,false) }
+    if !JSON.JsonRead(*metadata, text_3,Auth.JsonErase) { return false }
+    link := JSON.JsonMember(*metadata, metadata.root, "photosLive")
+    kind := JSON.JsonKindOf(*metadata, link)
+    if kind == JSON.JsonKind.Missing { return true }
+    if kind != JSON.JsonKind.Object { return false }
+    movie := JSON.JsonMember(*metadata, link, "video")
+    still := JSON.JsonMember(*metadata, link, "photo")
+    other := ifx Truth(*metadata, movie) then movie else still
+    if !Truth(*metadata, other) { return true }
+    identity := JSON.JsonString(*metadata, other)
+    defer { Auth.ReleaseOwned(identity,false) }
+    text_4 := GetText(photo, "id"); defer { Auth.ReleaseOwned(text_4,false) }
+    if !Identity(identity) || identity == text_4 || JSON.JsonCount(*metadata, link) != 1 { return false }
+    paired: JSON.JsonDocument; defer { JSON.JsonReset(*paired) }; JSON.JsonSetEraser(*paired,Auth.JsonErase)
+    if !ReadPhoto(lib, identity, *paired) { Store.ClearError(lib); return false }
+    if Flag(*paired, "hidden") && (!hidden || derived) || Flag(photo, "trashed") != Flag(*paired, "trashed") { return false }
+    other_metadata: JSON.JsonDocument; defer { JSON.JsonReset(*other_metadata) }; JSON.JsonSetEraser(*other_metadata,Auth.JsonErase)
+    text_5 := GetText(*paired, "metadata"); defer { Auth.ReleaseOwned(text_5,false) }
+    if !JSON.JsonRead(*other_metadata, text_5,Auth.JsonErase) { return false }
+    reciprocal := JSON.JsonMember(*other_metadata, other_metadata.root, "photosLive")
+    if JSON.JsonKindOf(*other_metadata, reciprocal) != JSON.JsonKind.Object || JSON.JsonCount(*other_metadata, reciprocal) != 1 { return false }
+    key := ifx Truth(*metadata, movie) then "photo" else "video"
+    text_6 := GetText(photo, "id"); defer { Auth.ReleaseOwned(text_6,false) }
+    if !JSON.JsonIs(*other_metadata,JSON.JsonMember(*other_metadata,reciprocal,key),text_6) { return false }
+    return JSON.JsonIs(photo,JSON.JsonMember(photo,photo.root,"kind"),ifx key == "photo" then "photo" else "video") &&
+        JSON.JsonIs(*paired,JSON.JsonMember(*paired,paired.root,"kind"),ifx key == "photo" then "video" else "photo")
+}
+
+Original :: (lib: *Store.Library, photo: *JSON.JsonDocument) -> string {
+    row: Store.PhotoRow
+    text_7 := GetText(photo, "id"); defer { Auth.ReleaseOwned(text_7,false) }
+    text_8 := GetText(photo, "extension"); defer { Auth.ReleaseOwned(text_8,false) }
+    row.id = text_7; row.extension = text_8
+    return LibraryFiles.Original(lib, row)
+}
+Thumbnail :: (lib: *Store.Library, identity: string) -> string {
+    return LibraryFiles.Thumbnail(lib, identity)
+}
+IsFile :: (path: string) -> bool { return Tree.IsFile(path) }
+
+Display :: (lib: *Store.Library, photo: *JSON.JsonDocument) -> string {
+    text_9 := GetText(photo, "extension"); defer { Auth.ReleaseOwned(text_9,false) }
+    extension := text_9
+    codecs: [28]string = .[".heic", ".heif", ".hif", ".avif", ".dng", ".cr2", ".cr3", ".nef", ".nrw", ".arw", ".sr2", ".srf", ".raf", ".rw2", ".rwl", ".orf", ".pef", ".ptx", ".srw", ".3fr", ".fff", ".iiq", ".kdc", ".dcr", ".erf", ".mrw", ".mos", ".mef"]
+    for codec: codecs {
+        if codec.count > 0 && extension == codec {
+            text_10 := GetText(photo, "id"); defer { Auth.ReleaseOwned(text_10,false) }
+            output: Vec(u8); BuilderPrint(*output, "%/private/display/%.png", lib.root, text_10)
+            return BuilderFinish(output)
+        }
+    }
+    return Original(lib, photo)
+}
+
+Live :: (photo: *JSON.JsonDocument) -> bool {
+    metadata: JSON.JsonDocument; defer { JSON.JsonReset(*metadata) }; JSON.JsonSetEraser(*metadata,Auth.JsonErase); edits: JSON.JsonDocument; defer { JSON.JsonReset(*edits) }; JSON.JsonSetEraser(*edits,Auth.JsonErase)
+    text_11 := GetText(photo, "metadata"); defer { Auth.ReleaseOwned(text_11,false) }
+    text_12 := GetText(photo, "edits"); defer { Auth.ReleaseOwned(text_12,false) }
+    if !JSON.JsonRead(*metadata, text_11,Auth.JsonErase) || !JSON.JsonRead(*edits, text_12,Auth.JsonErase) { return false }
+    paired := JSON.JsonMember(*metadata, metadata.root, "photosLive")
+    if Truth(*metadata, JSON.JsonMember(*metadata, paired, "video")) { return true }
+    text_13 := GetText(photo, "kind"); defer { Auth.ReleaseOwned(text_13,false) }
+    if text_13 != "photo" || Truth(*metadata, paired) ||
+        Truth(*metadata, JSON.JsonMember(*metadata, metadata.root, "photosLiveSeparated")) ||
+        Truth(*edits, JSON.JsonMember(*edits, edits.root, "live_separated")) { return false }
+    text_14 := GetText(photo, "extension"); defer { Auth.ReleaseOwned(text_14,false) }
+    extension := text_14
+    if extension != ".jpg" && extension != ".jpeg" && extension != ".heic" && extension != ".heif" && extension != ".avif" { return false }
+    motion := JSON.JsonMember(*metadata, metadata.root, "photosMotion")
+    if JSON.JsonKindOf(*metadata, motion) != JSON.JsonKind.Object { return false }
+    version, valid := JSON.JsonInteger(*metadata, JSON.JsonMember(*metadata, motion, "version"))
+    offset, offset_ok := JSON.JsonInteger(*metadata, JSON.JsonMember(*metadata, motion, "offset"))
+    length, length_ok := JSON.JsonInteger(*metadata, JSON.JsonMember(*metadata, motion, "length"))
+    size, size_ok := JSON.JsonInteger(photo, JSON.JsonMember(photo, photo.root, "size"))
+    return valid && version == 1 && offset_ok && length_ok && size_ok && length >= 16 && length <= 134217728 &&
+        offset > 0 && offset <= size - length
+}
+
+Derived :: (view: string) -> bool {
+    return view == "map" || view == "semantic" || view == "people" || view == "lane" ||
+        view == "large" || view == "similar" || view == "similar_groups"
+}
+
+#scope_export
+PersonDetails :: (lib: *Store.Library, person: string) -> string {
+    Store.ClearError(lib)
+    if !Identity(person) { return Failure(lib, "Choose a person") }
+    statement := Prepare(lib, "SELECT json_object('id',id,'name',name,'ignored',ignored,'updated',updated,'birth',birth) FROM people WHERE id=?", person)
+    if statement == null { return Failure(lib, lib.error) }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if SQL.SqliteStep(statement) != SQL.SQLITE_ROW { return Failure(lib, "Person not found") }
+    return Column(statement, 0)
+}
+
+// Read-only catalog for the People and automatic-album gallery views.
+PeopleCatalog :: (lib: *Store.Library, search: string, mode: string, offset: s64, named_only: bool = false) -> string {
+    Store.ClearError(lib)
+    if search.count > 512 || (mode != "active" && mode != "ignored") { return Failure(lib, "Choose an active or ignored people view") }
+    statement := Prepare(lib, "SELECT g.id,g.name,g.ignored FROM people g JOIN person_photos f ON f.person_id=g.id JOIN photos p ON p.id=f.photo_id WHERE p.hidden=0 AND p.trashed=0 AND g.ignored=? GROUP BY g.id ORDER BY (g.name=''),g.name COLLATE NOCASE,g.id", ifx mode == "ignored" then "1" else "0")
+    if statement == null { return Failure(lib, lib.error) }
+    defer { unused SQL.SqliteFinalize(statement) }
+    result: JSON.JsonDocument; defer { JSON.JsonReset(*result) }; JSON.JsonSetEraser(*result,Auth.JsonErase); result.root = JSON.JsonNewObject(*result)
+    entries := JSON.JsonNewArray(*result)
+    query := Unicode.CaseFold(search)
+    defer { Auth.ReleaseOwned(query,false) }
+    count: s64
+    while SQL.SqliteStep(statement) == SQL.SQLITE_ROW {
+        text_15 := Column(statement, 0); defer { Auth.ReleaseOwned(text_15,false) }
+        text_16 := Column(statement, 1); defer { Auth.ReleaseOwned(text_16,false) }
+        person := text_15; name := text_16
+        if named_only && name.count == 0 { continue }
+        folded := Unicode.CaseFold(name)
+        defer { Auth.ReleaseOwned(folded,false) }
+        found := query.count == 0
+        at: s64
+        while !found && at + query.count <= folded.count {
+            if folded[at:at + query.count] == query { found = true }; at += 1
+        }
+        if !found { continue }
+        members := Prepare(lib, "SELECT photo_id FROM person_photos WHERE person_id=? ORDER BY photo_id", person)
+        if members == null { return Failure(lib, lib.error) }
+        member_count: s64; first: string
+        defer { Auth.ReleaseOwned(first,false) }
+        while SQL.SqliteStep(members) == SQL.SQLITE_ROW {
+            text_17 := Column(members, 0); defer { Auth.ReleaseOwned(text_17,false) }
+            identity := text_17; photo: JSON.JsonDocument; defer { JSON.JsonReset(*photo) }; JSON.JsonSetEraser(*photo,Auth.JsonErase)
+            if !ReadPhoto(lib, identity, *photo) { unused SQL.SqliteFinalize(members); return Failure(lib, lib.error) }
+            metadata: JSON.JsonDocument; defer { JSON.JsonReset(*metadata) }; JSON.JsonSetEraser(*metadata,Auth.JsonErase)
+            text_18 := GetText(*photo, "metadata"); defer { Auth.ReleaseOwned(text_18,false) }
+            unused JSON.JsonRead(*metadata, text_18,Auth.JsonErase)
+            link := JSON.JsonMember(*metadata, metadata.root, "photosLive")
+            if Truth(*metadata, JSON.JsonMember(*metadata, link, "photo")) { continue }
+            if !ComponentsVisible(lib, *photo, false, true) { continue }
+            if member_count == 0 { first = Copy(identity) }; member_count += 1
+        }
+        unused SQL.SqliteFinalize(members)
+        if member_count == 0 { continue }
+        preview := Thumbnail(lib, first)
+        defer { Auth.ReleaseOwned(preview,false) }
+        faces := Prepare(lib, "SELECT id,photo_id FROM faces WHERE person_id=? ORDER BY id", person)
+        if faces == null { return Failure(lib, lib.error) }
+        while SQL.SqliteStep(faces) == SQL.SQLITE_ROW {
+            photo: JSON.JsonDocument; defer { JSON.JsonReset(*photo) }; JSON.JsonSetEraser(*photo,Auth.JsonErase)
+            text_19 := Column(faces, 1); defer { Auth.ReleaseOwned(text_19,false) }
+            if !ReadPhoto(lib, text_19, *photo) { unused SQL.SqliteFinalize(faces); return Failure(lib, lib.error) }
+            text_20 := GetText(*photo, "kind"); defer { Auth.ReleaseOwned(text_20,false) }
+            if text_20 != "photo" || !ComponentsVisible(lib, *photo, false, true) { continue }
+            text_21 := Column(faces, 0); defer { Auth.ReleaseOwned(text_21,false) }
+            portrait: Vec(u8); BuilderPrint(*portrait, "%/private/faces/%.png", lib.root, text_21)
+            path := BuilderFinish(portrait)
+            defer { Auth.ReleaseOwned(path,false) }
+            text_22 := GetText(*photo, "id"); defer { Auth.ReleaseOwned(text_22,false) }
+            Auth.ReleaseOwned(preview,false)
+            preview = ifx IsFile(path) then Copy(path) else Thumbnail(lib, text_22)
+            break
+        }
+        unused SQL.SqliteFinalize(faces)
+        if offset < 0 { offset = 0 }
+        if count >= offset && count < offset + 60 {
+            row := JSON.JsonNewObject(*result)
+            PutText(*result, row, "id", person); PutText(*result, row, "name", ifx name.count > 0 then name else "Unnamed person")
+            PutText(*result, row, "thumbnail", ifx IsFile(preview) then preview else "")
+            PutNumber(*result, row, "count", member_count); PutNumber(*result, row, "ignored", SQL.SqliteColumnInt64(statement, 2))
+            PutNumber(*result, row, "pinned", 0); PutNumber(*result, row, "archived", 0)
+            PutNumber(*result, row, "smart", 0); PutNumber(*result, row, "place", 0)
+            unused JSON.JsonAppend(*result, entries, row)
+        }
+        count += 1
+    }
+    PutNumber(*result, result.root, "count", count)
+    unused JSON.JsonSet(*result, result.root, "albums", entries)
+    return Serialize(*result, result.root)
+}
+
+#scope_file
+Authorized :: (services: *QueryServices, lib: *Store.Library, request: string) -> bool {
+    if services != null && services.authorized != null { return services.authorized(services.context, lib, request) }
+    input: JSON.JsonDocument; defer { JSON.JsonReset(*input) }; JSON.JsonSetEraser(*input,Auth.JsonErase)
+    if !JSON.JsonRead(*input,request,Auth.JsonErase) { return false }
+    registry: *Access.Registry
+    if services != null { registry = services.access_registry }
+    token: Vec(u8); defer { Auth.WipeOwned(*token) }
+    node := JSON.JsonMember(*input,input.root,"vault_token")
+    if JSON.JsonKindOf(*input,node) != JSON.JsonKind.String || !JSON.JsonStringInto(*input,node,*token) { return false }
+    return Vault.Unlocked(lib,TextView(VecSlice(token,0,token.count)),registry)
+}
+AttachSetting :: (lib: *Store.Library, output: *JSON.JsonDocument, key: string, name: string, fallback: string) -> bool {
+    text := Setting(lib, name, fallback)
+    defer { Auth.ReleaseOwned(text,false) }
+    if lib.error.count > 0 { return false }
+    value: JSON.JsonDocument; defer { JSON.JsonReset(*value) }; JSON.JsonSetEraser(*value,Auth.JsonErase)
+    if !JSON.JsonRead(*value, text,Auth.JsonErase) { Store.SetError(lib, "Invalid persisted gallery setting"); return false }
+    unused JSON.JsonSet(output, output.root, key, JSON.JsonCopy(output, *value, value.root))
+    return true
+}
+IntegerError :: (lib: *Store.Library, request: *JSON.JsonDocument, key: string) -> string {
+    node := JSON.JsonMember(request, request.root, key)
+    kind := JSON.JsonKindOf(request, node)
+    if kind == JSON.JsonKind.Null || kind == JSON.JsonKind.Array || kind == JSON.JsonKind.Object {
+        type := ifx kind == JSON.JsonKind.Null then "NoneType" else (ifx kind == JSON.JsonKind.Array then "list" else "dict")
+        output: Vec(u8); BuilderPrint(*output, "int() argument must be a string, a bytes-like object or a real number, not '%'", type)
+        return Failure(lib, TextView(VecSlice(output,0,output.count)))
+    }
+    if kind == JSON.JsonKind.String {
+        text := JSON.JsonString(request, node)
+        defer { Auth.ReleaseOwned(text,false) }
+        trimmed := Strip(text)
+        numeric := true; digits: s32; cursor: s64
+        if trimmed.count > 0 && (trimmed[0] == #char "+" || trimmed[0] == #char "-") { cursor = 1 }
+        while cursor < trimmed.count {
+            if trimmed[cursor] == #char "_" { cursor += 1; continue }
+            end := cursor + 4; if end > trimmed.count { end = trimmed.count }
+            point := UTF8.Decode(trimmed[cursor:end], 0)
+            if !point.valid || !Unicode.IsDecimal(point.value) { numeric = false; break }
+            digits += 1; cursor += point.after
+        }
+        if numeric && digits > 4300 {
+            output: Vec(u8)
+            BuilderPrint(*output, "Exceeds the limit (4300 digits) for integer string conversion: value has % digits; use sys.set_int_max_str_digits() to increase the limit", digits)
+            return Failure(lib, TextView(VecSlice(output,0,output.count)))
+        }
+        single: bool; has_double_quote: bool
+        byte_index: s64
+        while byte_index < text.count {
+            byte := text[byte_index]
+            if byte == #char "'" { single = true }; if byte == #char "\"" { has_double_quote = true }
+            byte_index += 1
+        }
+        quote: u8 = ifx single && !has_double_quote then #char "\"" else #char "'"
+        output: Vec(u8); BuilderPrint(*output, "invalid literal for int() with base 10: ")
+        unused VecPush(output, quote)
+        at: s64
+        while at < text.count {
+            end := at + 4; if end > text.count { end = text.count }
+            point := UTF8.Decode(text[at:end], 0)
+            if !point.valid { break }
+            if point.value == 92 || point.value == cast(u32)quote { unused VecPush(output, #char "\\"); unused VecPush(output, cast(u8)point.value) }
+            else if point.value == 9 { BuilderPrint(*output, "\\t") }
+            else if point.value == 10 { BuilderPrint(*output, "\\n") }
+            else if point.value == 13 { BuilderPrint(*output, "\\r") }
+            else if Unicode.IsPrintable(point.value) { BuilderPrint(*output, "%", text[at:at + point.after]) }
+            else {
+                digits := ifx point.value < 256 then 2 else (ifx point.value < 65536 then 4 else 8)
+                BuilderPrint(*output, "%", ifx digits == 2 then "\\x" else (ifx digits == 4 then "\\u" else "\\U"))
+                alphabet := "0123456789abcdef"; shift := (digits - 1) * 4
+                while shift >= 0 { unused VecPush(output, alphabet[(point.value >> cast(u32)shift) & 15]); shift -= 4 }
+            }
+            at += point.after
+        }
+        unused VecPush(output, quote)
+        return Failure(lib, TextView(VecSlice(output,0,output.count)))
+    }
+    return Failure(lib, "Choose a valid gallery page")
+}
+
+// Overrides remain available for embedding; standalone queries use C17 policy.
+AlbumList :: (lib: *Store.Library, request: *JSON.JsonDocument, services: *QueryServices) -> string {
+    text := Serialize(request,request.root); defer { Auth.ReleaseOwned(text,false) }
+    if services != null && services.album_list != null { return services.album_list(services.context, lib, text) }
+    return Albums.AlbumList(lib,text)
+}
+AlbumDetails :: (lib: *Store.Library, name: string, services: *QueryServices) -> string {
+    if services == null || services.album_details == null {
+        result, error := Albums.AlbumDetails(lib, name)
+        if error == "Album not found" { Auth.ReleaseOwned(result,false); return Copy("null") }
+        if error.count > 0 { return Failure(lib, error) }
+        return result
+    }
+    request: JSON.JsonDocument; defer { JSON.JsonReset(*request) }; JSON.JsonSetEraser(*request,Auth.JsonErase); request.root = JSON.JsonNewObject(*request)
+    PutText(*request, request.root, "name", name)
+    text := Serialize(*request,request.root); defer { Auth.ReleaseOwned(text,false) }
+    return services.album_details(services.context, lib, text)
+}
+
+#scope_export
+LibraryQuery :: (lib: *Store.Library, request: string, services: *QueryServices = null) -> string {
+    if lib == null || lib.db == null { return Failure(lib, "Photo library is not open") }
+    Store.ClearError(lib)
+    input: JSON.JsonDocument; defer { JSON.JsonReset(*input) }; JSON.JsonSetEraser(*input,Auth.JsonErase)
+    if !ReadObject(lib, request, *input) { return Engine.Failure(lib.error) }
+    DefaultText(*input, "view", "photos"); DefaultText(*input, "search", "")
+    DefaultText(*input, "album", ""); DefaultText(*input, "sort", "newest")
+    DefaultText(*input, "album_mode", "active"); DefaultText(*input, "album_sort", "name")
+    DefaultText(*input, "memory_date", ""); DefaultText(*input, "person", "")
+    DefaultText(*input, "people_mode", "active"); DefaultText(*input, "jump_day", "")
+    DefaultText(*input, "large_type", "all"); DefaultText(*input, "similar_id", "")
+    offset, offset_ok := Integer(*input, "offset", 0)
+    if !offset_ok { return IntegerError(lib, *input, "offset") }
+    limit, limit_ok := Integer(*input, "limit", 60)
+    if !limit_ok { return IntegerError(lib, *input, "limit") }
+    if offset < 0 { offset = 0 }; if limit < 1 { limit = 1 }; if limit > 100 { limit = 100 }
+    PutNumber(*input, input.root, "offset", offset); PutNumber(*input, input.root, "limit", limit)
+    text_23 := GetText(*input, "view"); defer { Auth.ReleaseOwned(text_23,false) }
+    text_24 := GetText(*input, "album"); defer { Auth.ReleaseOwned(text_24,false) }
+    text_25 := GetText(*input, "person"); defer { Auth.ReleaseOwned(text_25,false) }
+    view := text_23; album := text_24; person := text_25
+    hidden_node := JSON.JsonMember(*input, input.root, "hidden_access")
+    hidden := (hidden_node < 0 || Truth(*input, hidden_node)) && Authorized(services, lib, request)
+    PutNumber(*input, input.root, "hidden_access", ifx hidden then 1 else 0)
+    PutNumber(*input, input.root, "map_gallery", ifx Truth(*input, JSON.JsonMember(*input, input.root, "map_gallery")) then 1 else 0)
+    // Acquire a writer reservation for derived views, retaining an outer caller
+    // transaction and rolling back only the savepoint owned by this query.
+    snapshot := view == "map" || view == "people" || view == "lane" || view == "auto_people" ||
+        view == "large" || view == "similar" || view == "similar_groups"
+    if snapshot && SQL.SqliteExecText(lib.db, "SAVEPOINT photos_gallery_hydration") != SQL.SQLITE_OK {
+        return Failure(lib, "Cannot open a gallery snapshot")
+    }
+    defer { if snapshot { unused SQL.SqliteExecText(lib.db, "ROLLBACK TO photos_gallery_hydration; RELEASE photos_gallery_hydration") } }
+    if snapshot && SQL.SqliteExecText(lib.db, "UPDATE photos SET id=id WHERE 0") != SQL.SQLITE_OK {
+        return Failure(lib, "Cannot open a gallery snapshot")
+    }
+    album_detail: JSON.JsonDocument; defer { JSON.JsonReset(*album_detail) }; JSON.JsonSetEraser(*album_detail,Auth.JsonErase)
+    if album.count > 0 {
+        detail := AlbumDetails(lib, album, services)
+        defer { Auth.ReleaseOwned(detail,false) }
+        if lib.error.count > 0 { return Engine.Failure(lib.error) }
+        if !ReadCopy(*album_detail,detail) { return Failure(lib, "Cannot read album details") }
+        text_26 := GetText(*album_detail, "filter"); defer { Auth.ReleaseOwned(text_26,false) }
+        PutText(*input, input.root, "filter", text_26)
+    } else { PutText(*input, input.root, "filter", "") }
+    if view == "lane" {
+        detail := PersonDetails(lib, person)
+        defer { Auth.ReleaseOwned(detail,false) }
+        if lib.error.count > 0 { return Engine.Failure(lib.error) }
+        person_detail: JSON.JsonDocument; defer { JSON.JsonReset(*person_detail) }; JSON.JsonSetEraser(*person_detail,Auth.JsonErase)
+        if !JSON.JsonRead(*person_detail, detail,Auth.JsonErase) { return Failure(lib, "Cannot read person details") }
+        text_27 := GetText(*person_detail, "birth"); defer { Auth.ReleaseOwned(text_27,false) }
+        PutText(*input, input.root, "birth", text_27)
+        if Flag(*person_detail, "ignored") || !Enabled(lib, "people_enabled") { PutText(*input, input.root, "person", "") }
+    }
+    response: string
+    defer { Auth.ReleaseOwned(response,false) }
+    if view == "semantic" {
+        text_28 := GetText(*input, "search"); defer { Auth.ReleaseOwned(text_28,false) }
+        search := text_28
+        if !Enabled(lib, "semantic_enabled") || Strip(search).count == 0 { response = Copy("{\"count\":0,\"ids\":[]}") }
+        else {
+            if services == null || services.semantic_page == null { return Failure(lib, "Photos semantic queries are not ready") }
+            text := Serialize(*input,input.root); defer { Auth.ReleaseOwned(text) }
+            response = services.semantic_page(services.context, lib, text)
+        }
+    } else if ((view == "similar" || view == "similar_groups") && !Enabled(lib, "semantic_enabled")) ||
+        (view == "people" && (person.count == 0 || !Enabled(lib, "people_enabled"))) {
+        response = Copy("{\"count\":0,\"ids\":[]}")
+    } else { text := Serialize(*input,input.root); defer { Auth.ReleaseOwned(text) }; response = Page(lib,text) }
+    if lib.error.count > 0 { return Engine.Failure(lib.error) }
+    page: JSON.JsonDocument; defer { JSON.JsonReset(*page) }; JSON.JsonSetEraser(*page,Auth.JsonErase)
+    if !JSON.JsonRead(*page, response,Auth.JsonErase) || JSON.JsonKindOf(*page, page.root) != JSON.JsonKind.Object { return Failure(lib, "Cannot read gallery response") }
+    error := JSON.JsonMember(*page, page.root, "error")
+    if Truth(*page,error) { text := JSON.JsonString(*page,error); defer { Auth.ReleaseOwned(text,false) }; return Failure(lib,text) }
+    output: JSON.JsonDocument; defer { JSON.JsonReset(*output) }; JSON.JsonSetEraser(*output,Auth.JsonErase); output.root = JSON.JsonNewObject(*output)
+    photos := JSON.JsonNewArray(*output)
+    CopyMember(*output, output.root, *page, "count")
+    ids := JSON.JsonMember(*page, page.root, "ids")
+    if view != "map" || Truth(*input, JSON.JsonMember(*input, input.root, "map_gallery")) {
+        index: s32
+        identity := JSON.JsonFirst(*page, ids)
+        while identity >= 0 {
+            photo: JSON.JsonDocument; defer { JSON.JsonReset(*photo) }; JSON.JsonSetEraser(*photo,Auth.JsonErase)
+            id := JSON.JsonString(*page,identity); defer { Auth.ReleaseOwned(id,false) }
+            if !ReadPhoto(lib,id,*photo) { return Engine.Failure(lib.error) }
+            current_hidden := hidden && Authorized(services, lib, request)
+            if ComponentsVisible(lib, *photo, current_hidden, Derived(view)) {
+                text_29 := GetText(*photo, "id"); defer { Auth.ReleaseOwned(text_29,false) }
+                preview := Thumbnail(lib, text_29); original := Original(lib, *photo); display := Display(lib, *photo)
+                defer { Auth.ReleaseOwned(preview,false); Auth.ReleaseOwned(original,false); Auth.ReleaseOwned(display,false) }
+                PutText(*photo, photo.root, "thumbnail", ifx Files.PathExists(preview) then preview else "")
+                PutText(*photo, photo.root, "original", ifx Files.PathExists(original) then original else "")
+                PutText(*photo, photo.root, "display", ifx IsFile(display) then display else "")
+                timestamp_text := JSON.JsonNumberText(*photo,JSON.JsonMember(*photo,photo.root,"taken")); defer { Auth.ReleaseOwned(timestamp_text,false) }
+                timestamp := ReadNumber(timestamp_text,0)
+                seconds := cast(s64)timestamp.value
+                if timestamp.value < cast(float64)seconds { seconds -= 1 }
+                date: [10]u8
+                if Calendar.WriteIsoDay(seconds, date[:]) != 10 { return Failure(lib, "Photo date is outside the supported calendar") }
+                PutText(*photo, photo.root, "date",TextFromBytes(date[:]))
+                PutNumber(*photo, photo.root, "live", ifx Live(*photo) then 1 else 0)
+                memberships: JSON.JsonDocument; defer { JSON.JsonReset(*memberships) }; JSON.JsonSetEraser(*memberships,Auth.JsonErase)
+                text_30 := GetText(*photo, "albums"); defer { Auth.ReleaseOwned(text_30,false) }
+                if !JSON.JsonRead(*memberships, text_30,Auth.JsonErase) { return Failure(lib, "Cannot read photo albums") }
+                unused JSON.JsonSet(*photo, photo.root, "albums", JSON.JsonCopy(*photo, *memberships, memberships.root))
+                if view == "large" || view == "similar_groups" {
+                    key := ifx view == "large" then "storage_sizes" else "group_sizes"
+                    size := JSON.JsonElement(*page, JSON.JsonMember(*page, page.root, key), index)
+                    if size < 0 { return Failure(lib, "Cannot read gallery size summaries") }
+                    unused JSON.JsonSet(*photo, photo.root, ifx view == "large" then "storage_size" else "group_size", JSON.JsonCopy(*photo, *page, size))
+                }
+                unused JSON.JsonAppend(*output, photos, JSON.JsonCopy(*output, *photo, photo.root))
+            }
+            index += 1; identity = JSON.JsonNext(*page, identity)
+        }
+    }
+    unused JSON.JsonSet(*output, output.root, "photos", photos)
+    album_request: JSON.JsonDocument; defer { JSON.JsonReset(*album_request) }; JSON.JsonSetEraser(*album_request,Auth.JsonErase); album_request.root = JSON.JsonNewObject(*album_request)
+    text_31 := GetText(*input, "album_mode"); defer { Auth.ReleaseOwned(text_31,false) }
+    PutText(*album_request, album_request.root, "album_mode", ifx view == "places" then "places" else text_31)
+    text_32 := GetText(*input, "album_sort"); defer { Auth.ReleaseOwned(text_32,false) }
+    PutText(*album_request, album_request.root, "album_sort", text_32)
+    text_33 := GetText(*input, "search"); defer { Auth.ReleaseOwned(text_33,false) }
+    PutText(*album_request, album_request.root, "search", ifx view == "albums" || view == "places" then text_33 else "")
+    albums_text := AlbumList(lib, *album_request, services)
+    defer { Auth.ReleaseOwned(albums_text,false) }
+    if lib.error.count > 0 { return Engine.Failure(lib.error) }
+    albums: JSON.JsonDocument; defer { JSON.JsonReset(*albums) }; JSON.JsonSetEraser(*albums,Auth.JsonErase)
+    if !JSON.JsonRead(*albums, albums_text,Auth.JsonErase) || JSON.JsonKindOf(*albums, albums.root) != JSON.JsonKind.Array { return Failure(lib, "Cannot read album catalog") }
+    unused JSON.JsonSet(*output, output.root, "albums", JSON.JsonCopy(*output, *albums, albums.root))
+    totals := Prepare(lib, "SELECT count(*),coalesce(sum(size),0),coalesce(sum(dirty),0),(SELECT count(*) FROM albums WHERE dirty=1) FROM photos", "", false)
+    if totals == null { return Engine.Failure(lib.error) }
+    if SQL.SqliteStep(totals) != SQL.SQLITE_ROW { unused SQL.SqliteFinalize(totals); return Failure(lib, "Cannot read library totals") }
+    PutNumber(*output, output.root, "total", SQL.SqliteColumnInt64(totals, 0))
+    PutNumber(*output, output.root, "bytes", SQL.SqliteColumnInt64(totals, 1))
+    PutNumber(*output, output.root, "pending", SQL.SqliteColumnInt64(totals, 2) + SQL.SqliteColumnInt64(totals, 3))
+    unused SQL.SqliteFinalize(totals)
+    if !AttachSetting(lib, *output, "status", "status", "\"Local library · private node sync only\"") ||
+        !AttachSetting(lib, *output, "importing", "import", "{}") { return Engine.Failure(lib.error) }
+    text_34 := GetText(*input, "jump_day"); defer { Auth.ReleaseOwned(text_34,false) }
+    if text_34.count > 0 { CopyMember(*output, output.root, *page, "jump_offset") }
+    if view == "people" || view == "lane" || view == "auto_people" {
+        empty := JSON.JsonNewArray(*output)
+        unused JSON.JsonSet(*output, output.root, "albums", empty)
+        PutNumber(*output, output.root, "people_count", 0)
+        if (view == "auto_people" || (view == "people" && person.count == 0)) && Enabled(lib, "people_enabled") {
+            text_35 := GetText(*input, "search"); defer { Auth.ReleaseOwned(text_35,false) }
+            text_36 := GetText(*input, "people_mode"); defer { Auth.ReleaseOwned(text_36,false) }
+            catalog := PeopleCatalog(lib, text_35, ifx view == "auto_people" then "active" else text_36, offset, view == "auto_people")
+            defer { Auth.ReleaseOwned(catalog,false) }
+            if lib.error.count > 0 { return Engine.Failure(lib.error) }
+            people: JSON.JsonDocument; defer { JSON.JsonReset(*people) }; JSON.JsonSetEraser(*people,Auth.JsonErase)
+            if !JSON.JsonRead(*people, catalog,Auth.JsonErase) { return Failure(lib, "Cannot read People catalog") }
+            CopyMember(*output, output.root, *people, "albums")
+            node := JSON.JsonMember(*people, people.root, "count")
+            unused JSON.JsonSet(*output, output.root, "people_count", JSON.JsonCopy(*output, *people, node))
+        }
+        if person.count > 0 && view != "auto_people" {
+            detail := PersonDetails(lib, person)
+            defer { Auth.ReleaseOwned(detail,false) }
+            if lib.error.count > 0 { return Engine.Failure(lib.error) }
+            value: JSON.JsonDocument; defer { JSON.JsonReset(*value) }; JSON.JsonSetEraser(*value,Auth.JsonErase)
+            if JSON.JsonCount(*output, photos) == 0 {
+                value.root = JSON.JsonNewObject(*value)
+                PutText(*value, value.root, "id", person); PutText(*value, value.root, "name", ""); PutNumber(*value, value.root, "ignored", 0)
+            } else if !JSON.JsonRead(*value, detail,Auth.JsonErase) { return Failure(lib, "Cannot read person details") }
+            unused JSON.JsonSet(*output, output.root, "person_detail", JSON.JsonCopy(*output, *value, value.root))
+        }
+        if view == "lane" {
+            CopyMember(*output, output.root, *page, "lane_year"); CopyMember(*output, output.root, *page, "lane_years")
+            CopyMember(*output, output.root, *page, "current_year")
+        }
+        if view == "auto_people" {
+            unused JSON.JsonSet(*output, output.root, "photos", JSON.JsonNewArray(*output)); PutNumber(*output, output.root, "count", 0)
+        }
+    }
+    if view == "memories" { CopyMember(*output, output.root, *page, "memory_date") }
+    if view == "map" {
+        if JSON.JsonMember(*page, page.root, "markers") >= 0 { CopyMember(*output, output.root, *page, "markers") }
+        else { unused JSON.JsonSet(*output, output.root, "markers", JSON.JsonNewArray(*output)) }
+        if services == null || services.package_root.count == 0 { return Failure(lib, "Photos map assets are not ready") }
+        path := Tree.JoinPath(services.package_root,"assets/world.png"); defer { Auth.ReleaseOwned(path,false) }
+        PutText(*output,output.root,"map_image",path)
+    }
+    if album.count > 0 && JSON.JsonKindOf(*album_detail, album_detail.root) == JSON.JsonKind.Object {
+        text_37 := GetText(*album_detail,"filter"); defer { Auth.ReleaseOwned(text_37,false) }
+        PutNumber(*album_detail,album_detail.root,"place",ifx Albums.IsPlace(text_37) then 1 else 0)
+        unused JSON.JsonSet(*output, output.root, "album_detail", JSON.JsonCopy(*output, *album_detail, album_detail.root))
+    }
+    return Serialize(*output, output.root)
+}
+
+#scope_file
+ReadProvider :: (lib: *Store.Library, provider: ReadService, services: *QueryServices, request: string, document: *JSON.JsonDocument) -> bool {
+    text := provider(services.context, lib, request)
+    defer { Auth.ReleaseOwned(text) }
+    if lib.error.count > 0 { return false }
+    if !ReadCopy(document,text) || JSON.JsonKindOf(document,document.root) != JSON.JsonKind.Object {
+        Store.SetError(lib, "Cannot read gallery service state"); return false
+    }
+    node := JSON.JsonMember(document, document.root, "error")
+    if Truth(document,node) { error := JSON.JsonString(document,node); defer { Auth.ReleaseOwned(error,false) }; Store.SetError(lib,error); return false }
+    return true
+}
+HideLocked :: (document: *JSON.JsonDocument) {
+    photos := JSON.JsonMember(document, document.root, "photos")
+    visible := JSON.JsonNewArray(document)
+    photo := JSON.JsonFirst(document, photos)
+    while photo >= 0 {
+        if !Truth(document, JSON.JsonMember(document, photo, "hidden")) {
+            // JsonCopy within the same document may grow its backing vector;
+            // read the next sibling before appending any new nodes.
+            next := JSON.JsonNext(document, photo)
+            copy := JSON.JsonCopy(document, document, photo)
+            unused JSON.JsonAppend(document, visible, copy)
+            photo = next
+        } else { photo = JSON.JsonNext(document, photo) }
+    }
+    unused JSON.JsonSet(document, document.root, "photos", visible)
+    PutNumber(document, document.root, "vault_unlocked", 0)
+}
+
+Project :: (document: *JSON.JsonDocument, array: s32, fields: []string) -> s32 {
+    result := JSON.JsonNewArray(document)
+    node := JSON.JsonFirst(document, array)
+    while node >= 0 {
+        next := JSON.JsonNext(document, node)
+        object := JSON.JsonNewObject(document)
+        for field: fields {
+            member := JSON.JsonMember(document, node, field)
+            if member >= 0 { unused JSON.JsonSet(document, object, field, JSON.JsonCopy(document, document, member)) }
+        }
+        unused JSON.JsonAppend(document, result, object)
+        node = next
+    }
+    return result
+}
+
+#scope_export
+// Access and index-job owners supply actual providers per request. Missing
+// providers are an integration error; they never impersonate an offline state.
+UiQuery :: (lib: *Store.Library, request: string, services: *QueryServices = null) -> string {
+    if lib == null || lib.db == null { return Failure(lib, "Photo library is not open") }
+    Store.ClearError(lib)
+    if services == null ||
+        services.semantic_state == null || services.people_state == null ||
+        services.semantic_kick == null || services.people_kick == null {
+        return Failure(lib, "Photos gallery services are not ready")
+    }
+    input: JSON.JsonDocument; defer { JSON.JsonReset(*input) }; JSON.JsonSetEraser(*input,Auth.JsonErase)
+    if !ReadObject(lib, request, *input) { return Engine.Failure(lib.error) }
+    // The UI route has a fixed 60-item page, independently of library callers.
+    unused JSON.JsonRemove(*input, input.root, "limit")
+    PutNumber(*input, input.root, "hidden_access", ifx Authorized(services, lib, request) then 1 else 0)
+    input_text := Serialize(*input,input.root); defer { Auth.ReleaseOwned(input_text) }
+    response := LibraryQuery(lib,input_text,services); defer { Auth.ReleaseOwned(response,false) }
+    if lib.error.count > 0 { return Engine.Failure(lib.error) }
+    output: JSON.JsonDocument; defer { JSON.JsonReset(*output) }; JSON.JsonSetEraser(*output,Auth.JsonErase)
+    if !JSON.JsonRead(*output, response,Auth.JsonErase) { return Failure(lib, "Cannot read gallery response") }
+    access: JSON.JsonDocument; defer { JSON.JsonReset(*access) }; JSON.JsonSetEraser(*access,Auth.JsonErase)
+    if services.access_state == null {
+        token := JSON.JsonString(*input,JSON.JsonMember(*input,input.root,"vault_token"))
+        defer { Auth.ReleaseOwned(token) }
+        state := Vault.State(lib,token,services.access_registry); defer { Auth.ReleaseOwned(state) }
+        if !ReadCopy(*access,state) { return Failure(lib,"Cannot read gallery service state") }
+        PutNumber(*access,access.root,"guest_configured",ifx Vault.Configured(lib) || AppLock.Enabled(lib) then 1 else 0)
+    } else if !ReadProvider(lib, services.access_state, services, request, *access) { return Engine.Failure(lib.error) }
+    Merge(*output, output.root, *access)
+    PutNumber(*output, output.root, "guest_active", 0)
+    if !Authorized(services, lib, request) || !Truth(*output, JSON.JsonMember(*output, output.root, "vault_unlocked")) {
+        HideLocked(*output)
+        text_38 := GetText(*input, "view"); defer { Auth.ReleaseOwned(text_38,false) }
+        if text_38 == "hidden" { PutNumber(*output, output.root, "count", 0) }
+    }
+    modern_node := JSON.JsonMember(*input, input.root, "gallery_format")
+    modern_text: Vec(u8)
+    unused JSON.JsonNumberTextInto(*input,modern_node,*modern_text)
+    modern := JSON.JsonKindOf(*input, modern_node) == JSON.JsonKind.Number &&
+        ReadNumber(TextView(VecSlice(modern_text,0,modern_text.count)),0).value == 2.0
+    photos := JSON.JsonMember(*output, output.root, "photos")
+    photo := JSON.JsonFirst(*output, photos)
+    while photo >= 0 {
+        if modern && Truth(*output, JSON.JsonMember(*output, photo, "live")) { PutText(*output, photo, "kind", "live") }
+        if !modern {
+            path := JSON.JsonString(*output, JSON.JsonMember(*output, photo, "display"))
+            defer { Auth.ReleaseOwned(path,false) }
+            PutText(*output, photo, "original", path)
+        }
+        photo = JSON.JsonNext(*output, photo)
+    }
+    fields: [14]string = .["id", "name", "thumbnail", "", "date", "kind", "favorite", "hidden", "trashed", "archived", "width", "height", "storage_size", "group_size"]
+    fields[3] = ifx modern then "display" else "original"
+    length: s64 = 12
+    text_39 := GetText(*input, "view"); defer { Auth.ReleaseOwned(text_39,false) }
+    view := text_39
+    if view == "large" { length = 13 }
+    if view == "similar_groups" { fields[12] = "group_size"; length = 13 }
+    projected := Project(*output, photos, fields[:length])
+    unused JSON.JsonSet(*output, output.root, "photos", projected)
+    album_fields: [10]string = .["name", "count", "thumbnail", "pinned", "archived", "smart", "place", "id", "ignored", ""]
+    projected_albums := Project(*output, JSON.JsonMember(*output, output.root, "albums"), album_fields[:9])
+    unused JSON.JsonSet(*output, output.root, "albums", projected_albums)
+    export: JSON.JsonDocument; defer { JSON.JsonReset(*export) }; JSON.JsonSetEraser(*export,Auth.JsonErase)
+    export_text := Setting(lib,"export","{}"); defer { Auth.ReleaseOwned(export_text,false) }
+    if !JSON.JsonRead(*export,export_text,Auth.JsonErase) || JSON.JsonKindOf(*export, export.root) != JSON.JsonKind.Object {
+        return Failure(lib, "Invalid persisted export setting")
+    }
+    status := JSON.JsonMember(*export, export.root, "status")
+    if status < 0 { PutText(*output, output.root, "export_status", "Choose a separate destination for a folder backup") }
+    else { unused JSON.JsonSet(*output, output.root, "export_status", JSON.JsonCopy(*output, *export, status)) }
+    PutNumber(*output, output.root, "export_continuous", ifx Truth(*export, JSON.JsonMember(*export, export.root, "continuous")) then 1 else 0)
+    swipe := Setting(lib, "swipe_selection_enabled", "true")
+    defer { Auth.ReleaseOwned(swipe,false) }
+    flag: JSON.JsonDocument; defer { JSON.JsonReset(*flag) }; JSON.JsonSetEraser(*flag,Auth.JsonErase)
+    if !JSON.JsonRead(*flag, swipe,Auth.JsonErase) { return Failure(lib, "Invalid persisted selection setting") }
+    PutNumber(*output, output.root, "swipe_selection_enabled", ifx JSON.JsonKindOf(*flag, flag.root) == JSON.JsonKind.True then 1 else 0)
+    semantic: JSON.JsonDocument; defer { JSON.JsonReset(*semantic) }; JSON.JsonSetEraser(*semantic,Auth.JsonErase)
+    if !ReadProvider(lib, services.semantic_state, services, request, *semantic) { return Engine.Failure(lib.error) }
+    Merge(*output, output.root, *semantic)
+    error := services.semantic_kick(services.context, lib)
+    if error.count > 0 { return Failure(lib, error) }
+    people: JSON.JsonDocument; defer { JSON.JsonReset(*people) }; JSON.JsonSetEraser(*people,Auth.JsonErase)
+    if !ReadProvider(lib, services.people_state, services, request, *people) { return Engine.Failure(lib.error) }
+    Merge(*output, output.root, *people)
+    error = services.people_kick(services.context, lib)
+    if error.count > 0 { return Failure(lib, error) }
+    // Providers may take time. Recheck immediately before path publication.
+    if !Authorized(services, lib, request) {
+        HideLocked(*output)
+        if view == "hidden" { PutNumber(*output, output.root, "count", 0) }
+    }
+    return Serialize(*output, output.root)
+}

@@ -1,0 +1,450 @@
+// Photos file policy. Originals remain immutable; derived previews are disposable.
+Store :: #import "library_store";
+SQL :: #import "sqlite/SQLite";
+Crypto :: #import "crypto/sha256";
+Images :: #import "image_edit";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+JSON :: #import "std/json_document";
+Float :: #import "std/float_text";
+Clock :: #import "std/date_time_linux";
+Timer :: #import "std/timer_linux";
+Channel :: #import "std/process_channel_linux";
+Socket :: #import "std/socket_linux";
+#import "std/c_string"
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+c :: #system_library "c";
+ReleaseResolved :: (memory: *void) #foreign c "free";
+ReleaseOwnedPathValue :: (owned: string) {
+    if owned.count > 0 { descriptor := cast(*TextDescriptor)*owned; ReleaseResolved(cast(*void)descriptor.data) }
+}
+
+Copy :: (text: string) -> string {
+    out: Vec(u8)
+    if !BuilderAppend(out,text) { return "" }
+    return BuilderFinish(out)
+}
+
+CopyPhotoColumn :: (statement: *void,column: s32,result: *string,allocation: **u8) -> bool {
+    pointer := SQL.SqliteColumnText(statement,column)
+    count := SQL.SqliteColumnBytes(statement,column)
+    if pointer == null { return count == 0 }
+    if count == 0 { return true }
+    copied := Copy(TextFromBytes(BytesFromPointer(pointer,cast(u64)count)))
+    if copied.count != count { return false }
+    descriptor := cast(*TextDescriptor)*copied
+    result.* = copied
+    allocation.* = descriptor.data
+    return true
+}
+
+Bytes :: (text: string) -> []u8 {
+    descriptor := cast(*TextDescriptor)*text
+    return BytesFromPointer(descriptor.data, cast(u64)text.count)
+}
+
+#scope_file
+NeverCancelled :: (context: *void) -> bool { return false }
+
+#scope_export
+HelperProgram :: (options: FileOptions, name: string, folder: string) -> string {
+    output: Vec(u8)
+    if !HelperProgramInto(*output,options,name,folder) { return "" }
+    return BuilderFinish(output)
+}
+
+// Every successful ResolvePath result owns exactly one CopyText allocation;
+// only that verified owner is released here. PathParent remains a borrowed
+// view while its resolver allocation is alive. Candidate vectors own all
+// construction bytes; only the selected path is transferred to the caller.
+HelperProgramInto :: (output: *Vec(u8), options: FileOptions, name: string, folder: string) -> bool {
+    if output == null || output.count != 0 { return false }
+    resolved := Tree.ResolvePath(ifx options.application_root == "" then "/proc/self/exe" else options.application_root)
+    if resolved == "" { return false }
+    descriptor := cast(*TextDescriptor)*resolved
+    defer { ReleaseResolved(cast(*void)descriptor.data) }
+    directory := ifx options.application_root == "" then Tree.PathParent(resolved) else resolved
+    candidate: Vec(u8)
+    if !BuilderAppend(candidate,directory) ||
+        (directory[directory.count-1] != 47 && !VecPush(candidate,cast(u8)47)) ||
+        !BuilderAppend(candidate,name) { return false }
+    if Tree.IsFile(TextView(VecSlice(candidate,0,candidate.count))) {
+        VecSwap(<<output,candidate)
+        return true
+    }
+    VecClear(candidate)
+    if !BuilderAppend(candidate,directory) ||
+        (directory[directory.count-1] != 47 && !VecPush(candidate,cast(u8)47)) ||
+        !BuilderAppend(candidate,"build/") || !BuilderAppend(candidate,folder) ||
+        !VecPush(candidate,cast(u8)47) || !BuilderAppend(candidate,name) { return false }
+    if !Tree.IsFile(TextView(VecSlice(candidate,0,candidate.count))) { return false }
+    VecSwap(<<output,candidate)
+    return true
+}
+
+HelperTimeout :: (requested: s32, maximum: s32) -> s32 {
+    return ifx requested > 0 && requested < maximum then requested else maximum
+}
+
+// Trusted callers may raise the response cap for structured probes. The
+// default remains 64 KiB; invalid caps are rejected before starting a child.
+RunHelper :: (arguments: []string, timeout_ms: s32, output: *Vec(u8) = null, exit_code: *s32 = null,
+    output_limit: s64 = 65536, cancelled: HelperCancelled = NeverCancelled, cancel_context: *void = null) -> bool {
+    if exit_code != null { exit_code.* = -1 }
+    if output_limit < 1 || output_limit > 1048576 || timeout_ms <= 0 ||
+        (cancelled != null && cancelled(cancel_context)) { return false }
+    environment: [12]string = .["env", "-u", "DISPLAY", "-u", "WAYLAND_DISPLAY", "-u", "XAUTHORITY",
+        "-u", "DBUS_SESSION_BUS_ADDRESS", "-u", "SESSION_MANAGER", "OMP_NUM_THREADS=2"]
+    command: Vec(string)
+    for argument: environment { if !VecPush(command, argument) { return false } }
+    for argument: arguments { if !VecPush(command, argument) { return false } }
+    if cancelled != null && cancelled(cancel_context) { return false }
+    child := Channel.StartChannel(VecSlice(command, 0, command.count), false, true)
+    if child.pid <= 0 { return false }
+    defer { unused Channel.CancelChannel(*child) }
+    deadline := Timer.MonotonicMilliseconds() + timeout_ms
+    received: s64 = 0
+    chunk: [4096]u8
+    while true {
+        remaining := deadline - Timer.MonotonicMilliseconds()
+        if remaining <= 0 || (cancelled != null && cancelled(cancel_context)) { return false }
+        slice := ifx remaining > 50 then 50 else cast(s32)remaining
+        ready := Socket.SocketWaitForEvents(child.socket,1 | 8 | 16,slice)
+        if ready.error != 0 {
+            if ready.error == 110 || ready.error == 4 { continue }
+            return false
+        }
+        if (ready.ready & 32) != 0 || (ready.ready & (1 | 16)) == 0 { return false }
+        // One reader owns this endpoint. Typed readiness distinguishes a
+        // bounded timeout/EINTR from a real receive failure; no blind retries.
+        count := Channel.ChannelReceive(child,chunk[:],0)
+        if count < 0 { return false }
+        if count == 0 { break }
+        received += count
+        if received > output_limit { return false }
+        if output != null {
+            index: s64 = 0
+            while index < count { if !VecPush(<<output, chunk[index]) { return false }; index += 1 }
+        }
+    }
+    while true {
+        remaining := deadline - Timer.MonotonicMilliseconds()
+        if remaining <= 0 || (cancelled != null && cancelled(cancel_context)) { return false }
+        slice := ifx remaining > 50 then 50 else cast(s32)remaining
+        if Channel.WaitChannel(*child,slice) { break }
+        if child.error != 0 { return false }
+    }
+    if cancelled != null && cancelled(cancel_context) { return false }
+    if exit_code != null { exit_code.* = child.code }
+    return child.code == 0
+}
+
+#scope_file
+UpdateDimensions :: (lib: *Store.Library, id: string, dimensions: Images.ThumbnailDimensions) -> bool {
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,
+        "UPDATE photos SET width=?,height=?,updated=?,dirty=1 WHERE id=? AND (width<>? OR height<>?)",
+        -1, *statement, null) != SQL.SQLITE_OK { return false }
+    defer { unused SQL.SqliteFinalize(statement) }
+    return SQL.SqliteBindInt(statement, 1, dimensions.width) == SQL.SQLITE_OK &&
+        SQL.SqliteBindInt(statement, 2, dimensions.height) == SQL.SQLITE_OK &&
+        SQL.SqliteBindDouble(statement, 3, cast(float64)Clock.UnixMilliseconds() / 1000.0) == SQL.SQLITE_OK &&
+        SQL.SqliteBindTextString(statement, 4, id, cast(s32)id.count) == SQL.SQLITE_OK &&
+        SQL.SqliteBindInt(statement, 5, dimensions.width) == SQL.SQLITE_OK &&
+        SQL.SqliteBindInt(statement, 6, dimensions.height) == SQL.SQLITE_OK &&
+        SQL.SqliteStep(statement) == SQL.SQLITE_DONE
+}
+
+#scope_export
+// Internal dependencies supplied by the service, never read from UI requests
+// or persisted account/library data. Tests can shorten the normal deadlines.
+// The synchronous caller owns context until RunHelper/DecodeSource returns.
+// The trusted callback must be quick and must not close this helper's handles.
+HelperCancelled :: #type (context: *void) -> bool;
+
+FileOptions :: struct {
+    application_root: string
+    video_program: string
+    probe_program: string
+    preview_timeout_ms: s32
+    decode_timeout_ms: s32
+    metadata_timeout_ms: s32
+    cancelled: HelperCancelled
+    cancel_context: *void
+}
+
+SidecarData :: struct {
+    metadata: string
+    stamp: string
+    capture_mode: s32
+    capture_value: float64
+}
+
+SetDimensions :: (lib: *Store.Library, id: string, width: s32, height: s32) -> bool {
+    dimensions: Images.ThumbnailDimensions = .{width=width, height=height}
+    return UpdateDimensions(lib, id, dimensions)
+}
+
+Packed :: (json: string) -> string { return Store.Packed(json) }
+
+Atomic :: (path: string, data: []u8) -> bool {
+    parent := Tree.PathParent(path)
+    if !Tree.CreateDirectories(parent, 448) { return false }
+    staging := Tree.CreateTemporaryDirectory(parent, ".next-")
+    if staging == "" { return false }
+    defer { unused Tree.RemoveTree(staging) }
+    temporary := Tree.JoinPath(staging, "data")
+    output := Files.OpenExclusivePrivate(temporary)
+    if !output.valid { return false }
+    open := true
+    defer { if open { unused Files.CloseFile(output) } }
+    written: s64 = 0
+    while written < data.count {
+        amount := Files.WriteAt(output, data[written:], written)
+        if amount <= 0 { return false }
+        written += amount
+    }
+    if !Files.SyncFile(output) { return false }
+    closed := Files.CloseFile(output)
+    open = false
+    return closed && Files.RenamePath(temporary, path)
+}
+
+DigestFile :: (path: string) -> string, string {
+    input := Files.OpenRead(path)
+    if !input.valid { return "", "Could not read photo file" }
+    defer { unused Files.CloseFile(input) }
+    context: Crypto.Sha256Context
+    Crypto.Sha256Initialize(*context)
+    buffer: [65536]u8
+    offset: s64 = 0
+    while true {
+        count := Files.ReadAt(input, buffer[:], offset)
+        if count < 0 { return "", "Could not read photo file" }
+        if count == 0 { break }
+        Crypto.Sha256Update(*context, *buffer[0], count)
+        offset += count
+    }
+    digest: [32]u8
+    hex: [65]u8
+    Crypto.Sha256Finish(*context, *digest[0])
+    if Crypto.BytesToHex(*digest[0], 32, *hex[0], 65) == 0 { return "", "Could not hash photo file" }
+    return Copy(TextUntilNul(hex[:])), ""
+}
+
+// The returned row owns checked copies. Keep one owner; copies passed to
+// services borrow it. ClearPhoto releases only recorded Photo allocations.
+Photo :: (lib: *Store.Library, id: string) -> Store.PhotoRow, string {
+    photo: Store.PhotoRow
+    if lib == null || lib.db == null { return photo, "Photo library is not open" }
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,
+        "SELECT id,name,extension,kind,size,taken,width,height,metadata,albums,favorite,hidden,archived,trashed,caption,tags,updated,dirty,manifest,edits FROM photos WHERE id=?",
+        -1, *statement, null) != SQL.SQLITE_OK { return photo, "Could not read photo" }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if SQL.SqliteBindTextString(statement, 1, id, cast(s32)id.count) != SQL.SQLITE_OK { return photo, "Could not read photo" }
+    code := SQL.SqliteStep(statement)
+    if code == SQL.SQLITE_DONE { return photo, "Photo not found" }
+    if code != SQL.SQLITE_ROW { return photo, "Could not read photo" }
+    if !CopyPhotoColumn(statement,0,*photo.id,*photo.photo_allocations[0]) ||
+        !CopyPhotoColumn(statement,1,*photo.name,*photo.photo_allocations[1]) ||
+        !CopyPhotoColumn(statement,2,*photo.extension,*photo.photo_allocations[2]) ||
+        !CopyPhotoColumn(statement,3,*photo.kind,*photo.photo_allocations[3]) ||
+        !CopyPhotoColumn(statement,8,*photo.metadata,*photo.photo_allocations[4]) ||
+        !CopyPhotoColumn(statement,9,*photo.albums,*photo.photo_allocations[5]) ||
+        !CopyPhotoColumn(statement,14,*photo.caption,*photo.photo_allocations[6]) ||
+        !CopyPhotoColumn(statement,15,*photo.tags,*photo.photo_allocations[7]) ||
+        !CopyPhotoColumn(statement,18,*photo.manifest,*photo.photo_allocations[8]) ||
+        !CopyPhotoColumn(statement,19,*photo.edits,*photo.photo_allocations[9]) || SQL.SqliteErrorCode(lib.db) == SQL.SQLITE_NOMEM {
+        ClearPhoto(*photo)
+        return photo,"Could not allocate photo"
+    }
+    photo.size = SQL.SqliteColumnInt64(statement,4)
+    photo.taken = SQL.SqliteColumnDouble(statement,5)
+    photo.width = SQL.SqliteColumnInt(statement,6)
+    photo.height = SQL.SqliteColumnInt(statement,7)
+    photo.favorite = SQL.SqliteColumnInt(statement,10) != 0
+    photo.hidden = SQL.SqliteColumnInt(statement,11) != 0
+    photo.archived = SQL.SqliteColumnInt(statement,12) != 0
+    photo.trashed = SQL.SqliteColumnInt64(statement,13)
+    photo.updated = SQL.SqliteColumnDouble(statement,16)
+    photo.dirty = SQL.SqliteColumnInt(statement,17) != 0
+    return photo, ""
+}
+
+ClearPhoto :: (photo: *Store.PhotoRow) {
+    if photo == null { return }
+    for at: 0..9 {
+        if photo.photo_allocations[at] != null { ReleaseResolved(cast(*void)photo.photo_allocations[at]) }
+        photo.photo_allocations[at] = null
+    }
+    photo.* = .{}
+}
+
+// Only exact owned path results: HelperProgram, Original, Thumbnail,
+// Decode.Display/DisplayPath, Tree.ResolvePath/WorkingDirectory/CreateTemporaryDirectory.
+// Never pass a literal, PathParent/JoinPath's borrowed branch, or input view.
+ReleasePath :: (path: *string) {
+    if path == null { return }
+    ReleaseOwnedPathValue(path.*)
+    path.* = ""
+}
+
+// Internal canonical path builder. ID and extension retain their existing
+// caller validation. Output must be empty and must not alias the input views.
+OriginalInto :: (output: *Vec(u8), lib: *Store.Library, id: string, extension: string) -> bool {
+    if output == null || lib == null || output.count != 0 { return false }
+    prefix := ifx id.count >= 2 then id[0:2] else id
+    return BuilderAppend(<<output,lib.root) && BuilderAppend(<<output,"/originals/") &&
+        BuilderAppend(<<output,prefix) && BuilderAppend(<<output,"/") &&
+        BuilderAppend(<<output,id) && BuilderAppend(<<output,extension)
+}
+
+Original :: (lib: *Store.Library, photo: Store.PhotoRow) -> string {
+    name: Vec(u8)
+    if !OriginalInto(*name,lib,photo.id,photo.extension) { return "" }
+    return BuilderFinish(name)
+}
+
+Thumbnail :: (lib: *Store.Library, id: string) -> string {
+    name: Vec(u8)
+    BuilderPrint(*name, "%/previews/%.jpg", lib.root, id)
+    return BuilderFinish(name)
+}
+
+SpecialCodec :: (extension: string) -> string {
+    if extension == ".heic" || extension == ".heif" || extension == ".hif" || extension == ".avif" { return "heif" }
+    extensions: [24]string = .[".dng", ".cr2", ".cr3", ".nef", ".nrw", ".arw", ".sr2", ".srf", ".raf", ".rw2", ".rwl", ".orf", ".pef", ".ptx", ".srw", ".3fr", ".fff", ".iiq", ".kdc", ".dcr", ".erf", ".mrw", ".mos", ".mef"]
+    for candidate: extensions { if candidate == extension { return "raw" } }
+    return ""
+}
+
+PreviewSource :: (lib: *Store.Library, photo: Store.PhotoRow, source: string, options: FileOptions = .{}) -> string, string {
+    target := Thumbnail(lib, photo.id)
+    if Files.PathExists(target) { return target, "" }
+    parent := Tree.PathParent(target)
+    if !Tree.CreateDirectories(parent, 448) { return "", "Could not create photo preview" }
+    staging := Tree.CreateTemporaryDirectory(parent, ".preview-")
+    if staging == "" { return "", "Could not create photo preview" }
+    defer { unused Tree.RemoveTree(staging) }
+    if photo.kind != "photo" {
+        temporary := Tree.JoinPath(staging, "video.jpg")
+        program := ifx options.video_program != "" then options.video_program else "ffmpeg"
+        arguments: [12]string = .[program, "-loglevel", "error", "-nostdin", "-y", "-i", source,
+            "-frames:v", "1", "-vf", "scale=640:640:force_original_aspect_ratio=decrease", temporary]
+        if !RunHelper(arguments[:], HelperTimeout(options.preview_timeout_ms, 40000)) || !Files.RenamePath(temporary, target) { return "", "Could not generate photo preview" }
+        return target, ""
+    }
+    input := source
+    codec := SpecialCodec(photo.extension)
+    decodedDimensions: Images.ThumbnailDimensions
+    if codec != "" {
+        helperBytes: Vec(u8)
+        if !HelperProgramInto(*helperBytes,options,"photo_decode","photo-decoder") { return "", "Build or install the Photos HEIC/RAW decoder to view this format" }
+        helper := TextView(VecSlice(helperBytes,0,helperBytes.count))
+        decoded := Tree.JoinPath(staging, "decoded.png")
+        arguments: [8]string = .["prlimit", "--as=1610612736", "--cpu=120", "--", helper, codec, source, decoded]
+        command: Vec(string)
+        for argument: arguments { VecPush(command, argument) }
+        VecPush(command, "640")
+        response: Vec(u8)
+        if !RunHelper(VecSlice(command, 0, command.count), HelperTimeout(options.decode_timeout_ms, 130000), *response) { return "", "HEIC/RAW decoding could not finish; your original is safe" }
+        dimensionsJSON: JSON.JsonDocument
+        defer { JSON.JsonReset(*dimensionsJSON) }
+        if !JSON.JsonRead(*dimensionsJSON, TextView(VecSlice(response, 0, response.count))) { return "", "Invalid decoded dimensions" }
+        width, widthValid := JSON.JsonInteger(*dimensionsJSON, JSON.JsonMember(*dimensionsJSON, dimensionsJSON.root, "width"))
+        height, heightValid := JSON.JsonInteger(*dimensionsJSON, JSON.JsonMember(*dimensionsJSON, dimensionsJSON.root, "height"))
+        if !widthValid || !heightValid || width <= 0 || height <= 0 || width > 100000 || height > 100000 {
+            return "", "Invalid decoded dimensions"
+        }
+        decodedDimensions.width = cast(s32)width
+        decodedDimensions.height = cast(s32)height
+        input = decoded
+    }
+    encoded: Vec(u8)
+    dimensions: Images.ThumbnailDimensions
+    if !Images.Thumbnail(input, *encoded, *dimensions) { return "", "Could not generate photo preview" }
+    if codec != "" {
+        if !UpdateDimensions(lib, photo.id, decodedDimensions) { return "", "Could not update decoded photo dimensions" }
+    }
+    if !Atomic(target, VecSlice(encoded, 0, encoded.count)) { return "", "Could not save photo preview" }
+    return target, ""
+}
+
+Preview :: (lib: *Store.Library, id: string, options: FileOptions = .{}) -> string, string {
+    photo, error := Photo(lib, id)
+    if error != "" { return "", error }
+    return PreviewSource(lib, photo, Original(lib, photo), options)
+}
+
+Sidecar :: (path: string, options: FileOptions = .{}) -> SidecarData, string {
+    result: SidecarData
+    if path == "" { return result, "Choose an absolute original path" }
+    absolute := ifx path[0] == 47 then path else Tree.JoinPath(Tree.WorkingDirectory(), path)
+    helperBytes: Vec(u8)
+    if !HelperProgramInto(*helperBytes,options,"read_metadata","read-metadata") { return result, "Build or install Photos metadata reading before importing photos" }
+    helper := TextView(VecSlice(helperBytes,0,helperBytes.count))
+    arguments: [16]string = .["env", "-u", "DISPLAY", "-u", "WAYLAND_DISPLAY", "-u", "XAUTHORITY",
+        "-u", "DBUS_SESSION_BUS_ADDRESS", "-u", "SESSION_MANAGER", "OMP_NUM_THREADS=2",
+        "prlimit", "--as=536870912", "--", helper]
+    child := Channel.StartChannel(arguments[:], false, true)
+    if child.pid <= 0 { return result, "Metadata reading could not start; retry the import" }
+    defer { unused Channel.CloseChannel(*child, 2000) }
+    request: Vec(u8)
+    BuilderPrint(*request, "{\"operation\":\"sidecar\",\"path\":")
+    JSON.JsonQuoteInto(*request, absolute, false)
+    BuilderPrint(*request, "}\n")
+    text := TextView(VecSlice(request, 0, request.count))
+    if text.count > 32768 { return result, "Metadata request exceeds its limit" }
+    timeout := HelperTimeout(options.metadata_timeout_ms, 20000)
+    if Channel.ChannelSend(child, Bytes(text), timeout) != text.count { return result, "Metadata reading could not finish; retry the import" }
+    response: Vec(u8)
+    chunk: [65536]u8
+    deadline := Timer.MonotonicMilliseconds() + timeout
+    complete := false
+    while !complete {
+        remaining := deadline - Timer.MonotonicMilliseconds()
+        if remaining <= 0 { return result, "Metadata reading timed out; retry the import" }
+        count := Channel.ChannelReceive(child, chunk[:], cast(s32)remaining)
+        if count <= 0 { return result, "Metadata reader stopped; retry the import" }
+        if response.count + count > 16777216 { return result, "Metadata response exceeds its limit" }
+        index: s64 = 0
+        while index < count {
+            if chunk[index] == 10 {
+                if complete || index != count - 1 { return result, "Metadata reader returned an invalid response" }
+                complete = true
+            }
+            VecPush(response, chunk[index])
+            index += 1
+        }
+    }
+    document: JSON.JsonDocument
+    defer { JSON.JsonReset(*document) }
+    if !JSON.JsonRead(*document, TextView(VecSlice(response, 0, response.count))) { return result, "Metadata reader returned an invalid response" }
+    errorBytes: Vec(u8)
+    errorNode := JSON.JsonMember(*document, document.root, "error")
+    if errorNode >= 0 && !JSON.JsonStringInto(*document, errorNode, *errorBytes) { return result, "Metadata reader returned an invalid error" }
+    if errorBytes.count > 0 { return result, BuilderFinish(errorBytes) }
+    metadata := JSON.JsonMember(*document, document.root, "metadata")
+    stamp := JSON.JsonMember(*document, document.root, "stamp")
+    mode, modeValid := JSON.JsonInteger(*document, JSON.JsonMember(*document, document.root, "capture_mode"))
+    captureBytes: Vec(u8)
+    if !JSON.JsonNumberTextInto(*document, JSON.JsonMember(*document, document.root, "capture_value"), *captureBytes) { return result, "Metadata reader returned an invalid capture time" }
+    capture, captureValid := Float.ParseFloat64(TextView(VecSlice(captureBytes, 0, captureBytes.count)))
+    if JSON.JsonKindOf(*document, metadata) != JSON.JsonKind.Object ||
+        JSON.JsonKindOf(*document, stamp) != JSON.JsonKind.String ||
+        !modeValid || mode < 0 || mode > 2 || !captureValid || capture != capture || capture - capture != 0.0 {
+        return result, "Metadata reader returned an invalid sidecar"
+    }
+    result.metadata = JSON.JsonWrite(*document, metadata, JSON.JsonCompactStyle(false, true))
+    stampBytes: Vec(u8)
+    if !JSON.JsonStringInto(*document, stamp, *stampBytes) { return result, "Could not read metadata stamp" }
+    result.stamp = BuilderFinish(stampBytes)
+    result.capture_mode = cast(s32)mode
+    result.capture_value = capture
+    return result, ""
+}

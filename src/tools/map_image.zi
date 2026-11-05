@@ -1,0 +1,235 @@
+// Offline GeoJSON renderer. Only the supplied public map and destination are
+// accessed; a complete private PNG is renamed into place after validation.
+#scope_module
+JSON :: #import "std/json_document";
+Float :: #import "std/float_text";
+Math :: #import "std/math";
+Raster :: #import "std/image";
+PNG :: #import "std/png_linux";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+Order :: #import "std/sort";
+UTF8 :: #import "std/utf8";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+MAX_INPUT :: 2097152;
+MAX_POINTS :: 65536;
+MAX_RINGS :: 8192;
+MAX_WORK :: 67108864;
+Point :: struct { x: s32; y: s32 }
+Budget :: struct { points: s64; rings: s64; work: s64 }
+
+Bytes :: (bytes: *Vec(u8)) -> []u8 {
+    empty: []u8
+    if bytes==null || bytes.count==0 { return empty }
+    return BytesFromPointer(*(<<bytes)[0],cast(u64)bytes.count)
+}
+Text :: (bytes: *Vec(u8)) -> string { return TextFromBytes(Bytes(bytes)) }
+Path :: (path: string) -> bool {
+    if path.count<1 || path.count>4095 || !UTF8.Valid(path) { return false }
+    for byte: path { if byte==0 { return false } }
+    return true
+}
+Read :: (path: string,bytes: *Vec(u8)) -> bool {
+    input:=Files.OpenRead(path)
+    if !input.valid { return false }; defer { unused Files.CloseFile(input) }
+    size:=Files.FileSize(input)
+    if size<2 || size>MAX_INPUT || !VecResize(<<bytes,size) { return false }
+    at: s64
+    while at<size {
+        count:=Files.ReadAt(input,Bytes(bytes)[at:size],at)
+        if count<=0 { return false }; at+=count
+    }
+    extra: [1]u8
+    return Files.ReadAt(input,extra[:],size)==0 && UTF8.Valid(Text(bytes))
+}
+Number :: (document: *JSON.JsonDocument,node: s32,bytes: *Vec(u8)) -> float64,bool {
+    VecClear(<<bytes)
+    if !JSON.JsonNumberTextInto(document,node,bytes) || bytes.count>64 { return 0.0,false }
+    value,valid:=Float.ParseFloat64(Text(bytes))
+    return value,valid && Math.Finite64(value)
+}
+Position :: (document: *JSON.JsonDocument,node: s32,width: s32,height: s32,bytes: *Vec(u8),point: *Point) -> bool {
+    count:=JSON.JsonCount(document,node)
+    if JSON.JsonKindOf(document,node)!=JSON.JsonKind.Array || count<2 || count>3 { return false }
+    first:=JSON.JsonFirst(document,node); second:=JSON.JsonNext(document,first)
+    longitude,validLongitude:=Number(document,first,bytes)
+    latitude,validLatitude:=Number(document,second,bytes)
+    if !validLongitude || !validLatitude || longitude< -180.0 || longitude>180.0 || latitude< -90.0 || latitude>90.0 { return false }
+    if count==3 {
+        unusedAltitude,validAltitude:=Number(document,JSON.JsonNext(document,second),bytes)
+        unused unusedAltitude
+        if !validAltitude { return false }
+    }
+    // Pillow truncates projected polygon vertices to integer pixels. The
+    // right and bottom boundaries fall just outside and are clipped.
+    point.x=cast(s32)((longitude+180.0)*cast(float64)width/360.0)
+    point.y=cast(s32)((90.0-latitude)*cast(float64)height/180.0)
+    return true
+}
+Span :: (image: *Raster.Image,left: s32,right: s32,y: s32,color: u32) {
+    if y<0 || y>=image.height || right<0 || left>=image.width { return }
+    start:=ifx left<0 then 0 else left; end:=ifx right>=image.width then image.width-1 else right
+    for x: start..end {
+        at:=(cast(s64)y*image.width+x)*4
+        image.pixels[at]=cast(u8)((color>>16)&255)
+        image.pixels[at+1]=cast(u8)((color>>8)&255)
+        image.pixels[at+2]=cast(u8)(color&255)
+    }
+}
+Floor :: (value: float64) -> s32 {
+    whole:=cast(s32)value; return ifx cast(float64)whole>value then whole-1 else whole
+}
+Ceil :: (value: float64) -> s32 {
+    whole:=cast(s32)value; return ifx cast(float64)whole<value then whole+1 else whole
+}
+Fill :: (image: *Raster.Image,points: []Point,low: s32,high: s32,color: u32) -> bool {
+    crossings: Vec(float64)
+    if !VecReserve(crossings,points.count*2) { return false }
+    // Horizontal boundaries include both endpoints, including holes.
+    for index: 0..points.count-2 {
+        a:=points[index]; b:=points[index+1]
+        if a.y==b.y { Span(image,ifx a.x<b.x then a.x else b.x,ifx a.x>b.x then a.x else b.x,a.y,color) }
+    }
+    first:=ifx low<0 then 0 else low; last:=ifx high>=image.height then image.height-1 else high
+    for y: first..last {
+        VecClear(crossings)
+        for index: 0..points.count-2 {
+            a:=points[index]; b:=points[index+1]
+            bottom:=ifx a.y>b.y then a.y else b.y; top:=ifx a.y<b.y then a.y else b.y
+            if top==bottom || y<top || y>bottom { continue }
+            x:=cast(float64)a.x+cast(float64)(y-a.y)*cast(float64)(b.x-a.x)/cast(float64)(b.y-a.y)
+            if !VecPush(crossings,x) { return false }
+            // A lower endpoint below another edge contributes twice, so a
+            // shared vertex keeps even/odd pairing on its closing scanline.
+            if y==bottom && y<high && !VecPush(crossings,x) { return false }
+        }
+        Order.Sort(VecSlice(crossings,0,crossings.count))
+        index: s64=1
+        while index<crossings.count {
+            // Nearest integer with opposite ties for the two ends, matching
+            // the old inclusive polygon spans without expanding the coast.
+            left:=Ceil(crossings[index-1]-0.5)
+            right:=Floor(crossings[index]+0.5)
+            Span(image,left,right,y,color); index+=2
+        }
+    }
+    return true
+}
+Ring :: (document: *JSON.JsonDocument,node: s32,image: *Raster.Image,color: u32,budget: *Budget) -> bool {
+    count:=JSON.JsonCount(document,node)
+    if JSON.JsonKindOf(document,node)!=JSON.JsonKind.Array || count<4 || count>16384 || budget.points+count>MAX_POINTS || budget.rings>=MAX_RINGS { return false }
+    points: Vec(Point); bytes: Vec(u8)
+    if !VecReserve(points,cast(s64)count) { return false }
+    low:=image.height; high: s32
+    child:=JSON.JsonFirst(document,node)
+    while child>=0 {
+        point: Point
+        if !Position(document,child,image.width,image.height,*bytes,*point) || !VecPush(points,point) { return false }
+        if point.y<low { low=point.y }; if point.y>high { high=point.y }
+        child=JSON.JsonNext(document,child)
+    }
+    // Compare geographic coordinates rather than rounded pixels at closure.
+    first:=JSON.JsonFirst(document,node); last:=JSON.JsonElement(document,node,count-1)
+    for axis: 0..1 {
+        a,validA:=Number(document,JSON.JsonElement(document,first,cast(s32)axis),*bytes)
+        b,validB:=Number(document,JSON.JsonElement(document,last,cast(s32)axis),*bytes)
+        if !validA || !validB || a!=b { return false }
+    }
+    budget.points+=count; budget.rings+=1; budget.work+=cast(s64)(high-low+1)*count
+    return budget.work<=MAX_WORK && Fill(image,VecSlice(points,0,points.count),low,high,color)
+}
+Polygon :: (document: *JSON.JsonDocument,node: s32,image: *Raster.Image,budget: *Budget) -> bool {
+    if JSON.JsonKindOf(document,node)!=JSON.JsonKind.Array || JSON.JsonCount(document,node)<1 { return false }
+    child:=JSON.JsonFirst(document,node); exterior:=true
+    while child>=0 {
+        if !Ring(document,child,image,ifx exterior then cast(u32)0x56766d else 0x183440,budget) { return false }
+        exterior=false; child=JSON.JsonNext(document,child)
+    }
+    return true
+}
+Paint :: (document: *JSON.JsonDocument,image: *Raster.Image) -> bool {
+    root:=document.root
+    if JSON.JsonKindOf(document,root)!=JSON.JsonKind.Object || !JSON.JsonIs(document,JSON.JsonMember(document,root,"type"),"FeatureCollection") { return false }
+    features:=JSON.JsonMember(document,root,"features")
+    if JSON.JsonKindOf(document,features)!=JSON.JsonKind.Array || JSON.JsonCount(document,features)>4096 { return false }
+    budget: Budget; feature:=JSON.JsonFirst(document,features)
+    while feature>=0 {
+        if JSON.JsonKindOf(document,feature)!=JSON.JsonKind.Object || !JSON.JsonIs(document,JSON.JsonMember(document,feature,"type"),"Feature") { return false }
+        geometry:=JSON.JsonMember(document,feature,"geometry")
+        if JSON.JsonKindOf(document,geometry)!=JSON.JsonKind.Object { return false }
+        kind:=JSON.JsonMember(document,geometry,"type"); coordinates:=JSON.JsonMember(document,geometry,"coordinates")
+        if JSON.JsonIs(document,kind,"Polygon") {
+            if !Polygon(document,coordinates,image,*budget) { return false }
+        } else if JSON.JsonIs(document,kind,"MultiPolygon") {
+            if JSON.JsonKindOf(document,coordinates)!=JSON.JsonKind.Array || JSON.JsonCount(document,coordinates)<1 { return false }
+            polygon:=JSON.JsonFirst(document,coordinates)
+            while polygon>=0 {
+                if !Polygon(document,polygon,image,*budget) { return false }
+                polygon=JSON.JsonNext(document,polygon)
+            }
+        } else { return false }
+        feature=JSON.JsonNext(document,feature)
+    }
+    for step: 0..12 {
+        x:=cast(s32)(cast(float64)step*cast(float64)image.width/12.0)
+        if x<image.width { for y: 0..image.height-1 { Span(image,x,x,cast(s32)y,0x385256) } }
+    }
+    for step: 0..6 {
+        y:=cast(s32)(cast(float64)step*cast(float64)image.height/6.0)
+        Span(image,0,image.width-1,y,0x385256)
+    }
+    return true
+}
+
+#scope_export
+// GEOJSON is a file path. Invalid/bounded-out input and failed PNG writes
+// preserve an existing destination. No library, network or desktop access.
+Render :: (geojson: string,output: string,w: s32=4096,h: s32=2048) -> bool {
+    if !Path(geojson) || !Path(output) || w<1 || h<1 || w>8192 || h>4096 || cast(s64)w*h>16777216 { return false }
+    bytes: Vec(u8)
+    if !Read(geojson,*bytes) { return false }
+    document: JSON.JsonDocument
+    defer { JSON.JsonReset(*document) }
+    if !JSON.JsonRead(*document,Text(*bytes)) || document.nodes.count>524288 { return false }
+    image:=Raster.NewImage(w,h,24,52,64,255)
+    if !Raster.ImageValid(*image) || !Paint(*document,*image) { return false }
+    parent:=Tree.PathParent(output)
+    if !Tree.CreateDirectories(parent,493) { return false }
+    staging:=Tree.CreateTemporaryDirectory(parent,".map-next-")
+    if staging=="" { return false }; defer { unused Tree.RemoveTree(staging) }
+    temporary: Vec(u8); BuilderPrint(*temporary,"%/map.png",staging)
+    path:=Text(*temporary)
+    if !PNG.WritePNGFile(path,*image,false) { return false }
+    saved:=Files.OpenRead(path)
+    if !saved.valid { return false }
+    synced:=Files.SyncFile(saved); closed:=Files.CloseFile(saved)
+    return synced && closed && Files.RenamePath(path,output)
+}
+Options :: struct { geojson: string; output: string; help: bool }
+ParseArgs :: (argc: s32,argv: **u8,options: *Options) -> bool {
+    if options==null { return false }; options.* = .{}; options.output="assets/world.png"
+    at: s32=1
+    while at<argc {
+        argument:=TextFromCString(argv[at]); at+=1
+        if argument=="--help" || argument=="-h" { options.help=true; return true }
+        if argument=="--output" {
+            if at>=argc { return false }; options.output=TextFromCString(argv[at]); at+=1
+        } else if argument.count>=9 && argument[:9]=="--output=" { options.output=argument[9:] }
+        else if argument.count>0 && argument[0]!=45 && options.geojson=="" { options.geojson=argument }
+        else { return false }
+    }
+    return Path(options.geojson) && Path(options.output)
+}
+main :: (argc: s32,argv: **u8) -> s32 {
+    options: Options
+    valid:=ParseArgs(argc,argv,*options)
+    if valid && options.help {
+        print("Render public GeoJSON land polygons to an offline map.\nUsage: map_image GEOJSON [--output PATH]\nDefault output: assets/world.png (4096 by 2048).\n"); return 0
+    }
+    if !valid { print("Expected GeoJSON path and optional --output PATH; use --help.\n"); return 2 }
+    if !Render(options.geojson,options.output) { print("Unable to render the map; existing output was preserved.\n"); return 1 }
+    return 0
+}

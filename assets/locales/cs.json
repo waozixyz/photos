@@ -1,0 +1,17 @@
+{
+  "photos_today": "Dnes",
+  "photos_yesterday": "Včera",
+  "photos_date": "{d}. {m}. {y}",
+  "photos_month_1": "leden",
+  "photos_month_2": "únor",
+  "photos_month_3": "březen",
+  "photos_month_4": "duben",
+  "photos_month_5": "květen",
+  "photos_month_6": "červen",
+  "photos_month_7": "červenec",
+  "photos_month_8": "srpen",
+  "photos_month_9": "září",
+  "photos_month_10": "říjen",
+  "photos_month_11": "listopad",
+  "photos_month_12": "prosinec"
+}

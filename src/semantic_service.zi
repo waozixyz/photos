@@ -1,0 +1,707 @@
+// Local CLIP orchestration. Service stays at one address until Close; callers
+// stop dispatching requests before Close cancels and joins its worker.
+Store :: #import "library_store";
+SQL :: #import "sqlite/SQLite";
+JSON :: #import "std/json_document";
+Tokenizer :: #import "clip_tokenizer/Tokenizer";
+Unicode :: #import "std/unicode";
+UTF8 :: #import "std/utf8";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+Mutex :: #import "std/mutex_linux";
+Thread :: #import "std/thread_linux";
+Process :: #import "std/process_run_linux";
+Timer :: #import "std/timer_linux";
+Clock :: #import "std/date_time_linux";
+Crypto :: #import "crypto/sha256";
+Auth :: #import "vault_auth";
+Guest :: #import "guest";
+Gallery :: #import "gallery_query";
+Index :: #import "semantic_index";
+Rank :: #import "semantic";
+LibraryFiles :: #import "library_files";
+Decode :: #import "decode_service";
+#import "std/byte_text_linux"
+#import "std/c_string"
+#import "std/text_buffer"
+#import "std/json_scan"
+using Vectors :: #import "std/vec";
+
+#scope_file
+c :: #system_library "c";
+sodium :: #system_library "sodium";
+loader :: #system_library "dl";
+OpenLibrary :: (path: *u8, flags: s32) -> *void #foreign loader "dlopen";
+CloseLibrary :: (handle: *void) -> s32 #foreign loader "dlclose";
+CopyMemory :: (target: *void, source: *void, size: usize) -> *void #foreign c "memcpy";
+LockFile :: (fd: s32, operation: s32) -> s32 #foreign c "flock";
+OpenFile :: (path: *u8, flags: s32, mode: s32) -> s32 #foreign c "open";
+CloseFile :: (fd: s32) -> s32 #foreign c "close";
+Encode64 :: (target: *u8, capacity: usize, bytes: *u8, count: usize, variant: s32) -> *u8 #foreign sodium "sodium_bin2base64";
+Decode64 :: (bytes: *u8, capacity: usize, text: *u8, length: usize, ignore: *u8, count: *usize, end: **u8, variant: s32) -> s32 #foreign sodium "sodium_base642bin";
+MissingModels :: "Install all local semantic search models before enabling search";
+BadModels :: "A semantic search model failed its integrity check; reinstall the models";
+Failed :: "Local semantic processing could not finish; originals remain safe";
+InvalidIndex :: "Invalid semantic search index";
+ModelNames: [3]string = .["vision_model_quantized.onnx","text_model_quantized.onnx","tokenizer.json"];
+ModelSizes: [3]s64 = .[89117001,64504507,2224119];
+ModelHashes: [3]string = .["583fd1110a514667812fee7d684952aaf82a99b959760c8d7dca7e0ab9839299","73baab855d406190da9faa498cfedf65f15cf309f4cc7385b7b032e6d08e5c3a","f7f3b7af117d467b58374797691a6438d3e6b9e9cef800dfd5dced7f697a90cd"];
+
+Join :: (root: string, leaf: string) -> string {
+    output: Vec(u8)
+    if !BuilderAppend(output,root) || !VecPush(output,cast(u8)47) || !BuilderAppend(output,leaf) { return "" }
+    return BuilderFinish(output)
+}
+Count :: (output: *Vec(u8), value: s64) -> bool {
+    if value < 0 { return false }
+    digits: [20]u8; at: s64 = 20; number := value
+    while true { at -= 1; digits[at] = cast(u8)(48+number%10); number /= 10; if number == 0 { break } }
+    return BuilderAppend(<<output,TextView(digits[at:]))
+}
+Read :: (path: string, output: *Vec(u8), limit: s64) -> bool {
+    info := Tree.PathStatus(path,false)
+    if info.kind != Tree.PathKind.File || info.size < 0 || info.size > limit { return false }
+    file := Files.OpenRead(path); if !file.valid { return false }
+    defer { unused Files.CloseFile(file) }
+    bytes: Vec(u8)
+    if !VecResize(bytes,info.size) || Files.ReadAt(file,VecSlice(bytes,0,bytes.count),0) != bytes.count { return false }
+    extra: [1]u8
+    if Files.ReadAt(file,extra[:],info.size) != 0 { return false }
+    VecSwap(<<output,bytes); return true
+}
+Write :: (path: string, bytes: []u8) -> bool {
+    file := Files.OpenExclusivePrivate(path); if !file.valid { return false }
+    defer { unused Files.CloseFile(file) }
+    return Files.WriteAt(file,bytes,0) == bytes.count
+}
+Same :: (a: Tree.PathInfo, b: Tree.PathInfo) -> bool {
+    return a.identity_valid && b.identity_valid && a.kind == Tree.PathKind.File && b.kind == Tree.PathKind.File &&
+        a.size == b.size && a.inode == b.inode && a.device_major == b.device_major && a.device_minor == b.device_minor &&
+        a.modified == b.modified && a.modified_nanoseconds == b.modified_nanoseconds &&
+        a.changed == b.changed && a.changed_nanoseconds == b.changed_nanoseconds
+}
+Digest :: (path: string, size: s64, expected: string) -> bool {
+    file := Files.OpenRead(path); if !file.valid { return false }
+    defer { unused Files.CloseFile(file) }
+    context: Crypto.Sha256Context; Crypto.Sha256Initialize(*context)
+    bytes: [65536]u8; at: s64
+    while at < size {
+        count := size-at; if count > bytes.count { count = bytes.count }
+        if Files.ReadAt(file,bytes[:count],at) != count { return false }
+        Crypto.Sha256Update(*context,*bytes[0],count); at += count
+    }
+    if Files.ReadAt(file,bytes[:1],size) != 0 { return false }
+    digest: [32]u8; hex: [65]u8; Crypto.Sha256Finish(*context,*digest[0])
+    return Crypto.BytesToHex(*digest[0],32,*hex[0],65) == 1 && TextUntilNul(hex[:]) == expected
+}
+Epoch :: (service: *Service) -> u64 {
+    if !Mutex.Lock(*service.state_lock) { return 0 }
+    value := service.epoch; unused Mutex.Unlock(*service.state_lock); return value
+}
+Cancellation :: struct { service: *Service; epoch: u64 }
+NoCancellation :: (context: *void) -> bool { unused context; return false }
+DecodeCancelled :: (context: *void) -> bool {
+    cancellation := cast(*Cancellation)context
+    return cancellation == null || Cancelled(cancellation.service,cancellation.epoch)
+}
+Cancelled :: (service: *Service, epoch: u64) -> bool {
+    if !Mutex.Lock(*service.state_lock) { return true }
+    result := service.closing || service.epoch != epoch
+    unused Mutex.Unlock(*service.state_lock); return result
+}
+Manifest :: (service: *Service) -> bool {
+    path := Join(service.options.package_root,"assets/SEMANTIC-MODELS.json"); defer { Auth.ReleaseOwned(path,false) }
+    bytes: Vec(u8); document: JSON.JsonDocument; defer { JSON.JsonReset(*document) }
+    if !Read(path,*bytes,65536) || !JSON.JsonRead(*document,TextView(VecSlice(bytes,0,bytes.count))) ||
+        !JSON.JsonIs(*document,JSON.JsonMember(*document,document.root,"model"),Rank.Model) { return false }
+    files := JSON.JsonMember(*document,document.root,"files")
+    if JSON.JsonKindOf(*document,files) != JSON.JsonKind.Array || JSON.JsonCount(*document,files) != 3 { return false }
+    for i: 0..2 {
+        found: s32; row := JSON.JsonFirst(*document,files)
+        while row >= 0 {
+            if JSON.JsonIs(*document,JSON.JsonMember(*document,row,"name"),ModelNames[i]) {
+                size,ok := JSON.JsonInteger(*document,JSON.JsonMember(*document,row,"bytes"))
+                if !ok || size != ModelSizes[i] || !JSON.JsonIs(*document,JSON.JsonMember(*document,row,"sha256"),ModelHashes[i]) { return false }
+                found += 1
+            }
+            row = JSON.JsonNext(*document,row)
+        }
+        if found != 1 { return false }
+    }
+    return true
+}
+Program :: (service: *Service, name: string, folder: string, explicit: string) -> string {
+    if explicit.count > 0 { return Auth.CloneOwned(explicit) }
+    installed := Join(service.options.package_root,name)
+    if installed.count == 0 { return "" }
+    if Tree.PathStatus(installed,false).kind == Tree.PathKind.File { return installed }
+    Auth.ReleaseOwned(installed,false)
+    parent := Join(service.options.package_root,folder); defer { Auth.ReleaseOwned(parent,false) }
+    if parent.count == 0 { return "" }
+    return Join(parent,name)
+}
+// Caller holds work_lock. Model bytes never leave this service or the helper.
+PrepareLocked :: (service: *Service) -> string {
+    if Stopped(service) { return "Local semantic processing was cancelled" }
+    if !Manifest(service) { return "The semantic search models need an update" }
+    root := Join(service.options.package_root,"models")
+    if root.count == 0 { return "Could not allocate semantic model paths" }
+    if Tree.PathStatus(root,false).kind != Tree.PathKind.Directory {
+        Auth.ReleaseOwned(root,false); root = Join(service.options.package_root,"build/models")
+    }
+    defer { Auth.ReleaseOwned(root,false) }
+    if root.count == 0 { return "Could not allocate semantic model paths" }
+    if Tree.PathStatus(root,false).kind != Tree.PathKind.Directory { return MissingModels }
+    if root != service.model_root {
+        Tokenizer.Close(*service.tokenizer); service.verified = .{}
+        Auth.ReleaseOwned(service.model_root,false); service.model_root = Auth.CloneOwned(root)
+        if service.model_root.count == 0 { return "Could not allocate semantic model paths" }
+    }
+    for i: 0..2 {
+        if Stopped(service) { return "Local semantic processing was cancelled" }
+        path := Join(root,ModelNames[i]); defer { Auth.ReleaseOwned(path,false) }
+        before := Tree.PathStatus(path,false)
+        if before.kind != Tree.PathKind.File { return MissingModels }
+        if before.size != ModelSizes[i] { return BadModels }
+        changed := !Same(before,service.verified[i])
+        if changed && (!Digest(path,ModelSizes[i],ModelHashes[i]) || !Same(before,Tree.PathStatus(path,false))) { return BadModels }
+        if i == 2 && (changed || !service.tokenizer.ready) {
+            Tokenizer.Close(*service.tokenizer)
+            bytes: Vec(u8)
+            if !Read(path,*bytes,Tokenizer.MaxModelBytes) || !Same(before,Tree.PathStatus(path,false)) ||
+                !Tokenizer.LoadJSON(*service.tokenizer,TextView(VecSlice(bytes,0,bytes.count))) { return "The semantic search tokenizer could not be loaded" }
+        }
+        service.verified[i] = before
+    }
+    program := Program(service,"semantic_infer","build/semantic-infer",service.options.program)
+    if program.count == 0 { return "Could not allocate semantic engine paths" }
+    if program == service.program { Auth.ReleaseOwned(program,false) }
+    else { Auth.ReleaseOwned(service.program,false); service.program = program }
+    if Tree.PathStatus(service.program,false).kind != Tree.PathKind.File { return "Build or install the native semantic search engine" }
+    runtime: [4096]u8
+    if !CopyCString(service.options.runtime,runtime[:]) { return "Install the local semantic search runtime before enabling search" }
+    handle := OpenLibrary(*runtime[0],2)
+    if handle == null { return "Install the local semantic search runtime before enabling search" }
+    unused CloseLibrary(handle)
+    return ""
+}
+RunBounded :: (service: *Service, arguments: []string, directory: string, epoch: u64) -> bool {
+    if Cancelled(service,epoch) { return false }
+    environment: [8]string = .["DISPLAY","WAYLAND_DISPLAY","XAUTHORITY","DBUS_SESSION_BUS_ADDRESS","SESSION_MANAGER","OMP_NUM_THREADS=2","ORT_DISABLE_TELEMETRY=1","ZIRAN_DESKTOP_RECOVERY=0"]
+    run: Process.ProcessRun
+    options: Process.ProcessOptions
+    options.arguments = arguments; options.environment = environment[:]
+    options.input_path = "/dev/null"; options.output_path = "/dev/null"; options.error_path = "/dev/null"; options.new_session = true
+    timeout := service.options.timeout_ms
+    if timeout < 1 || timeout > 65000 { timeout = 65000 }
+    start := Timer.MonotonicMilliseconds()
+    if start < 0 || !Process.StartProcess(options,*run) { return false }
+    defer { if !run.finished { unused Process.SignalProcess(*run,9,true); unused Process.WaitProcess(*run) } }
+    while !run.finished {
+        unused Process.PollProcess(*run)
+        if run.finished { break }
+        now := Timer.MonotonicMilliseconds()
+        if now < start || now-start >= timeout || Cancelled(service,epoch) { return false }
+        if !Timer.SleepMilliseconds(10) { return false }
+    }
+    return run.code == 0 && !Cancelled(service,epoch)
+}
+InferLocked :: (service: *Service, lib: *Store.Library, mode: string, tensor: []u8, output: *Vec(u8), epoch: u64) -> string {
+    VecClear(<<output)
+    if (mode != "text" && mode != "image") || tensor.count != (ifx mode == "text" then 616 else 602112) { return Failed }
+    error := PrepareLocked(service); if error.count > 0 { return error }
+    private := Private(lib); defer { Auth.ReleaseOwned(private,false) }
+    if private.count == 0 { return Failed }
+    directory := Tree.CreateTemporaryDirectory(private,".infer-"); defer { Auth.ReleaseOwned(directory,false) }
+    if directory.count == 0 { return Failed }
+    defer { unused Tree.RemoveTree(directory) }
+    source := Join(directory,"tensor"); defer { Auth.ReleaseOwned(source,false) }
+    target := Join(directory,"embedding"); defer { Auth.ReleaseOwned(target,false) }
+    model := Join(service.model_root,ifx mode == "image" then ModelNames[0] else ModelNames[1]); defer { Auth.ReleaseOwned(model,false) }
+    if !Write(source,tensor) { return Failed }
+    arguments: [12]string = .["prlimit","--as=2147483648","--cpu=60","--",service.program,service.options.runtime,mode,model,source,target,
+        ifx mode == "image" then "pixel_values" else "input_ids",ifx mode == "image" then "image_embeds" else "text_embeds"]
+    if !RunBounded(service,arguments[:],directory,epoch) || !Read(target,output,2048) { return Failed }
+    model_index := ifx mode == "image" then 0 else 1
+    if !Same(service.verified[model_index],Tree.PathStatus(model,false)) { VecClear(<<output); return BadModels }
+    if !ValidEmbedding(BytesFromPointer(*(<<output)[0],cast(u64)output.count)) { VecClear(<<output); return "Local semantic processing produced an invalid embedding" }
+    return ""
+}
+Failure :: (lib: *Store.Library, error: string) -> string {
+    Store.SetError(lib,error); return ""
+}
+Serialize :: (document: *JSON.JsonDocument, node: s32) -> string {
+    output: Vec(u8)
+    if document.error.count > 0 || !JSON.JsonWriteInto(*output,document,node,JSON.JsonCompactStyle(false)) { return "" }
+    return BuilderFinish(output)
+}
+Truth :: (document: *JSON.JsonDocument, node: s32) -> bool {
+    kind := JSON.JsonKindOf(document,node)
+    if kind == JSON.JsonKind.True { return true }
+    if kind == JSON.JsonKind.String { return !JSON.JsonIs(document,node,"") }
+    if kind == JSON.JsonKind.Array || kind == JSON.JsonKind.Object { return JSON.JsonCount(document,node) > 0 }
+    if kind == JSON.JsonKind.Number { value,ok := Number(document,node); return ok && value != 0.0 }
+    return false
+}
+Number :: (document: *JSON.JsonDocument, node: s32) -> float64, bool {
+    bytes: Vec(u8)
+    if !JSON.JsonNumberTextInto(document,node,*bytes) { return 0.0,false }
+    number := ReadNumber(TextView(VecSlice(bytes,0,bytes.count)),0)
+    return number.value,number.valid
+}
+Nonblank :: (text: string) -> bool {
+    if !UTF8.Valid(text) { return true }
+    at: s64
+    while at < text.count {
+        count := text.count-at; if count > 4 { count = 4 }
+        decoded := UTF8.Decode(text[at:at+count],0)
+        if !Unicode.IsSpace(decoded.value) { return true }
+        at += decoded.after
+    }
+    return false
+}
+Enabled :: (lib: *Store.Library, name: string, fallback: bool = false) -> bool {
+    text,found := Store.LookupSetting(lib,name); defer { Store.ReleaseResult(*text) }
+    if !found { return fallback }
+    document: JSON.JsonDocument; defer { JSON.JsonReset(*document) }
+    return JSON.JsonRead(*document,text) && Truth(*document,document.root)
+}
+Stopped :: (service: *Service) -> bool {
+    if service == null || !Mutex.Lock(*service.state_lock) { return true }
+    result := service.closing
+    unused Mutex.Unlock(*service.state_lock); return result
+}
+RootMatches :: (service: *Service, lib: *Store.Library) -> bool {
+    return service != null && service.opened && lib != null && lib.db != null && service.root == lib.root
+}
+Private :: (lib: *Store.Library) -> string {
+    parent := Join(lib.root,"private"); defer { Auth.ReleaseOwned(parent,false) }
+    if Files.PathIsLink(parent) || !Tree.CreateDirectories(parent,448) { return "" }
+    path := Join(parent,"semantic")
+    if Files.PathIsLink(path) || !Tree.CreateDirectories(path,448) { Auth.ReleaseOwned(path,false); return "" }
+    return path
+}
+
+#scope_export
+Options :: struct {
+    package_root: string
+    // SONAME or an administrator-selected independent system-library path.
+    runtime: string
+    program: string
+    tensor_program: string
+    timeout_ms: s32
+    file_options: LibraryFiles.FileOptions
+}
+Service :: struct {
+    root: string
+    options: Options
+    model_root: string
+    program: string
+    verified: [3]Tree.PathInfo
+    tokenizer: Tokenizer.Model
+    state_lock: Mutex.Mutex
+    work_lock: Mutex.Mutex
+    worker: Thread.Thread
+    opened: bool
+    closing: bool
+    active: bool
+    epoch: u64
+    worker_epoch: u64
+    owned_config: bool
+}
+
+// Does not require models: opening an offline gallery must remain possible.
+Open :: (service: *Service, lib: *Store.Library, options: Options = .{}) -> bool {
+    if service == null || service.opened || lib == null || lib.db == null { return false }
+    service.owned_config = true
+    service.root = Auth.CloneOwned(lib.root)
+    service.options = options
+    service.options.package_root = Tree.ResolvePath(ifx options.package_root.count > 0 then options.package_root else ".")
+    service.options.runtime = Auth.CloneOwned(ifx options.runtime.count > 0 then options.runtime else "libonnxruntime.so.1.21")
+    service.options.program = Auth.CloneOwned(options.program)
+    service.options.tensor_program = Auth.CloneOwned(options.tensor_program)
+    service.options.file_options.application_root = Auth.CloneOwned(ifx options.file_options.application_root.count > 0 then options.file_options.application_root else service.options.package_root)
+    service.options.file_options.video_program = Auth.CloneOwned(options.file_options.video_program)
+    service.options.file_options.probe_program = Auth.CloneOwned(options.file_options.probe_program)
+    // Never retain a request's callback/context; each decode uses this
+    // service's own synchronous, stable cancellation-epoch record below.
+    service.options.file_options.cancelled = NoCancellation; service.options.file_options.cancel_context = null
+    if service.root.count == 0 || service.options.package_root.count == 0 || service.options.runtime.count == 0 ||
+        (options.program.count > 0 && service.options.program.count == 0) ||
+        (options.tensor_program.count > 0 && service.options.tensor_program.count == 0) ||
+        service.options.file_options.application_root.count == 0 ||
+        (options.file_options.video_program.count > 0 && service.options.file_options.video_program.count == 0) ||
+        (options.file_options.probe_program.count > 0 && service.options.file_options.probe_program.count == 0) { Close(service); return false }
+    if !Mutex.Open(*service.state_lock) || !Mutex.Open(*service.work_lock) { Close(service); return false }
+    service.opened = true; service.closing = false; return true
+}
+// Caller stops new dispatch first. This cancels helper groups, joins the
+// indexing thread, drains synchronous inference, then releases model/config.
+Close :: (service: *Service) {
+    if service == null { return }
+    if !service.owned_config { return }
+    if Mutex.Lock(*service.state_lock) { service.closing = true; unused Mutex.Unlock(*service.state_lock) }
+    if service.worker.running { Thread.ThreadWait(*service.worker) }
+    locked := Mutex.Lock(*service.work_lock)
+    Tokenizer.Close(*service.tokenizer)
+    Auth.ReleaseOwned(service.root,false); Auth.ReleaseOwned(service.model_root,false); Auth.ReleaseOwned(service.program,false)
+    LibraryFiles.ReleasePath(*service.options.package_root); Auth.ReleaseOwned(service.options.runtime,false); Auth.ReleaseOwned(service.options.program,false)
+    Auth.ReleaseOwned(service.options.tensor_program,false)
+    Auth.ReleaseOwned(service.options.file_options.application_root,false)
+    Auth.ReleaseOwned(service.options.file_options.video_program,false); Auth.ReleaseOwned(service.options.file_options.probe_program,false)
+    service.root = ""; service.model_root = ""; service.program = ""; service.options = .{}
+    service.verified = .{}; service.opened = false; service.active = false
+    service.owned_config = false
+    if locked { unused Mutex.Unlock(*service.work_lock) }
+    if service.work_lock.opened { unused Mutex.Close(*service.work_lock) }
+    if service.state_lock.opened { unused Mutex.Close(*service.state_lock) }
+}
+ValidEmbedding :: (bytes: []u8) -> bool {
+    if bytes.count != 2048 { return false }
+    values: [512]float32; unused CopyMemory(cast(*void)*values[0],cast(*void)*bytes[0],2048)
+    norm: float64
+    for value: values { v := cast(float64)value; if v != v || v < -1.001 || v > 1.001 { return false }; norm += v*v }
+    return norm >= 0.99 && norm <= 1.01
+}
+TextTensor :: (model: *Tokenizer.Model, text: string, output: *Vec(u8)) -> bool {
+    if output == null { return false }
+    VecClear(<<output)
+    if text.count == 0 || text.count > 512 || !UTF8.Valid(text) { return false }
+    start: s64; end: s64; at: s64; found: bool
+    while at < text.count {
+        count := text.count-at; if count > 4 { count = 4 }
+        decoded := UTF8.Decode(text[at:at+count],0)
+        if decoded.value == 0 { return false }
+        if !Unicode.IsSpace(decoded.value) { if !found { start = at; found = true }; end = at+decoded.after }
+        at += decoded.after
+    }
+    ids: [77]s64
+    if !found || !Tokenizer.Encode77(model,text[start:end],ids[:]) || !VecResize(<<output,616) { return false }
+    // Explicit little-endian s64, independent of host alignment.
+    bytes := BytesFromPointer(*(<<output)[0],cast(u64)output.count)
+    for i: 0..76 { for byte: 0..7 { bytes[i*8+byte] = cast(u8)(cast(u64)ids[i] >> cast(u64)(byte*8)) } }
+    return true
+}
+// Nonempty JSON replies transfer ownership to the caller, including null.
+IndexBlob :: (lib: *Store.Library, identity: string) -> string {
+    Store.ClearError(lib)
+    statement: *void
+    if lib == null || SQL.SqlitePrepareText(lib.db,"SELECT embedding FROM semantic_embeddings WHERE photo_id=? AND model=?",-1,*statement,null) != SQL.SQLITE_OK { return Failure(lib,"Could not read semantic index") }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if SQL.SqliteBindTextString(statement,1,identity,-1) != SQL.SQLITE_OK || SQL.SqliteBindTextString(statement,2,Rank.Model,-1) != SQL.SQLITE_OK { return Failure(lib,"Could not read semantic index") }
+    status := SQL.SqliteStep(statement)
+    if status == SQL.SQLITE_DONE { return Auth.CloneOwned("null") }
+    if status != SQL.SQLITE_ROW { return Failure(lib,"Could not read semantic index") }
+    if SQL.SqliteColumnType(statement,0) != SQL.SQLITE_BLOB || SQL.SqliteColumnBytes(statement,0) != 2048 { return Auth.CloneOwned("null") }
+    bytes := SQL.SqliteColumnBlob(statement,0)
+    if bytes == null || !ValidEmbedding(BytesFromPointer(cast(*u8)bytes,2048)) { return Auth.CloneOwned("null") }
+    encoded: [2733]u8
+    if Encode64(*encoded[0],2733,cast(*u8)bytes,2048,1) == null { return Failure(lib,InvalidIndex) }
+    document: JSON.JsonDocument; defer { JSON.JsonReset(*document) }
+    document.root = JSON.JsonNewObject(*document)
+    unused JSON.JsonSet(*document,document.root,"model",JSON.JsonNewStringCopy(*document,Rank.Model))
+    unused JSON.JsonSet(*document,document.root,"vector",JSON.JsonNewStringCopy(*document,TextUntilNul(encoded[:])))
+    return Serialize(*document,document.root)
+}
+// Joins the caller's writer transaction; validates before touching any row.
+// Unknown members in the caller's encrypted record remain the caller's data.
+AcceptIndex :: (lib: *Store.Library, identity: string, value: string) -> bool {
+    Store.ClearError(lib)
+    if lib == null || identity.count != 64 { unused Failure(lib,InvalidIndex); return false }
+    for byte: identity { if !((byte >= 48 && byte <= 57) || (byte >= 97 && byte <= 102)) { unused Failure(lib,InvalidIndex); return false } }
+    document: JSON.JsonDocument; defer { JSON.JsonReset(*document) }
+    if value.count > 65536 || !JSON.JsonRead(*document,value) { unused Failure(lib,InvalidIndex); return false }
+    remove := JSON.JsonKindOf(*document,document.root) == JSON.JsonKind.Null
+    bytes: [2048]u8
+    if !remove {
+        if JSON.JsonKindOf(*document,document.root) != JSON.JsonKind.Object || !JSON.JsonIs(*document,JSON.JsonMember(*document,document.root,"model"),Rank.Model) { unused Failure(lib,InvalidIndex); return false }
+        text: Vec(u8)
+        vector := JSON.JsonMember(*document,document.root,"vector")
+        if JSON.JsonKindOf(*document,vector) == JSON.JsonKind.String && JSON.JsonStringInto(*document,vector,*text) && text.count == 2732 {
+            count: usize; end: *u8
+            if Decode64(*bytes[0],2048,*text[0],2732,null,*count,*end,1) != 0 || count != 2048 || cast(usize)end-cast(usize)*text[0] != 2732 { unused Failure(lib,InvalidIndex); return false }
+        } else {
+            values := JSON.JsonMember(*document,document.root,"values")
+            if JSON.JsonKindOf(*document,values) != JSON.JsonKind.Array || JSON.JsonCount(*document,values) != 512 { unused Failure(lib,InvalidIndex); return false }
+            row := JSON.JsonFirst(*document,values); numbers: [512]float32; at: s64
+            while row >= 0 {
+                number,ok := Number(*document,row)
+                if JSON.JsonKindOf(*document,row) != JSON.JsonKind.Number || !ok || number != number || number < -1.001 || number > 1.001 { unused Failure(lib,InvalidIndex); return false }
+                numbers[at] = cast(float32)number; at += 1; row = JSON.JsonNext(*document,row)
+            }
+            unused CopyMemory(cast(*void)*bytes[0],cast(*void)*numbers[0],2048)
+        }
+        if !ValidEmbedding(bytes[:]) { unused Failure(lib,InvalidIndex); return false }
+    }
+    statement: *void
+    sql := ifx remove then "DELETE FROM semantic_embeddings WHERE photo_id=?" else "INSERT OR REPLACE INTO semantic_embeddings VALUES(?,?,?,'')"
+    if SQL.SqlitePrepareText(lib.db,sql,-1,*statement,null) != SQL.SQLITE_OK { unused Failure(lib,"Could not save semantic index"); return false }
+    defer { unused SQL.SqliteFinalize(statement) }
+    bound := SQL.SqliteBindTextString(statement,1,identity,-1) == SQL.SQLITE_OK
+    if !remove { bound = bound && SQL.SqliteBindTextString(statement,2,Rank.Model,-1) == SQL.SQLITE_OK && SQL.SqliteBindBlob(statement,3,bytes[:]) == SQL.SQLITE_OK }
+    if !bound || SQL.SqliteStep(statement) != SQL.SQLITE_DONE { unused Failure(lib,"Could not save semantic index"); return false }
+    return true
+}
+State :: (service: *Service, lib: *Store.Library) -> string {
+    Store.ClearError(lib)
+    if !RootMatches(service,lib) { return Failure(lib,"Semantic search service is not open for this library") }
+    enabled := Enabled(lib,"semantic_enabled")
+    if lib.error.count > 0 { return "" }
+    processing := enabled && Enabled(lib,"semantic_processing",true)
+    if lib.error.count > 0 { return "" }
+    statement: *void
+    query := "SELECT count(*),coalesce(sum(s.embedding IS NOT NULL AND length(s.embedding)=2048),0),coalesce(sum(s.error<>''),0) FROM photos p LEFT JOIN semantic_embeddings s ON s.photo_id=p.id AND s.model=? WHERE p.kind='photo' AND p.hidden=0 AND p.trashed=0"
+    if SQL.SqlitePrepareText(lib.db,query,-1,*statement,null) != SQL.SQLITE_OK { return Failure(lib,"Could not read semantic indexing state") }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if SQL.SqliteBindTextString(statement,1,Rank.Model,-1) != SQL.SQLITE_OK || SQL.SqliteStep(statement) != SQL.SQLITE_ROW { return Failure(lib,"Could not read semantic indexing state") }
+    total := SQL.SqliteColumnInt64(statement,0); indexed := SQL.SqliteColumnInt64(statement,1); failed := SQL.SqliteColumnInt64(statement,2)
+    if !Mutex.Lock(*service.state_lock) { return Failure(lib,"Could not read semantic worker state") }
+    active := service.active && !service.closing
+    unused Mutex.Unlock(*service.state_lock)
+    status: Vec(u8); status_ok: bool
+    if !enabled { status_ok = BuilderAppend(status,"Enable semantic search to describe your photos") }
+    else if !processing { status_ok = BuilderAppend(status,"Indexing paused · ") && Count(*status,indexed) && BuilderAppend(status," of ") && Count(*status,total) && BuilderAppend(status," photos indexed locally") }
+    else if active { status_ok = BuilderAppend(status,"Indexing locally · ") && Count(*status,indexed) && BuilderAppend(status," of ") && Count(*status,total) && BuilderAppend(status," photos · ") && Count(*status,failed) && BuilderAppend(status," unavailable") }
+    else if indexed+failed >= total {
+        status_ok = Count(*status,indexed) && BuilderAppend(status," of ") && Count(*status,total) && BuilderAppend(status," photos indexed locally")
+        if failed > 0 { status_ok = status_ok && BuilderAppend(status," · ") && Count(*status,failed) && BuilderAppend(status," unavailable; retry after restoring originals") }
+    } else {
+        stored,found := Store.LookupSetting(lib,"semantic_status"); defer { Store.ReleaseResult(*stored) }
+        parsed: JSON.JsonDocument; defer { JSON.JsonReset(*parsed) }
+        if found && JSON.JsonRead(*parsed,stored) { status_ok = JSON.JsonStringInto(*parsed,parsed.root,*status) }
+        if status.count == 0 { status_ok = BuilderAppend(status,"Waiting to index local photos") }
+    }
+    if !status_ok { return Failure(lib,"Could not allocate semantic indexing state") }
+    document: JSON.JsonDocument; defer { JSON.JsonReset(*document) }
+    document.root = JSON.JsonNewObject(*document)
+    unused JSON.JsonSet(*document,document.root,"semantic_enabled",JSON.JsonNewInteger(*document,ifx enabled then 1 else 0))
+    unused JSON.JsonSet(*document,document.root,"semantic_processing",JSON.JsonNewInteger(*document,ifx processing then 1 else 0))
+    unused JSON.JsonSet(*document,document.root,"semantic_working",JSON.JsonNewInteger(*document,ifx active then 1 else 0))
+    unused JSON.JsonSet(*document,document.root,"semantic_total",JSON.JsonNewInteger(*document,total))
+    unused JSON.JsonSet(*document,document.root,"semantic_indexed",JSON.JsonNewInteger(*document,indexed))
+    unused JSON.JsonSet(*document,document.root,"semantic_failed",JSON.JsonNewInteger(*document,failed))
+    unused JSON.JsonSet(*document,document.root,"semantic_status",JSON.JsonNewStringCopy(*document,TextView(VecSlice(status,0,status.count))))
+    return Serialize(*document,document.root)
+}
+Prepare :: (service: *Service) -> string {
+    if service == null || !service.opened || !Mutex.Lock(*service.work_lock) { return "Semantic search service is not open" }
+    defer { unused Mutex.Unlock(*service.work_lock) }
+    return PrepareLocked(service)
+}
+// Caller-owned embedding; empty on every failure. No Python discovery or
+// initialization occurs: the configured native SONAME goes directly to dlopen.
+Infer :: (service: *Service, lib: *Store.Library, mode: string, tensor: []u8, output: *Vec(u8)) -> string {
+    if output != null { VecClear(<<output) }
+    if output == null || !RootMatches(service,lib) || !Mutex.Lock(*service.work_lock) { return "Semantic search service is not open for this library" }
+    defer { unused Mutex.Unlock(*service.work_lock) }
+    return InferLocked(service,lib,mode,tensor,output,Epoch(service))
+}
+SearchPage :: (service: *Service, lib: *Store.Library, request: string) -> string {
+    Store.ClearError(lib)
+    if !RootMatches(service,lib) || Stopped(service) { return Failure(lib,"Semantic search service is not open for this library") }
+    if Guest.Active(lib) { return Failure(lib,"Semantic search is unavailable in Guest view") }
+    document: JSON.JsonDocument; defer { JSON.JsonReset(*document) }
+    if request.count > 131072 || !JSON.JsonRead(*document,request) || JSON.JsonKindOf(*document,document.root) != JSON.JsonKind.Object { return Failure(lib,"Choose a valid gallery request") }
+    text: Vec(u8); search := JSON.JsonMember(*document,document.root,"search")
+    enabled := Enabled(lib,"semantic_enabled")
+    if lib.error.count > 0 { return "" }
+    if !enabled || JSON.JsonKindOf(*document,search) != JSON.JsonKind.String ||
+        !JSON.JsonStringInto(*document,search,*text) || !Nonblank(TextView(VecSlice(text,0,text.count))) { return Auth.CloneOwned("{\"count\":0,\"ids\":[]}") }
+    if !Mutex.Lock(*service.work_lock) { return Failure(lib,Failed) }
+    defer { unused Mutex.Unlock(*service.work_lock) }
+    epoch := Epoch(service)
+    error := PrepareLocked(service); if error.count > 0 { return Failure(lib,error) }
+    tensor: Vec(u8); embedding: Vec(u8)
+    if !TextTensor(*service.tokenizer,TextView(VecSlice(text,0,text.count)),*tensor) { return Failure(lib,"Describe a photo in at most 512 bytes") }
+    error = InferLocked(service,lib,"text",VecSlice(tensor,0,tensor.count),*embedding,epoch)
+    if error.count > 0 { return Failure(lib,error) }
+    // Inference may take time: use current settings/privacy before ranking.
+    if Cancelled(service,epoch) || Guest.Active(lib) || !Enabled(lib,"semantic_enabled") { return Failure(lib,"Semantic search changed while processing; try again") }
+    private := Private(lib); defer { Auth.ReleaseOwned(private,false) }
+    directory := Tree.CreateTemporaryDirectory(private,".query-"); defer { Auth.ReleaseOwned(directory,false) }
+    if directory.count == 0 { return Failure(lib,Failed) }
+    defer { unused Tree.RemoveTree(directory) }
+    path := Join(directory,"embedding"); defer { Auth.ReleaseOwned(path,false) }
+    if !Write(path,VecSlice(embedding,0,embedding.count)) { return Failure(lib,Failed) }
+    unused JSON.JsonSet(*document,document.root,"search",JSON.JsonNewStringCopy(*document,""))
+    unused JSON.JsonSet(*document,document.root,"semantic_tensor",JSON.JsonNewStringCopy(*document,path))
+    normalized := Serialize(*document,document.root); defer { Auth.ReleaseOwned(normalized,false) }
+    if normalized.count == 0 { return Failure(lib,"Could not allocate semantic query") }
+    return Gallery.Page(lib,normalized)
+}
+StateService :: (context: *void, lib: *Store.Library, request: string) -> string {
+    unused request; return State(cast(*Service)context,lib)
+}
+SearchService :: (context: *void, lib: *Store.Library, request: string) -> string {
+    return SearchPage(cast(*Service)context,lib,request)
+}
+// One indexing worker per stable Service; the process lock also excludes a
+// second Photos instance. The worker opens its own SQLite connection.
+Kick :: (service: *Service, lib: *Store.Library) -> string {
+    if !RootMatches(service,lib) { return "Semantic search service is not open for this library" }
+    enabled := Enabled(lib,"semantic_enabled")
+    if lib.error.count > 0 { return lib.error }
+    processing := enabled && Enabled(lib,"semantic_processing",true)
+    if lib.error.count > 0 { return lib.error }
+    if !processing || Guest.Active(lib) { return "" }
+    if !Mutex.Lock(*service.state_lock) { return "Could not start semantic worker" }
+    defer { unused Mutex.Unlock(*service.state_lock) }
+    if service.closing || service.active { return "" }
+    if service.worker.running && !Thread.ThreadFinished(*service.worker) { return "" }
+    service.worker_epoch = service.epoch; service.active = true
+    procedure: Thread.ThreadProcedure = Worker
+    if !Thread.ThreadStart(*service.worker,procedure,cast(*void)service) { service.active = false; return "Could not start semantic worker" }
+    return ""
+}
+KickService :: (context: *void, lib: *Store.Library) -> string { return Kick(cast(*Service)context,lib) }
+Enable :: (service: *Service, lib: *Store.Library, enabled: bool) -> string {
+    if !RootMatches(service,lib) || Stopped(service) { return "Semantic search service is not open for this library" }
+    if Guest.Active(lib) { return "Semantic indexing is unavailable in Guest view" }
+    if enabled {
+        error := Prepare(service); if error.count > 0 { return error }
+        if !Store.SetSetting(lib,"semantic_enabled","true") { return "Could not enable semantic search" }
+    } else {
+        if !Mutex.Lock(*service.state_lock) { return "Could not pause semantic worker" }
+        service.epoch += 1; unused Mutex.Unlock(*service.state_lock)
+    }
+    if !Store.SetSetting(lib,"semantic_processing",ifx enabled then "true" else "false") { return "Could not update semantic processing" }
+    return ifx enabled then Kick(service,lib) else ""
+}
+Retry :: (service: *Service, lib: *Store.Library) -> string {
+    if !RootMatches(service,lib) || Stopped(service) { return "Semantic search service is not open for this library" }
+    if Guest.Active(lib) { return "Semantic indexing is unavailable in Guest view" }
+    if Index.Mutate(lib.db,"{\"operation\":\"retry\"}",0.0) < 0 { return "Could not retry semantic indexing" }
+    return Enable(service,lib,true)
+}
+ImageTensor :: (service: *Service, lib: *Store.Library, photo: Store.PhotoRow, output: *Vec(u8)) -> string {
+    if output != null { VecClear(<<output) }
+    if output == null || !RootMatches(service,lib) || Stopped(service) { return "Semantic search service is not open for this library" }
+    if !Mutex.Lock(*service.work_lock) { return Failed }
+    defer { unused Mutex.Unlock(*service.work_lock) }
+    return ImageTensorLocked(service,lib,photo,output,Epoch(service))
+}
+
+#scope_file
+SetStatus :: (lib: *Store.Library, text: string) {
+    json := JSON.JsonQuote(text); defer { Auth.ReleaseOwned(json,false) }
+    unused Store.SetSetting(lib,"semantic_status",json)
+}
+Snapshot :: (lib: *Store.Library, identity: string) -> Store.PhotoRow, s32 {
+    result: Store.PhotoRow; statement: *void
+    if SQL.SqlitePrepareText(lib.db,"SELECT extension,updated FROM photos WHERE id=? AND kind='photo' AND hidden=0 AND trashed=0",-1,*statement,null) != SQL.SQLITE_OK { return result,-1 }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if SQL.SqliteBindTextString(statement,1,identity,-1) != SQL.SQLITE_OK { return result,-1 }
+    status := SQL.SqliteStep(statement)
+    if status == SQL.SQLITE_DONE { return result,0 }
+    if status != SQL.SQLITE_ROW { return result,-1 }
+    result.id = Auth.CloneOwned(identity); result.kind = "photo"
+    result.extension = Auth.CloneOwned(TextFromBytes(BytesFromPointer(SQL.SqliteColumnText(statement,0),cast(u64)SQL.SqliteColumnBytes(statement,0))))
+    if result.id.count != identity.count || result.extension.count != SQL.SqliteColumnBytes(statement,0) {
+        Auth.ReleaseOwned(result.id,false); Auth.ReleaseOwned(result.extension,false)
+        result.id = ""; result.extension = ""; return result,-1
+    }
+    result.updated = SQL.SqliteColumnDouble(statement,1)
+    return result,1
+}
+ImageTensorLocked :: (service: *Service, lib: *Store.Library, photo: Store.PhotoRow, output: *Vec(u8), epoch: u64) -> string {
+    VecClear(<<output)
+    if Cancelled(service,epoch) || photo.hidden || photo.trashed != 0 || photo.kind != "photo" { return Failed }
+    original: Vec(u8)
+    if !LibraryFiles.OriginalInto(*original,lib,photo.id,photo.extension) || Tree.PathStatus(TextView(VecSlice(original,0,original.count))).kind != Tree.PathKind.File { return "Original not present locally" }
+    source := TextView(VecSlice(original,0,original.count)); decoded: string
+    defer { LibraryFiles.ReleasePath(*decoded) }
+    if Decode.Supported(photo.extension) {
+        error: string
+        cancellation: Cancellation = .{service=service,epoch=epoch}
+        options := service.options.file_options
+        options.cancelled = DecodeCancelled; options.cancel_context = cast(*void)*cancellation
+        decoded,error = Decode.Display(lib,photo,"",null,options)
+        if error.count > 0 { return error }
+        source = decoded
+    }
+    if Cancelled(service,epoch) { return Failed }
+    program := Program(service,"clip_image_tensor","build/clip-image-tensor",service.options.tensor_program)
+    defer { Auth.ReleaseOwned(program,false) }
+    if Tree.PathStatus(program,false).kind != Tree.PathKind.File { return "Build or install the native CLIP image converter" }
+    private := Private(lib); defer { Auth.ReleaseOwned(private,false) }
+    if private.count == 0 { return Failed }
+    directory := Tree.CreateTemporaryDirectory(private,".pixels-"); defer { Auth.ReleaseOwned(directory,false) }
+    if directory.count == 0 { return Failed }
+    defer { unused Tree.RemoveTree(directory) }
+    path := Join(directory,"tensor"); defer { Auth.ReleaseOwned(path,false) }
+    arguments: [8]string = .["prlimit","--as=1610612736","--cpu=60","--fsize=1048576","--",program,source,path]
+    if !RunBounded(service,arguments[:],directory,epoch) || !Read(path,output,602112) || output.count != 602112 { VecClear(<<output); return Failed }
+    return ""
+}
+Publish :: (service: *Service, lib: *Store.Library, photo: Store.PhotoRow, blob: []u8, epoch: u64) -> bool {
+    if Cancelled(service,epoch) || !Guest.Enter() { return false }
+    defer { Guest.Leave() }
+    if Cancelled(service,epoch) || Guest.Active(lib) || SQL.SqliteExecText(lib.db,"BEGIN IMMEDIATE") != SQL.SQLITE_OK { return false }
+    committed: bool
+    defer { if !committed { unused SQL.SqliteExecText(lib.db,"ROLLBACK") } }
+    if Cancelled(service,epoch) || Guest.Active(lib) { return false }
+    stamp: [17]u8; encoded: [4097]u8
+    if Crypto.BytesToHex(cast(*u8)*photo.updated,8,*stamp[0],17) != 1 { return false }
+    good := ValidEmbedding(blob)
+    if good && Crypto.BytesToHex(*blob[0],blob.count,*encoded[0],4097) != 1 { return false }
+    document: JSON.JsonDocument; defer { JSON.JsonReset(*document) }
+    document.root = JSON.JsonNewObject(*document)
+    unused JSON.JsonSet(*document,document.root,"operation",JSON.JsonNewStringCopy(*document,ifx good then "publish" else "failure"))
+    unused JSON.JsonSet(*document,document.root,"photo_id",JSON.JsonNewStringCopy(*document,photo.id))
+    unused JSON.JsonSet(*document,document.root,"expected",JSON.JsonNewStringCopy(*document,TextUntilNul(stamp[:])))
+    if good { unused JSON.JsonSet(*document,document.root,"value",JSON.JsonNewStringCopy(*document,TextUntilNul(encoded[:]))) }
+    request := Serialize(*document,document.root); defer { Auth.ReleaseOwned(request,false) }
+    if request.count == 0 || Index.Mutate(lib.db,request,cast(float64)Clock.UnixMilliseconds()/1000.0) < 0 { return false }
+    if Cancelled(service,epoch) || Guest.Active(lib) || SQL.SqliteExecText(lib.db,"COMMIT") != SQL.SQLITE_OK { return false }
+    committed = true; return true
+}
+Worker :: (context: *void) {
+    service := cast(*Service)context; epoch := service.worker_epoch
+    defer {
+        if Mutex.Lock(*service.state_lock) { service.active = false; unused Mutex.Unlock(*service.state_lock) }
+    }
+    lib,error := Store.Open(service.root)
+    Store.ReleaseResult(*error)
+    if lib == null { return }
+    defer { Store.Close(lib) }
+    // A background publication must not hold shutdown behind a long writer.
+    if SQL.SqliteBusyTimeout(lib.db,100) != SQL.SQLITE_OK { return }
+    if Cancelled(service,epoch) || Guest.Active(lib) { return }
+    private := Private(lib); defer { Auth.ReleaseOwned(private,false) }
+    if private.count == 0 { SetStatus(lib,"Semantic indexing paused; check the local models and runtime"); return }
+    path := Join(lib.root,"private/semantic.lock"); defer { Auth.ReleaseOwned(path,false) }
+    name: [4096]u8
+    if !CopyCString(path,name[:]) { return }
+    fd := OpenFile(*name[0],655426,384)
+    if fd < 0 { return }
+    defer { unused CloseFile(fd) }
+    if LockFile(fd,6) != 0 { return }
+    if !Mutex.Lock(*service.work_lock) { return }
+    error = PrepareLocked(service)
+    unused Mutex.Unlock(*service.work_lock)
+    if error.count > 0 { SetStatus(lib,"Semantic indexing paused; check the local models and runtime"); return }
+    while !Cancelled(service,epoch) && !Guest.Active(lib) {
+        enabled := Enabled(lib,"semantic_enabled")
+        if lib.error.count > 0 { SetStatus(lib,"Semantic indexing paused; check the local models and runtime"); return }
+        processing := enabled && Enabled(lib,"semantic_processing",true)
+        if lib.error.count > 0 { SetStatus(lib,"Semantic indexing paused; check the local models and runtime"); return }
+        if !processing { return }
+        identity: [65]u8
+        next := Index.Next(lib.db,identity[:])
+        if next < 0 { SetStatus(lib,"Semantic indexing paused; check the local models and runtime"); return }
+        if next == 0 { SetStatus(lib,"Local semantic indexing complete"); return }
+        photo,status := Snapshot(lib,TextUntilNul(identity[:]))
+        defer { Auth.ReleaseOwned(photo.id,false); Auth.ReleaseOwned(photo.extension,false) }
+        if status < 0 { SetStatus(lib,"Semantic indexing paused; check the local models and runtime"); return }
+        if status == 0 { continue }
+        SetStatus(lib,"Indexing local photos; you can keep browsing")
+        tensor: Vec(u8); blob: Vec(u8)
+        if !Mutex.Lock(*service.work_lock) { return }
+        error = ImageTensorLocked(service,lib,photo,*tensor,epoch)
+        if error.count == 0 { error = InferLocked(service,lib,"image",VecSlice(tensor,0,tensor.count),*blob,epoch) }
+        unused Mutex.Unlock(*service.work_lock)
+        if Cancelled(service,epoch) { return }
+        if error.count > 0 { VecClear(blob) }
+        if !Publish(service,lib,photo,VecSlice(blob,0,blob.count),epoch) { return }
+    }
+}

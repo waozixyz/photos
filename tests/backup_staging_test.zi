@@ -1,0 +1,125 @@
+Fixture :: #import "backup_fixture";
+Crypto :: #import "backup_crypto";
+Native :: #import "daochi_client/crypto_native";
+Wire :: #import "sync_crypto";
+JSON :: #import "std/json_document";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+Kit :: #import "kit";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+CHUNK :: 8388608;
+RoundTrip :: (source: string,root: string,data: []u8,account: []u8,key: []u8) -> bool {
+    if !Files.WriteEntireFile(source,TextFromBytes(data)) { return false }
+    file:=Files.OpenRead(source)
+    if !file.valid { return false }; defer { unused Files.CloseFile(file) }
+    staged:=Fixture.Prepare(file.fd,data.count,root,account,key)
+    defer { Fixture.Close(*staged) }
+    document: JSON.JsonDocument
+    defer { JSON.JsonReset(*document) }
+    if !JSON.JsonRead(*document,staged.text) { return false }
+    id: Vec(u8); digest: Vec(u8); accountText: Vec(u8)
+    defer { Wire.ClearOutput(*id); Wire.ClearOutput(*digest); Wire.ClearOutput(*accountText) }
+    if !Fixture.Field(*document,document.root,"id",*id) || !Fixture.Hash(data,*digest) || Fixture.Text(*id)!=Fixture.Text(*digest) || Fixture.Integer(*document,document.root,"size")!=data.count || !Fixture.Hex(account,*accountText) { return false }
+    folder:=Kit.Join(root,Fixture.Text(*id)); disk,valid:=Files.ReadEntireFile(Kit.Join(folder,"manifest.json"))
+    if !valid || disk!=staged.text || Tree.PathStatus(folder).mode!=448 || Tree.PathStatus(Kit.Join(folder,"manifest.json")).mode!=384 { return false }
+    manifest:=JSON.JsonMember(*document,document.root,"manifest"); chunks:=JSON.JsonMember(*document,manifest,"chunks")
+    count:=(data.count+CHUNK-1)/CHUNK
+    if Fixture.Integer(*document,manifest,"chunk_bytes")!=CHUNK || JSON.JsonKindOf(*document,chunks)!=JSON.JsonKind.Array || cast(s64)JSON.JsonCount(*document,chunks)!=count || Fixture.Count(root)!=1 || Fixture.Count(folder)!=count+1 { return false }
+    offset: s64; index: s64; chunk:=JSON.JsonFirst(*document,chunks)
+    address: Vec(u8); blob: Vec(u8); plain: Vec(u8); aad: Vec(u8)
+    defer { Wire.ClearOutput(*address); Wire.ClearOutput(*blob); Wire.ClearOutput(*plain); Wire.ClearOutput(*aad) }
+    while chunk>=0 {
+        Wire.ClearOutput(*address)
+        if !JSON.JsonStringInto(*document,chunk,*address) { return false }
+        name: Vec(u8); BuilderPrint(*name,"%/%.blob",folder,index)
+        path:=Fixture.Text(*name)
+        if !Files.ReadFileInto(path,*blob) || !Fixture.Hash(Wire.OutputBytes(*blob),*digest) || Fixture.Text(*digest)!=Fixture.Text(*address) || Tree.PathStatus(path).mode!=384 { return false }
+        size:=ifx data.count-offset>CHUNK then cast(s64)CHUNK else data.count-offset
+        if !Wire.PrepareOutput(*plain,size) { return false }
+        Wire.ClearOutput(*aad); BuilderPrint(*aad,"{\"account_id\":\"%\",\"app_id\":\"photos\",\"id\":\"%\",\"part\":\"chunk:%\",\"schema\":\"photos.media.v1\"}",Fixture.Text(*accountText),Fixture.Text(*id),index)
+        if Crypto.Open(Wire.OutputBytes(*blob),Wire.OutputBytes(*aad),key,Wire.OutputBytes(*plain))!=size || !Fixture.Equal(Wire.OutputBytes(*plain),data[offset:offset+size]) { return false }
+        offset+=size; index+=1; chunk=JSON.JsonNext(*document,chunk)
+        Wire.ClearOutput(*blob)
+    }
+    if offset!=data.count { return false }
+    retry:=Fixture.Prepare(file.fd,data.count,root,account,key)
+    defer { Fixture.Close(*retry) }
+    if retry.text!=staged.text || !Fixture.HashFile(source,*digest) || Fixture.Text(*digest)!=Fixture.Text(*id) || Fixture.Count(root)!=1 || Fixture.Count(folder)!=count+1 { return false }
+    for part: 0..count-1 {
+        name: Vec(u8); BuilderPrint(*name,"%/%.blob",folder,part)
+        Wire.ClearOutput(*address)
+        if !JSON.JsonStringInto(*document,JSON.JsonElement(*document,chunks,cast(s32)part),*address) || !Fixture.HashFile(Fixture.Text(*name),*digest) || Fixture.Text(*digest)!=Fixture.Text(*address) { return false }
+    }
+    return true
+}
+Run :: (root: string) -> s32 {
+    account: [32]u8; key: [32]u8
+    for index: 0..31 { account[index]=cast(u8)index; key[index]=cast(u8)(31-index) }
+    source:=Kit.Join(root,"source")
+    for mode: 0..2 {
+        bytes: Vec(u8); defer { Wire.ClearOutput(*bytes) }
+        count:=ifx mode==0 then cast(s64)0 else ifx mode==1 then 28 else CHUNK+4
+        if !Wire.PrepareOutput(*bytes,count) { return 1 }
+        for index: 0..count-1 { bytes[index]=cast(u8)(index%256) }
+        stage:=Fixture.Directory(Kit.Join(root,ifx mode==0 then "empty" else ifx mode==1 then "binary" else "multiple"))
+        if !Kit.Expect(stage!="" && RoundTrip(source,stage,Wire.OutputBytes(*bytes),account[:],key[:]),"empty/binary/multiple chunk desktop format, exact retry, permissions and source preservation") { return 2 }
+    }
+    stage:=Fixture.Directory(Kit.Join(root,"failures"))
+    if stage=="" || !Files.WriteEntireFile(source,"fixture") { return 3 }
+    file:=Files.OpenRead(source)
+    if !file.valid { return 4 }; defer { unused Files.CloseFile(file) }
+    sizes: [4]s64=.{0,6,8,10000000000}
+    for size: sizes {
+        result:=Fixture.Prepare(file.fd,size,stage,account[:],key[:]); defer { Fixture.Close(*result) }
+        if !Kit.Expect(result.text=="" && Fixture.Count(stage)==0,"incorrect source sizes leave no manifest or partial staging") { return 5 }
+    }
+    good:=Fixture.Prepare(file.fd,7,stage,account[:],key[:]); defer { Fixture.Close(*good) }
+    document: JSON.JsonDocument; defer { JSON.JsonReset(*document) }
+    id: Vec(u8); defer { Wire.ClearOutput(*id) }
+    if !JSON.JsonRead(*document,good.text) || !Fixture.Field(*document,document.root,"id",*id) { return 6 }
+    folder:=Kit.Join(stage,Fixture.Text(*id)); chunk:=Kit.Join(folder,"0.blob")
+    wrong: [32]u8; for index: 0..31 { wrong[index]=120 }
+    for mode: 0..1 {
+        result:=Fixture.Prepare(file.fd,7,stage,ifx mode==0 then account[:] else wrong[:],ifx mode==0 then wrong[:] else key[:]); defer { Fixture.Close(*result) }
+        if !Kit.Expect(result.text=="" && Fixture.Count(folder)==2,"wrong key/account cannot replace previous staged data") { return 7 }
+    }
+    if !Files.WriteEntireFile(chunk,"damaged encrypted chunk") { return 8 }
+    damaged:=Fixture.Prepare(file.fd,7,stage,account[:],key[:]); defer { Fixture.Close(*damaged) }
+    saved,ok:=Files.ReadEntireFile(chunk); before,manifestOK:=Files.ReadEntireFile(Kit.Join(folder,"manifest.json"))
+    if !Kit.Expect(damaged.text=="" && ok && saved=="damaged encrypted chunk" && manifestOK && before==good.text && Fixture.Count(stage)==1 && Fixture.Count(folder)==2,"corrupt destination remains intact with no partial staging") { return 9 }
+    for mode: 0..1 {
+        target:=Fixture.Directory(Kit.Join(root,ifx mode==0 then "linked-root-target" else "linked-destination-target"))
+        linked:=Kit.Join(root,ifx mode==0 then "linked-root" else "linked-destination")
+        if mode==0 { if !Fixture.Link(target,linked) { return 10 } }
+        else {
+            linked=Fixture.Directory(linked)
+            if !Fixture.Link(target,Kit.Join(linked,Fixture.Text(*id))) { return 11 }
+        }
+        result:=Fixture.Prepare(file.fd,7,linked,account[:],key[:]); defer { Fixture.Close(*result) }
+        if !Kit.Expect(result.text=="" && Fixture.Count(target)==0,"symlinked root or existing destination is refused") { return 12 }
+    }
+    for mode: 0..1 {
+        if !Files.WriteEntireFile(source,"original fixture") { return 13 }
+        changedFile:=Files.OpenRead(source)
+        if !changedFile.valid { return 16 }; defer { unused Files.CloseFile(changedFile) }
+        stage=Fixture.Directory(Kit.Join(root,ifx mode==0 then "cancel" else "change"))
+        permission: Fixture.Permission; permission.cancel=mode==0; permission.limit=4; permission.change=ifx mode==1 then source else ""
+        result:=Fixture.PrepareWithCallback(changedFile.fd,16,stage,account[:],key[:],cast(*void)*permission,Fixture.Current); defer { Fixture.Close(*result) }
+        if !Kit.Expect(result.text=="" && permission.calls>=3 && Fixture.Count(stage)==0,"revocation/source change rolls back all partial staging") { return 14 }
+        if mode==0 { value,valid:=Files.ReadEntireFile(source); if !Kit.Expect(valid && value=="original fixture","permission cancellation preserves source") { return 15 } }
+    }
+    return 0
+}
+
+#program_export
+main :: () -> s32 {
+    root:=Kit.TempDirectory("backup-staging")
+    if root=="" { return 100 }; defer { unused Kit.Cleanup(root) }
+    result:=Run(root)
+    if result==0 { print("backup_staging: local tests passed\n") }
+    return result
+}

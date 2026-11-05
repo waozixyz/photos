@@ -167,12 +167,80 @@ collage-portable-test: bundle
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_COLLAGE_PORTABLE=1 $(PYTHON) tests/collage_window.py
 ZIRAN ?= ziran
 access-sessions:
-	LDLIBS='-l:libsodium.so.23' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry access_sessions:main --exe -o build/access-sessions src/access_sessions.zi
+	LDLIBS='-l:libsodium.so.23 -pthread' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry access_sessions:main --exe -o build/access-sessions src/access_sessions.zi
 build bundle test: access-sessions
 .PHONY: access-sessions
 PYTHON ?= build/venv/bin/python
 PREFIX ?= $(HOME)/.local
 PACKAGE_FLAGS := $(if $(wildcard ziran.local.toml),,--locked)
+
+# Headless Ziran unit tests. Integration and display tests have separate targets.
+ZTEST_SOURCES := $(filter-out tests/%_it_test.zi tests/%_gui_test.zi,$(wildcard tests/*_test.zi))
+ZTEST_TARGETS := $(patsubst tests/%_test.zi,ztest-%,$(ZTEST_SOURCES))
+ZTEST_LDLIBS ?= -l:libsqlite3.so.0 -lz -lm
+ZTEST_LDLIBS_backup_crypto ?= -l:libsodium.so.23
+ZTEST_LDLIBS_backup_identity ?= $(abspath build/liboqs/lib/liboqs.a) -l:libsodium.so.23
+ZTEST_LDLIBS_backup_upload ?= $(abspath build/liboqs/lib/liboqs.a) -l:libsodium.so.23 -l:libcurl.so.4 -pthread
+ZTEST_LDLIBS_backup_staging ?= -l:libsodium.so.23
+ZTEST_LDLIBS_backup_staging_memory ?= -l:libsodium.so.23
+ZTEST_LDLIBS_owner_account ?= $(abspath build/liboqs/lib/liboqs.a)
+ZTEST_LDLIBS_sync_crypto ?= -l:libsodium.so.23
+ZTEST_LDLIBS_entity_crypto ?= -l:libsodium.so.23
+ZTEST_LDLIBS_recovery_crypto ?= -l:libsodium.so.23
+ZTEST_LDLIBS_recovery ?= $(abspath build/liboqs/lib/liboqs.a) -l:libsodium.so.23 -pthread
+ZTEST_LDLIBS_provision_node ?= $(abspath build/liboqs/lib/liboqs.a) -l:libsodium.so.23 -l:libcurl.so.4 -pthread
+ZTEST_LDLIBS_account_sign ?= $(abspath build/liboqs/lib/liboqs.a) -l:libsodium.so.23
+ZTEST_LDLIBS_sync_http ?= -l:libcurl.so.4 -l:libsodium.so.23
+ZTEST_LDLIBS_sync_page ?= -l:libsodium.so.23 -lglib-2.0
+ZTEST_LDLIBS_sync_transaction ?= $(abspath build/liboqs/lib/liboqs.a) -l:libsodium.so.23
+ZTEST_LDLIBS_sync_account ?= $(abspath build/liboqs/lib/liboqs.a) -l:libsodium.so.23
+ZTEST_LDLIBS_sync_client ?= $(abspath build/liboqs/lib/liboqs.a) -l:libsodium.so.23 -l:libcurl.so.4 -pthread
+ZTEST_LDLIBS_sync_legacy ?= $(abspath build/liboqs/lib/liboqs.a) -l:libsodium.so.23 -l:libcurl.so.4 -pthread -lglib-2.0
+ZTEST_LDLIBS_library_files ?= -lgdk_pixbuf-2.0 -lgobject-2.0
+ZTEST_LDLIBS_library_import ?= -lgdk_pixbuf-2.0 -lgobject-2.0 -lglib-2.0 -l:libsodium.so.23 -pthread
+ZTEST_LDLIBS_library_albums ?= -lglib-2.0 -l:libsodium.so.23 -pthread
+ZTEST_LDLIBS_library_edit ?= -lglib-2.0 -l:libsodium.so.23 -pthread
+ZTEST_LDLIBS_library_edit_memory ?= -lglib-2.0
+ZTEST_LDLIBS_access_registry ?= -l:libsodium.so.23 -pthread
+ZTEST_LDLIBS_vault ?= -l:libsodium.so.23 -pthread
+ZTEST_LDLIBS_app_lock ?= -l:libsodium.so.23 -pthread
+ZTEST_LDLIBS_gallery_query ?= -lglib-2.0 -l:libsodium.so.23 -pthread
+ZTEST_LDLIBS_guest ?= -lglib-2.0 -l:libsodium.so.23 -pthread
+ZTEST_LDLIBS_decode_service ?= -lgdk_pixbuf-2.0 -lgobject-2.0 -l:libsodium.so.23 -pthread
+ZTEST_LDLIBS_decode_lifetime ?= -lgdk_pixbuf-2.0 -lgobject-2.0 -l:libsodium.so.23 -pthread
+ZTEST_LDLIBS_live_motion ?= -l:libsodium.so.23 -pthread -lglib-2.0 -lgdk_pixbuf-2.0 -lgobject-2.0
+ZTEST_LDLIBS_clip_image_tensor ?= -l:libsodium.so.23 -lgdk_pixbuf-2.0 -lgobject-2.0
+ZTEST_LDLIBS_semantic_service ?= -l:libsodium.so.23 -pthread -lgdk_pixbuf-2.0 -lgobject-2.0 -lglib-2.0 -ldl
+ZTOOL_LDLIBS ?= $(ZTEST_LDLIBS)
+ZTOOL_LDLIBS_provision_node ?= -l:libsodium.so.23 -l:libcurl.so.4
+ZTOOL_ARGS ?=
+ZIRAN_HEADLESS := env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER
+.PHONY: ztest FORCE_ZIRAN_TEST
+ztest: $(ZTEST_TARGETS)
+test: ztest
+ztest-owner_account: build/liboqs/lib/liboqs.a
+ztest-backup_identity ztest-backup_upload: build/liboqs/lib/liboqs.a
+ztest-account_sign: build/liboqs/lib/liboqs.a
+ztest-sync_transaction ztest-sync_account ztest-sync_client ztest-sync_legacy: build/liboqs/lib/liboqs.a
+ztest-recovery ztest-provision_node: build/liboqs/lib/liboqs.a
+ztest-recovery: vault-auth recovery-crypto
+ztest-library_files: metadata-reader
+ztest-library_import: metadata-reader original-importer motion-engine vault-auth
+ztest-decode_service: photo-decoder vault-auth
+ztest-live_motion: motion-engine vault-auth metadata-reader
+ztest-decode_lifetime: photo-decoder vault-auth
+ztest-clip_image_tensor: clip-image-tensor
+ztest-semantic_service: clip-image-tensor semantic-engine photo-decoder vault-auth
+ztest-vault ztest-app_lock: vault-auth
+FORCE_ZIRAN_TEST:
+ztest-%: tests/%_test.zi FORCE_ZIRAN_TEST
+	@mkdir -p build/tests
+	$(ZIRAN_HEADLESS) LDLIBS='$(ZTEST_LDLIBS) $(ZTEST_LDLIBS_$*)' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root tests --module-path src/tools --target=c --entry $*_test:main --exe -o build/tests/$* $<
+	$(ZIRAN_HEADLESS) build/tests/$*/$*_test
+ztool-%: src/tools/%.zi FORCE_ZIRAN_TEST
+	@mkdir -p build/tools
+	$(ZIRAN_HEADLESS) LDLIBS='$(ZTOOL_LDLIBS) $(ZTOOL_LDLIBS_$*)' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src/tools --target=c --entry $*:main --exe -o build/tools/$* $<
+	$(ZIRAN_HEADLESS) build/tools/$*/$* $(ZTOOL_ARGS)
 .PHONY: android android-crypto android-test-build android-test-fixtures android-gallery-test
 android-crypto:
 	@set -e; sodium_source=$$($(ZIRAN) pkg path libsodium $(PACKAGE_FLAGS)); \
@@ -333,3 +401,8 @@ close-window-test: build
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_CLOSE_DURING_HEARTBEAT=1 $(PYTHON) tests/heartbeat_window.py
 close-portable-test: bundle
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 PHOTOS_HEARTBEAT_PORTABLE=1 PHOTOS_CLOSE_DURING_HEARTBEAT=1 $(PYTHON) tests/heartbeat_window.py
+
+.PHONY: clip-image-tensor
+clip-image-tensor:
+	LDLIBS='-lgdk_pixbuf-2.0 -lgobject-2.0 -lm' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root src --target=c --entry clip_image_tensor:main --exe -o build/clip-image-tensor src/clip_image_tensor.zi
+build bundle test: clip-image-tensor

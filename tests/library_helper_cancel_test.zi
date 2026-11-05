@@ -1,0 +1,60 @@
+Helpers :: #import "library_files";
+Timer :: #import "std/timer_linux";
+Tree :: #import "std/file_tree_linux";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+c :: #system_library "c";
+WaitChild :: (pid: s32,status: *s32,options: s32) -> s32 #foreign c "waitpid";
+Errno :: () -> *s32 #foreign c "__errno_location";
+Free :: (pointer: *void) #foreign c "free";
+CancelState :: struct { deadline: s64; calls: s64; }
+Cancelled :: (context: *void) -> bool {
+    if context == null { return true }
+    state := cast(*CancelState)context
+    state.calls += 1
+    return Timer.MonotonicMilliseconds() >= state.deadline
+}
+NoChildren :: () -> bool {
+    status: s32
+    return WaitChild(-1,*status,1) == -1 && Errno().* == 10
+}
+Descriptors :: () -> s64 {
+    names: Vec(string)
+    if !Tree.ListDirectory("/proc/self/fd",*names) { return -1 }
+    count := names.count
+    for name: names { if name.count > 0 { descriptor := cast(*TextDescriptor)*name; Free(cast(*void)descriptor.data) } }
+    return count
+}
+Exercise :: (script: string) -> bool {
+    arguments: [3]string = .["sh","-c",script]
+    state: CancelState
+    state.deadline = Timer.MonotonicMilliseconds() + 100
+    started := Timer.MonotonicMilliseconds()
+    code: s32 = 99
+    if Helpers.RunHelper(arguments[:],10000,null,*code,65536,Cancelled,cast(*void)*state) ||
+        code != -1 || Timer.MonotonicMilliseconds()-started > 1500 || state.calls < 2 || !NoChildren() { return false }
+    recovery: [2]string = .["printf","recovered"]
+    output: Vec(u8)
+    return Helpers.RunHelper(recovery[:],1000,*output,*code) && code == 0 && output.count == 9 && NoChildren()
+}
+
+#program_export
+main :: () -> s32 {
+    // A null context deliberately reports cancelled before starting anything.
+    args: [3]string = .["sh","-c","exit 42"]
+    code: s32 = 99
+    if Helpers.RunHelper(args[:],10000,null,*code,65536,Cancelled,null) || code != -1 || !NoChildren() { return 1 }
+    before := Descriptors()
+    for at: 0..15 {
+        if !Exercise("exec sleep 30") { return 2 }
+        if !Exercise("exec 1>&-; exec sleep 30") { return 3 }
+        // The shell exits immediately; its owned descendant retains stdout.
+        if !Exercise("sleep 30 & exit 0") { return 4 }
+    }
+    if before < 0 || Descriptors() != before { return 5 }
+    print("Photos helper cancellation: pre-start/silent/EOF-before-exit/held-stdout, recovery and descriptor ownership passed\n")
+    return 0
+}

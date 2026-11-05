@@ -1,0 +1,170 @@
+Upload :: #import "backup_upload";
+Identity :: #import "backup_identity";
+Crypto :: #import "backup_crypto";
+Wire :: #import "sync_crypto";
+Native :: #import "daochi_client/crypto_native";
+Fixture :: #import "backup_fixture";
+Server :: #import "sync_client_test";
+Transport :: #import "sync_http";
+Frames :: #import "sync_frame";
+JSON :: #import "std/json_document";
+Files :: #import "std/file";
+Text :: #import "std/text";
+Kit :: #import "kit";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+CLIENT :: "photos-android-0123456789abcdef01234567";
+Collection :: "private.photos.v1.records.media";
+GoodReply :: "{\"status\":\"ok\",\"server_version\":9,\"encrypted_records_only\":true,\"changes\":{\"encrypted_records\":[]}}";
+Media :: () -> Upload.Media { return .{name="IMG_1.jpg",mime="image/jpeg",taken_ms=1700000000999,width=4032,height=3024} }
+Open :: (identity: *Identity.Identity,body: []u8,since: s64,id: string,plain: *Vec(u8),photo: *JSON.JsonDocument,nonce: *Vec(u8)) -> bool {
+    request: JSON.JsonDocument; envelope: JSON.JsonDocument
+    defer { JSON.JsonReset(*request); JSON.JsonReset(*envelope) }
+    if !JSON.JsonRead(*request,TextFromBytes(body)) || JSON.JsonCount(*request,request.root)!=9 || !JSON.JsonIs(*request,JSON.JsonMember(*request,request.root,"app_id"),"photos") || Fixture.Integer(*request,request.root,"protocol_version")!=6 || Fixture.Integer(*request,request.root,"record_limit")!=1 || Fixture.Integer(*request,request.root,"client_clock")!=since || !JSON.JsonIs(*request,JSON.JsonMember(*request,request.root,"client_id"),CLIENT) || Fixture.Integer(*request,request.root,"since_server_version")!=since || JSON.JsonKindOf(*request,JSON.JsonMember(*request,request.root,"encrypted_records_only"))!=JSON.JsonKind.True { return false }
+    account: Vec(u8); encoded: Vec(u8); decoded: Vec(u8); sealed: Vec(u8); nonceBytes: Vec(u8); aad: Vec(u8)
+    defer { Wire.ClearOutput(*account); Wire.ClearOutput(*encoded); Wire.ClearOutput(*decoded); Wire.ClearOutput(*sealed); Wire.ClearOutput(*nonceBytes); Wire.ClearOutput(*aad) }
+    if !Fixture.Hex(identity.account[:],*account) || !JSON.JsonIs(*request,JSON.JsonMember(*request,request.root,"user_id_hash"),Fixture.Text(*account)) { return false }
+    records:=JSON.JsonMember(*request,request.root,"encrypted_records")
+    if JSON.JsonKindOf(*request,records)!=JSON.JsonKind.Array || JSON.JsonCount(*request,records)!=1 { return false }
+    record:=JSON.JsonFirst(*request,records)
+    if JSON.JsonCount(*request,record)!=7 || !JSON.JsonIs(*request,JSON.JsonMember(*request,record,"collection"),Collection) || !JSON.JsonIs(*request,JSON.JsonMember(*request,record,"id"),id) || !JSON.JsonIs(*request,JSON.JsonMember(*request,record,"key_id"),"main") || Fixture.Integer(*request,record,"schema_version")!=1 || !JSON.JsonIs(*request,JSON.JsonMember(*request,record,"updated_at"),"1970-01-01T00:00:00Z") || !Fixture.Field(*request,record,"nonce",nonce) || !Fixture.Field(*request,record,"ciphertext",*encoded) || !Fixture.Decode(Fixture.Text(*encoded),*decoded) || !JSON.JsonRead(*envelope,Fixture.Text(*decoded)) { return false }
+    aadNode:=JSON.JsonMember(*envelope,envelope.root,"aad")
+    if !JSON.JsonIs(*envelope,JSON.JsonMember(*envelope,envelope.root,"profile"),"daochi-record-v1") || !JSON.JsonIs(*envelope,JSON.JsonMember(*envelope,envelope.root,"alg"),"xchacha20poly1305") || !JSON.JsonIs(*envelope,JSON.JsonMember(*envelope,envelope.root,"key_id"),"main") || !JSON.JsonIs(*envelope,JSON.JsonMember(*envelope,envelope.root,"nonce"),Fixture.Text(nonce)) || JSON.JsonCount(*envelope,aadNode)!=5 || !JSON.JsonIs(*envelope,JSON.JsonMember(*envelope,aadNode,"account_id"),Fixture.Text(*account)) || !JSON.JsonIs(*envelope,JSON.JsonMember(*envelope,aadNode,"app_id"),"photos") || !JSON.JsonIs(*envelope,JSON.JsonMember(*envelope,aadNode,"collection"),Collection) || !JSON.JsonIs(*envelope,JSON.JsonMember(*envelope,aadNode,"id"),id) || !JSON.JsonIs(*envelope,JSON.JsonMember(*envelope,aadNode,"schema"),"photos.media.v1") { return false }
+    if !JSON.JsonWriteInto(*aad,*envelope,aadNode,JSON.JsonCompactStyle(false,true)) || !Fixture.Decode(Fixture.Text(nonce),*nonceBytes) || !Fixture.Field(*envelope,envelope.root,"ciphertext",*encoded) || !Fixture.Decode(Fixture.Text(*encoded),*sealed) || !Wire.SyncDecrypt(identity.content[:],Wire.OutputBytes(*sealed),Wire.OutputBytes(*aad),Wire.OutputBytes(*nonceBytes),plain) { return false }
+    return JSON.JsonRead(photo,Fixture.Text(plain),Fixture.Erase)
+}
+Photo :: (document: *JSON.JsonDocument,media: Upload.Media,id: string,size: s64,extension: string,preview: string="",blob: string="") -> bool {
+    root:=document.root
+    if JSON.JsonCount(document,root)!=19 || !JSON.JsonIs(document,JSON.JsonMember(document,root,"id"),id) || !JSON.JsonIs(document,JSON.JsonMember(document,root,"name"),media.name) || !JSON.JsonIs(document,JSON.JsonMember(document,root,"extension"),extension) || !JSON.JsonIs(document,JSON.JsonMember(document,root,"kind"),ifx media.video then "video" else "photo") || Fixture.Integer(document,root,"size")!=size || Fixture.Integer(document,root,"width")!=media.width || Fixture.Integer(document,root,"height")!=media.height || Fixture.Integer(document,root,"taken")!=media.taken_ms/1000 { return false }
+    flags: [5]string=.{"archived","favorite","hidden","trashed","updated"}
+    for index: 0..4 { if Fixture.Integer(document,root,flags[index])!=0 { return false } }
+    empty: [2]string=.{"caption","tags"}
+    for key: empty { if !JSON.JsonIs(document,JSON.JsonMember(document,root,key),"") { return false } }
+    objects: [3]string=.{"albums","edits","metadata"}
+    for index: 0..2 {
+        node:=JSON.JsonMember(document,root,objects[index])
+        if JSON.JsonKindOf(document,node)!=(ifx index==0 then JSON.JsonKind.Array else JSON.JsonKind.Object) || JSON.JsonCount(document,node)!=0 { return false }
+    }
+    manifest:=JSON.JsonMember(document,root,"manifest")
+    if Fixture.Integer(document,manifest,"chunk_bytes")!=8388608 { return false }
+    if preview!="" { return JSON.JsonCount(document,manifest)==4 && JSON.JsonIs(document,JSON.JsonMember(document,manifest,"preview"),blob) && JSON.JsonIs(document,JSON.JsonMember(document,manifest,"preview_id"),preview) }
+    return JSON.JsonCount(document,manifest)==2
+}
+RoundTrip :: (identity: *Identity.Identity,manifest: string,id: string,size: s64,media: Upload.Media,extension: string,body: *Vec(u8),nonce: *Vec(u8),preview: string="",blob: string="") -> bool {
+    if !Wire.PrepareOutput(body,750000) { return false }
+    count:=Upload.Request(identity,CLIENT,7,media,manifest,preview,blob,Wire.OutputBytes(body))
+    if count<0 || !VecResize(<<body,count) { return false }
+    plain: Vec(u8); photo: JSON.JsonDocument
+    defer { JSON.JsonReset(*photo); Wire.ClearOutput(*plain) }
+    if !Open(identity,Wire.OutputBytes(body),7,id,*plain,*photo,nonce) || !Photo(*photo,media,id,size,extension,preview,blob) { return false }
+    original: JSON.JsonDocument; expected: Vec(u8); actual: Vec(u8)
+    defer { JSON.JsonReset(*original); Wire.ClearOutput(*expected); Wire.ClearOutput(*actual) }
+    if !JSON.JsonRead(*original,manifest) { return false }
+    originalManifest:=JSON.JsonMember(*original,original.root,"manifest"); actualManifest:=JSON.JsonMember(*photo,photo.root,"manifest")
+    return JSON.JsonWriteInto(*expected,*original,JSON.JsonMember(*original,originalManifest,"chunks"),JSON.JsonCompactStyle()) && JSON.JsonWriteInto(*actual,*photo,JSON.JsonMember(*photo,actualManifest,"chunks"),JSON.JsonCompactStyle()) && Fixture.Equal(Wire.OutputBytes(*expected),Wire.OutputBytes(*actual))
+}
+HTTP :: (identity: *Identity.Identity,body: []u8) -> bool {
+    node: Vec(u8); pin: Vec(u8)
+    if !Fixture.Hex(identity.node[:],*pin) { return false }
+    BuilderPrint(*node,"{\"node_id\":\"%\",\"known_nodes\":[{\"sync\":{\"direction\":\"pull\",\"apps\":[\"photos\"]}}]}",Fixture.Text(*pin))
+    steps: [2]Server.Step
+    steps[0]=Server.StepFor("GET","/api/v1/node",200,Fixture.Text(*node))
+    steps[1]=Server.StepFor("POST","/api/v1/sync",200,GoodReply); steps[1].body_hash=Server.Hash(body)
+    empty: []u8; server:=Server.Start(steps[:],empty,empty)
+    frame: Frames.SyncFrame
+    frame.version=2; frame.port=server.port; frame.method=1; frame.path="/api/v1/node"; frame.pin=identity.node[:]; frame.timeout_ms=5000; frame.response_limit=1048576
+    policy,error:=Transport.HttpRequest(frame)
+    allowed:=error=="" && policy.status==200 && Upload.Node(identity,TextFromBytes(policy.body))==0
+    Transport.ClearResponse(*policy)
+    if !allowed { unused Server.Finish(server); return false }
+    frame.version=1; frame.pin=empty; frame.method=2; frame.path="/api/v1/sync"; frame.body=body
+    response,requestError:=Transport.HttpRequest(frame)
+    confirmed:=requestError=="" && response.status==200 && Upload.Confirmed(TextFromBytes(response.body),7)==9
+    Transport.ClearResponse(*response)
+    return Server.Finish(server) && confirmed
+}
+Run :: (root: string) -> s32 {
+    identity: Identity.Identity; defer { Identity.Clear(*identity) }
+    for index: 0..1279 { identity.public[index]=cast(u8)(index%256) }
+    for index: 0..2559 { identity.private[index]=cast(u8)(255-index%256) }
+    for index: 0..31 { identity.node[index]=cast(u8)(100+index); identity.content[index]=cast(u8)(7+index) }
+    if !Native.Digest(identity.public[:],identity.account[:]) { return 1 }
+    source:=Kit.Join(root,"IMG_1.jpg"); stage:=Fixture.Directory(Kit.Join(root,"staged"))
+    original: [29]u8; original[0]=255; original[1]=216; original[27]=255; original[28]=217; label:="synthetic camera original"
+    for index: 0..label.count-1 { original[index+2]=label[index] }
+    if !Files.WriteEntireFile(source,TextFromBytes(original[:])) { return 2 }
+    file:=Files.OpenRead(source)
+    if !file.valid { return 3 }; defer { unused Files.CloseFile(file) }
+    staged:=Fixture.Prepare(file.fd,original.count,stage,identity.account[:],identity.content[:]); defer { Fixture.Close(*staged) }
+    stagedDocument: JSON.JsonDocument; defer { JSON.JsonReset(*stagedDocument) }
+    id: Vec(u8); address: Vec(u8); body: Vec(u8); nonce: Vec(u8); previous: Vec(u8); secret: Vec(u8)
+    defer { Wire.ClearOutput(*id); Wire.ClearOutput(*address); Wire.ClearOutput(*body); Wire.ClearOutput(*nonce); Wire.ClearOutput(*previous); Wire.ClearOutput(*secret) }
+    if !JSON.JsonRead(*stagedDocument,staged.text) || !Fixture.Field(*stagedDocument,stagedDocument.root,"id",*id) { return 4 }
+    manifestNode:=JSON.JsonMember(*stagedDocument,stagedDocument.root,"manifest"); chunks:=JSON.JsonMember(*stagedDocument,manifestNode,"chunks")
+    if !JSON.JsonStringInto(*stagedDocument,JSON.JsonFirst(*stagedDocument,chunks),*address) || !RoundTrip(*identity,staged.text,Fixture.Text(*id),original.count,Media(),".jpg",*body,*nonce) { return 5 }
+    BuilderAppend(previous,Fixture.Text(*nonce))
+    if !Fixture.Hex(identity.content[:],*secret) || Text.ContainsFoldASCII(Fixture.Text(*body),Fixture.Text(*secret)) || !Fixture.Hex(identity.private[:64],*secret) || Text.ContainsFoldASCII(Fixture.Text(*body),Fixture.Text(*secret)) || Text.ContainsFoldASCII(Fixture.Text(*body),"IMG_1") || Text.ContainsFoldASCII(Fixture.Text(*body),"synthetic camera") { return 6 }
+    if !Kit.Expect(RoundTrip(*identity,staged.text,Fixture.Text(*id),original.count,Media(),".jpg",*body,*nonce) && Fixture.Text(*nonce)!=Fixture.Text(*previous),"desktop-compatible baseline record, hidden keys/name and fresh nonce") { return 7 }
+    if !Kit.Expect(HTTP(*identity,Wire.OutputBytes(*body)),"native numeric pinned loopback request and confirmation") { return 8 }
+    for mode: 0..4 {
+        media:=Media(); extension:=".jpg"
+        if mode==0 { media.name="IMG.HEIC"; media.mime="image/heic"; extension=".heic" }
+        if mode==1 { media.name="photo"; media.mime="image/png"; extension=".png" }
+        if mode==2 { media.name="clip.MOV"; media.mime="video/quicktime"; media.video=true; extension=".mov" }
+        if mode==3 { media.name="clip"; media.mime="video/mp4"; media.video=true; extension=".mp4" }
+        if mode==4 { media.name="名前 \"quoted\" \\ é.jpg" }
+        if !Kit.Expect(RoundTrip(*identity,staged.text,Fixture.Text(*id),original.count,media,extension,*body,*nonce),"supported filename/provider extensions, video and escaped Unicode names") { return 9 }
+    }
+    preview: [18]u8; preview[0]=255; preview[1]=216; preview[16]=255; preview[17]=217; pixels:="preview pixels"
+    for index: 0..pixels.count-1 { preview[index+2]=pixels[index] }
+    previewID: [65]u8; blobID: [65]u8; sealed: [128]u8; again: [128]u8; retryID: [65]u8; retryBlob: [65]u8
+    length:=Upload.Preview(*identity,preview[:],previewID[:],blobID[:],sealed[:])
+    hash: Vec(u8); aad: Vec(u8); account: Vec(u8); plain: [18]u8
+    defer { Wire.ClearOutput(*hash); Wire.ClearOutput(*aad); Wire.ClearOutput(*account); Native.Clear(plain[:]) }
+    if length!=58 || !Fixture.Hash(preview[:],*hash) || Fixture.Text(*hash)!=TextUntilNul(previewID[:]) || !Fixture.Hash(sealed[:length],*hash) || Fixture.Text(*hash)!=TextUntilNul(blobID[:]) || !Fixture.Hex(identity.account[:],*account) { return 10 }
+    BuilderPrint(*aad,"{\"account_id\":\"%\",\"app_id\":\"photos\",\"id\":\"%\",\"part\":\"preview\",\"schema\":\"photos.media.v1\"}",Fixture.Text(*account),TextUntilNul(previewID[:]))
+    if !Kit.Expect(Crypto.Open(sealed[:length],Wire.OutputBytes(*aad),identity.content[:],plain[:])==18 && Fixture.Equal(plain[:],preview[:]) && Upload.Preview(*identity,preview[:],retryID[:],retryBlob[:],again[:])==length && Fixture.Equal(sealed[:length],again[:length]) && RoundTrip(*identity,staged.text,Fixture.Text(*id),original.count,Media(),".jpg",*body,*nonce,TextUntilNul(previewID[:]),TextUntilNul(blobID[:])),"content-addressed preview, desktop open and byte-identical retry") { return 11 }
+    if !Wire.PrepareOutput(*body,750000) { return 12 }
+    badID: [64]u8; for index: 0..63 { badID[index]=65 }
+    if !Kit.Expect(Upload.Preview(*identity,preview[:0],previewID[:],blobID[:],sealed[:])<0 && Upload.Request(*identity,CLIENT,7,Media(),staged.text,TextUntilNul(previewID[:]),"",Wire.OutputBytes(*body))<0 && Upload.Request(*identity,CLIENT,7,Media(),staged.text,TextFromBytes(badID[:]),TextUntilNul(blobID[:]),Wire.OutputBytes(*body))<0,"empty preview/incomplete or uppercase preview references refused") { return 13 }
+    for mode: 0..16 {
+        media:=Media(); since: s64=7; client:=CLIENT; manifest:=staged.text; bad: Vec(u8); longName: Vec(u8)
+        if mode==0 { media.name="doc.pdf"; media.mime="application/pdf" }
+        if mode==1 { media.name="clip"; media.mime="video/mp4" }
+        if mode==2 { media.name="a\nb.jpg" }; if mode==3 { media.name="" }
+        if mode==4 { for index: 0..1024 { VecPush(longName,cast(u8)97) }; BuilderAppend(longName,".jpg"); media.name=Fixture.Text(*longName) }
+        if mode==5 { media.width= -1 }; if mode==6 { media.height=1000001 }; if mode==7 { media.taken_ms=253402300800000 }; if mode==8 { since= -1 }; if mode==9 { client="photos\"x" }; if mode==10 { client="" }
+        if mode>=11 && mode<=14 {
+            alteredID: Vec(u8); BuilderAppend(alteredID,Fixture.Text(*id))
+            if mode==13 { for index: 0..alteredID.count-1 { if alteredID[index]>=97 && alteredID[index]<=102 { alteredID[index]-=32 } } }
+            BuilderPrint(*bad,"{\"id\":\"%\",\"size\":%,\"manifest\":{\"chunk_bytes\":8388608,\"chunks\":[\"%\"%]}}",Fixture.Text(*alteredID),ifx mode==11 then original.count+8388608 else original.count,ifx mode==14 then "000000000000000000000000000000000000000000000000000000000000000" else Fixture.Text(*address),ifx mode==12 then ",\"0000000000000000000000000000000000000000000000000000000000000000\"" else "")
+            manifest=Fixture.Text(*bad)
+        }
+        if mode==15 { manifest="{" }; if mode==16 { BuilderPrint(*bad,"%{}",staged.text); manifest=Fixture.Text(*bad) }
+        if !Kit.Expect(Upload.Request(*identity,client,since,media,manifest,"","",Wire.OutputBytes(*body))<0 && body[0]==0,"malformed/unsupported inputs emit no request") { return 14 }
+    }
+    if !Kit.Expect(Upload.Confirmed(GoodReply,5)==9 && Upload.Confirmed("{\"status\":\"ok\",\"server_version\":9,\"encrypted_records_only\":true,\"full_snapshot_required\":false,\"changes\":{\"encrypted_records\":[]}}",5)==9,"valid encrypted-record confirmation advances cursor") { return 15 }
+    invalid: [8]string=.{"{\"status\":\"error\",\"server_version\":9,\"encrypted_records_only\":true,\"changes\":{\"encrypted_records\":[]}}","{\"status\":\"ok\",\"server_version\":9,\"full_snapshot_required\":true,\"encrypted_records_only\":true,\"changes\":{\"encrypted_records\":[]}}","{\"status\":\"ok\",\"server_version\":9,\"encrypted_records_only\":false,\"changes\":{\"encrypted_records\":[]}}","{\"status\":\"ok\",\"server_version\":4,\"encrypted_records_only\":true,\"changes\":{\"encrypted_records\":[]}}","{\"status\":\"ok\",\"server_version\":9.5,\"encrypted_records_only\":true,\"changes\":{\"encrypted_records\":[]}}","{\"status\":\"ok\"}","[]","ok"}
+    for value: invalid { if !Kit.Expect(Upload.Confirmed(value,5)== -1,"invalid/error/snapshot/legacy/stale/fractional confirmations never advance cursor") { return 16 } }
+    node: Vec(u8); pin: Vec(u8)
+    if !Fixture.Hex(identity.node[:],*pin) { return 17 }
+    for mode: 0..4 {
+        Wire.ClearOutput(*node)
+        BuilderPrint(*node,"{\"node_id\":\"%\"%}",ifx mode==1 then "0000000000000000000000000000000000000000000000000000000000000000" else Fixture.Text(*pin),ifx mode==4 then "" else ifx mode==3 then ",\"known_nodes\":[{\"sync\":null}]" else ifx mode==2 then ",\"known_nodes\":[{\"sync\":{\"direction\":\"push\",\"apps\":[\"photos\"]}}]" else ",\"known_nodes\":[{\"sync\":{\"direction\":\"pull\",\"apps\":[\"photos\"]}}]")
+        expected: s32=ifx mode==0 then 0 else ifx mode==1 then 6 else ifx mode==4 then 5 else 7
+        if !Kit.Expect(Upload.Node(*identity,Fixture.Text(*node))==expected,"pinned identity and no-outward-replication policy preserved") { return 18 }
+    }
+    return 0
+}
+
+#program_export
+main :: () -> s32 {
+    root:=Kit.TempDirectory("backup-upload")
+    if root=="" { return 100 }; defer { unused Kit.Cleanup(root) }
+    result:=Run(root)
+    if result==0 { print("backup_upload: local tests passed\n") }
+    return result
+}

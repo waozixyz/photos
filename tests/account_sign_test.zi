@@ -1,0 +1,39 @@
+Crypto :: #import "account_sign";
+Wire :: #import "sync_crypto";
+Test :: #import "sync_crypto_test";
+Oqs :: #import "oqs/Oqs";
+using Vectors :: #import "std/vec";
+
+main :: () -> s32 {
+    public: Vec(u8); secret: Vec(u8); plain: Vec(u8); signature: Vec(u8); out: Vec(u8)
+    defer { Wire.ClearOutput(*secret); Wire.ClearOutput(*out) }
+    if !Test.Expect(Test.Fixture("account-public.bin",*public) && Test.Fixture("account-secret.bin",*secret) &&
+        Test.Fixture("account-signature.bin",*signature) && Test.Fixture("plain.bin",*plain), "Python ML-DSA fixtures") { return 1 }
+    pk := VecSlice(public,0,public.count); sk := VecSlice(secret,0,secret.count)
+    p := VecSlice(plain,0,plain.count); proof := VecSlice(signature,0,signature.count)
+    if !Test.Expect(Crypto.AccountVerify(pk,p,proof) && Crypto.AccountSign(sk,p,*out) && out.count==2420 &&
+        Crypto.AccountVerify(pk,p,VecSlice(out,0,out.count)) && Test.Save("account",*out), "Python/Ziran ML-DSA interoperability") { return 1 }
+    for mode: 0..2 {
+        public[0] ^= ifx mode==0 then cast(u8)1 else cast(u8)0
+        plain[0] ^= ifx mode==1 then cast(u8)1 else cast(u8)0
+        signature[signature.count-1] ^= ifx mode==2 then cast(u8)1 else cast(u8)0
+        failed := !Crypto.AccountVerify(pk,p,proof)
+        public[0] ^= ifx mode==0 then cast(u8)1 else cast(u8)0
+        plain[0] ^= ifx mode==1 then cast(u8)1 else cast(u8)0
+        signature[signature.count-1] ^= ifx mode==2 then cast(u8)1 else cast(u8)0
+        if !Test.Expect(failed, "altered public/message/signature fails") { return 1 }
+    }
+    largeKey: [2561]u8; largePublic: [1313]u8; largeProof: [2421]u8
+    if !Test.Expect(!Crypto.AccountSign(sk[:0],p,*out) && Test.Wiped(*out) &&
+        !Crypto.AccountSign(sk[:2559],p,*out) && Test.Wiped(*out) &&
+        !Crypto.AccountSign(largeKey[:],p,*out) && Test.Wiped(*out) &&
+        !Crypto.AccountVerify(pk[:1311],p,proof) && !Crypto.AccountVerify(largePublic[:],p,proof) &&
+        !Crypto.AccountVerify(pk,p,proof[:2419]) && !Crypto.AccountVerify(pk,p,largeProof[:]), "exact ML-DSA key/signature bounds") { return 1 }
+    if !Test.Expect(Crypto.AccountSign(sk,p[:0],*out) && Crypto.AccountVerify(pk,p[:0],VecSlice(out,0,out.count)), "empty message") { return 1 }
+    maximum: Vec(u8); unused VecResize(maximum,1048577)
+    if !Test.Expect(Crypto.AccountSign(sk,VecSlice(maximum,0,1048576),*out) &&
+        Crypto.AccountVerify(pk,VecSlice(maximum,0,1048576),VecSlice(out,0,out.count)) &&
+        !Crypto.AccountVerify(pk,VecSlice(maximum,0,1048577),proof) &&
+        !Crypto.AccountSign(sk,VecSlice(maximum,0,1048577),*out) && Test.Wiped(*out), "message limit and failure wiping") { return 1 }
+    print("account_sign: local tests passed\n"); return 0
+}

@@ -1,0 +1,138 @@
+Provision :: #import "provision_node";
+Fixture :: #import "sync_client_test";
+Tx :: #import "sync_transaction_test";
+Kit :: #import "kit";
+Files :: #import "std/file";
+Wire :: #import "sync_crypto";
+Text :: #import "std/text";
+#import "std/c_string"
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+Active :: "{\"app_id\":\"photos\",\"status\":\"active\"}";
+Plan :: struct { items: [3]Fixture.Step; count: s64 }
+Base :: (plan: *Plan,status: s32,body: string) {
+    plan.count=2
+    plan.items[0]=Fixture.StepFor("GET","/api/v1/node",200,Fixture.NodeJSON)
+    plan.items[1]=Fixture.StepFor("GET","/api/v1/apps/photos",status,body)
+}
+Call :: (plan: *Plan,environment: string,result: *Provision.Result) -> bool,string,bool {
+    empty: []u8; server:=Fixture.Start(plan.items[:plan.count],empty,empty)
+    origin: Vec(u8); BuilderPrint(*origin,"http://127.0.0.1:%/",server.port)
+    success,error:=Provision.Provision(TextFromBytes(Wire.OutputBytes(*origin)),environment,result)
+    finished:=Fixture.Finish(server)
+    return success,error,finished
+}
+Args :: () -> bool {
+    program: [16]u8; option: [32]u8; value: [64]u8
+    if !CopyCString("provision_node",program[:]) || !CopyCString("--origin",option[:]) || !CopyCString("http://127.0.0.1:18484",value[:]) { return false }
+    argv: [3]*u8; argv[0]=*program[0]; argv[1]=*option[0]; argv[2]=*value[0]
+    options: Provision.Options
+    valid,error:=Provision.ParseArgs(1,*argv[0],"synthetic/daochi.env",*options)
+    port,portError:=Provision.LoopbackPort(options.origin)
+    if !Kit.Expect(valid && error=="" && options.origin==Provision.DefaultOrigin && options.environment=="synthetic/daochi.env" && port==18080 && portError=="","generic CLI defaults") { return false }
+    valid,error=Provision.ParseArgs(3,*argv[0],"synthetic/daochi.env",*options)
+    if !Kit.Expect(valid && options.origin=="http://127.0.0.1:18484","origin override") { return false }
+    if !CopyCString("--help",option[:]) { return false }
+    valid,error=Provision.ParseArgs(2,*argv[0],"",*options)
+    if !Kit.Expect(valid && options.help,"help needs no node/environment") { return false }
+    if !CopyCString("--env",option[:]) || !CopyCString("custom/node.env",value[:]) { return false }
+    valid,error=Provision.ParseArgs(3,*argv[0],"",*options)
+    if !Kit.Expect(valid && options.environment=="custom/node.env","named environment override") { return false }
+    valid,error=Provision.ParseArgs(2,*argv[0],"",*options)
+    if !Kit.Expect(!valid && error!="","missing option value") { return false }
+    if !CopyCString("--unknown",option[:]) { return false }
+    valid,error=Provision.ParseArgs(2,*argv[0],"",*options)
+    return Kit.Expect(!valid && error!="","unknown option rejected without printing argv")
+}
+Run :: (root: string) -> s32 {
+    if !Args() { return 1 }
+    invalid: [8]string=.{"https://127.0.0.1:18080","http://localhost:18080","http://example.invalid:18080","http://127.0.0.1:0","http://127.0.0.1:65536","http://127.0.0.1:18080/path","http://user@127.0.0.1:18080","http://127.0.0.1:18080?x=1"}
+    result: Provision.Result
+    for origin: invalid {
+        success,error:=Provision.Provision(origin,"unread",*result)
+        if !Kit.Expect(!success && error!="" && TextUntilNul(result.node_id[:])=="","non-loopback/malformed origin rejected before transport") { return 2 }
+    }
+    plan: Plan; Base(*plan,200,Active)
+    missing:=Kit.Join(root,"absent.env")
+    success,error,finished:=Call(*plan,missing,*result)
+    if !Kit.Expect(success && error=="" && finished && TextUntilNul(result.node_id[:])==Fixture.Pin && !Files.PathExists(missing),"existing active registration skips credentials and POST") { return 3 }
+    Base(*plan,200,"{\"app_id\":\"photos\",\"status\":\"inactive\"}")
+    success,error,finished=Call(*plan,missing,*result)
+    if !Kit.Expect(!success && finished && error=="Existing Photos registration is inactive; refusing to overwrite" && TextUntilNul(result.node_id[:])=="","inactive registration is never overwritten") { return 4 }
+    for mode: 0..3 {
+        plan.count=1
+        body:=ifx mode==0 then "{}" else ifx mode==1 then "{\"node_id\":\"not-a-hash\",\"known_nodes\":[]}" else ifx mode==2 then "{\"node_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"known_nodes\":[{\"sync\":{\"direction\":\"push\",\"apps\":[\"entity\"]}}]}" else "{\"node_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+        plan.items[0]=Fixture.StepFor("GET","/api/v1/node",200,body)
+        success,error,finished=Call(*plan,missing,*result)
+        if !Kit.Expect(!success && error!="" && finished,"malformed identity/policy or outward replication refuses registration") { return 5 }
+    }
+    environment:=Kit.Join(root,"node.env")
+    if !Files.WriteEntireFile(environment,"# synthetic\nDAOCHI_ADMIN_TOKEN='operator synthetic' # retained comment\n") { return 6 }
+    Base(*plan,404,"missing"); plan.count=3
+    plan.items[2]=Fixture.StepFor("POST","/api/v1/apps",201,Active)
+    plan.items[2].admin="operator synthetic"; plan.items[2].body_hash=Fixture.Hash(Tx.Bytes(Provision.Registration))
+    success,error,finished=Call(*plan,environment,*result)
+    if !Kit.Expect(success && error=="" && finished,"missing registration creates exact native payload with parsed operator header") { return 7 }
+    // An empty token may use only this environment's sibling fallback.
+    if !Files.WriteEntireFile(environment,"DAOCHI_ADMIN_TOKEN=\n") || !Files.WriteEntireFile(Kit.Join(root,"admin-token"),"  sibling-token\n") { return 8 }
+    plan.items[2].admin="sibling-token"
+    success,error,finished=Call(*plan,environment,*result)
+    if !Kit.Expect(success && error=="" && finished,"matching sibling admin-token fallback") { return 9 }
+    Base(*plan,404,"missing")
+    success,error,finished=Call(*plan,missing,*result)
+    if !Kit.Expect(!success && error=="Local node operator authorization is unavailable" && finished,"missing named environment does not borrow another credential file") { return 10 }
+    for mode: 0..5 {
+        sentinel:=Kit.Join(root,"injection-must-not-run")
+        injection: Vec(u8); BuilderPrint(*injection,"DAOCHI_ADMIN_TOKEN=$(touch %)\n",sentinel)
+        value:=ifx mode==0 then "DAOCHI_ADMIN_TOKEN='unterminated\n" else ifx mode==1 then "DAOCHI_ADMIN_TOKEN=one two\n" else ifx mode==2 then TextFromBytes(Wire.OutputBytes(*injection)) else ifx mode==3 then "DAOCHI_ADMIN_TOKEN=\"bad\rheader\"\n" else ifx mode==4 then "DAOCHI_ADMIN_TOKEN=token\nDAOCHI_BASE_URL=http://127.0.0.1:1\n" else "DAOCHI_ADMIN_TOKEN=token\nDAOCHI_ADDR=example.invalid:18080\n"
+        if !Files.WriteEntireFile(environment,value) { return 11 }
+        success,error,finished=Call(*plan,environment,*result)
+        if !Kit.Expect(!success && error!="" && finished && !Files.PathExists(sentinel),"malformed/injection/mismatched credentials are data, never executed or posted") { return 12 }
+    }
+    if !Files.WriteEntireFile(environment,"DAOCHI_ADMIN_TOKEN='literal$(id)'\n") { return 13 }
+    plan.count=3; plan.items[2]=Fixture.StepFor("POST","/api/v1/apps",201,Active); plan.items[2].admin="literal$(id)"
+    success,error,finished=Call(*plan,environment,*result)
+    if !Kit.Expect(success && error=="" && finished,"quoted shell syntax is retained literally, without expansion") { return 14 }
+    for count: 0..2 {
+        length:=ifx count==0 then cast(s64)4096 else ifx count==1 then 8191 else 8192
+        token: Vec(u8); content: Vec(u8)
+        if !VecResize(token,length) { return 17 }
+        for index: 0..length-1 { token[index]=107 }
+        tokenText:=TextFromBytes(Wire.OutputBytes(*token))
+        BuilderPrint(*content,"DAOCHI_ADMIN_TOKEN='%'\n",tokenText)
+        if !Files.WriteEntireFile(environment,TextFromBytes(Wire.OutputBytes(*content))) { return 18 }
+        Base(*plan,404,"missing")
+        if length<8192 {
+            plan.count=3; plan.items[2]=Fixture.StepFor("POST","/api/v1/apps",201,Active); plan.items[2].admin=tokenText
+        }
+        success,error,finished=Call(*plan,environment,*result)
+        if !finished || (length<8192 && !success) { print("Credential boundary failed: % bytes, %\n",length,error) }
+        if !Kit.Expect(finished && (ifx length<8192 then success && error=="" else !success && error=="Malformed local node operator authorization"),"long token and exact 8191-byte header bound") { return 19 }
+    }
+    if !Files.WriteEntireFile(environment,"DAOCHI_ADMIN_TOKEN='literal$(id)'\n") { return 20 }
+    // Report HTTP errors without returning response bodies or credentials.
+    for mode: 0..2 {
+        Base(*plan,ifx mode==0 then 500 else 404,"PRIVATE_RESPONSE_BODY")
+        if mode!=0 {
+            plan.count=3; plan.items[2]=Fixture.StepFor("POST","/api/v1/apps",ifx mode==1 then 401 else 302,"PRIVATE_RESPONSE_BODY"); plan.items[2].admin="literal$(id)"
+        }
+        success,error,finished=Call(*plan,environment,*result)
+        if !Kit.Expect(!success && error!="" && finished && !Text.ContainsFoldASCII(error,"PRIVATE_RESPONSE_BODY") && !Text.ContainsFoldASCII(error,"literal$(id)"),"HTTP failure/redirect exposes no response-body or token text") { return 15 }
+    }
+    Base(*plan,200,"{\"app_id\":\"other\",\"status\":\"active\"}")
+    success,error,finished=Call(*plan,environment,*result)
+    if !Kit.Expect(!success && error=="Invalid Photos app registration response" && finished,"wrong app identity rejected") { return 16 }
+    return 0
+}
+
+#program_export
+main :: () -> s32 {
+    root:=Kit.TempDirectory("provision-node")
+    if root=="" { return 100 }; defer { unused Kit.Cleanup(root) }
+    code:=Run(root)
+    if code==0 { print("provision_node: local tests passed\n") }
+    return code
+}

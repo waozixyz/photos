@@ -1,0 +1,17 @@
+{
+  "photos_today": "Сегодня",
+  "photos_yesterday": "Вчера",
+  "photos_date": "{dd}.{mm}.{y}",
+  "photos_month_1": "январь",
+  "photos_month_2": "февраль",
+  "photos_month_3": "март",
+  "photos_month_4": "апрель",
+  "photos_month_5": "май",
+  "photos_month_6": "июнь",
+  "photos_month_7": "июль",
+  "photos_month_8": "август",
+  "photos_month_9": "сентябрь",
+  "photos_month_10": "октябрь",
+  "photos_month_11": "ноябрь",
+  "photos_month_12": "декабрь"
+}

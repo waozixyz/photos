@@ -6,13 +6,15 @@ Semantic :: #import "semantic";
 #import "std/byte_text_linux"
 #import "std/json_scan"
 #import "std/text_buffer"
+using Vectors :: #import "std/vec";
 c :: #system_library "c";
 Copy :: (out: *void, bytes: *void, count: usize) -> *void #foreign c "memcpy";
 Next :: (database: *void, identity: []u8) -> s32 {
     sql: Vec(u8)
-    BuilderPrint(*sql,"SELECT id FROM photos WHERE kind='photo' AND hidden=0 AND trashed=0 AND % AND (SELECT value FROM settings WHERE key='semantic_enabled')='true' AND coalesce((SELECT value FROM settings WHERE key='semantic_processing'),'true')='true' AND NOT EXISTS(SELECT 1 FROM semantic_embeddings e WHERE e.photo_id=photos.id AND e.model=?) ORDER BY taken DESC,id LIMIT 1",LivePhoto.GallerySQL)
+    if !BuilderAppend(sql,"SELECT id FROM photos WHERE kind='photo' AND hidden=0 AND trashed=0 AND ") || !BuilderAppend(sql,LivePhoto.GallerySQL) ||
+        !BuilderAppend(sql," AND (SELECT value FROM settings WHERE key='semantic_enabled')='true' AND coalesce((SELECT value FROM settings WHERE key='semantic_processing'),'true')='true' AND NOT EXISTS(SELECT 1 FROM semantic_embeddings e WHERE e.photo_id=photos.id AND e.model=?) ORDER BY taken DESC,id LIMIT 1") { return -1 }
     statement: *void
-    if SqlitePrepareText(database,BuilderFinish(sql),-1,*statement,null) != SQLITE_OK { return -1 }
+    if SqlitePrepareText(database,TextView(VecSlice(sql,0,sql.count)),-1,*statement,null) != SQLITE_OK { return -1 }
     defer { unused SqliteFinalize(statement) }
     if SqliteBindTextString(statement,1,Semantic.Model,-1) != SQLITE_OK { return -1 }
     status := SqliteStep(statement); if status == SQLITE_DONE { return 0 }; if status != SQLITE_ROW { return -1 }
@@ -59,9 +61,10 @@ Mutate :: (database: *void, json: string, now: float64) -> s32 {
         if norm < 0.99 || norm > 1.01 { return -1 }
     }
     sql: Vec(u8)
-    BuilderPrint(*sql,"SELECT 1 FROM photos WHERE id=?1 AND updated=?2 AND kind='photo' AND hidden=0 AND trashed=0 AND % AND (SELECT value FROM settings WHERE key='semantic_enabled')='true' AND coalesce((SELECT value FROM settings WHERE key='semantic_processing'),'true')='true' AND NOT EXISTS(SELECT 1 FROM semantic_embeddings e WHERE e.photo_id=photos.id AND e.model=?3)",LivePhoto.GallerySQL)
+    if !BuilderAppend(sql,"SELECT 1 FROM photos WHERE id=?1 AND updated=?2 AND kind='photo' AND hidden=0 AND trashed=0 AND ") || !BuilderAppend(sql,LivePhoto.GallerySQL) ||
+        !BuilderAppend(sql," AND (SELECT value FROM settings WHERE key='semantic_enabled')='true' AND coalesce((SELECT value FROM settings WHERE key='semantic_processing'),'true')='true' AND NOT EXISTS(SELECT 1 FROM semantic_embeddings e WHERE e.photo_id=photos.id AND e.model=?3)") { return -1 }
     statement: *void
-    if SqlitePrepareText(database,BuilderFinish(sql),-1,*statement,null) != SQLITE_OK { return -1 }
+    if SqlitePrepareText(database,TextView(VecSlice(sql,0,sql.count)),-1,*statement,null) != SQLITE_OK { return -1 }
     if SqliteBindTextString(statement,1,TextFromCString(*identity[0]),64) != SQLITE_OK || SqliteBindDouble(statement,2,expected) != SQLITE_OK || SqliteBindTextString(statement,3,Semantic.Model,-1) != SQLITE_OK { unused SqliteFinalize(statement); return -1 }
     status := SqliteStep(statement); unused SqliteFinalize(statement)
     if status == SQLITE_DONE { return 0 }; if status != SQLITE_ROW { return -1 }

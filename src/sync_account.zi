@@ -6,6 +6,7 @@ Sign :: #import "sync_sign";
 Native :: #import "daochi_client/crypto_native";
 #import "std/byte_text_linux"
 #import "std/text_buffer"
+using Vectors :: #import "std/vec";
 c :: #system_library "c";
 Read :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign c "read";
 
@@ -23,6 +24,34 @@ Send :: (body: string, signature: string) -> bool {
 }
 
 #scope_export
+// Caller-owned outputs must be distinct and must not alias any input storage.
+// Failure wipes both outputs, including retained vector capacity.
+LoginRequest :: (public: []u8, private: []u8, client: string, challenge: string,
+    body: *Vec(u8), signature: *Vec(u8)) -> bool {
+    Wire.ClearOutput(body); Wire.ClearOutput(signature)
+    if body==null || signature==null || body==signature { return false }
+    json: [6144]u8; proof: [4841]u8
+    defer { Native.Clear(json[:]); Native.Clear(proof[:]) }
+    if !Sign.Login(public,private,client,challenge,json[:],proof[:]) { return false }
+    text:=TextUntilNul(json[:]); signed:=TextUntilNul(proof[:])
+    if !Wire.PrepareOutput(body,text.count) || !Wire.PrepareOutput(signature,signed.count) {
+        Wire.ClearOutput(body); Wire.ClearOutput(signature); return false
+    }
+    b:=Wire.OutputBytes(body); s:=Wire.OutputBytes(signature)
+    for i: 0..text.count-1 { b[i]=text[i] }; for i: 0..signed.count-1 { s[i]=signed[i] }
+    return true
+}
+
+// The output must not alias input storage; keys remain with the caller.
+RegistrationRequest :: (public: []u8, private: []u8, seed: []u8, client: string,
+    now: s64, body: *Vec(u8)) -> bool {
+    Wire.ClearOutput(body)
+    json: [6144]u8; defer { Native.Clear(json[:]) }
+    if !Sign.Registration(public,private,seed,client,now,json[:]) { return false }
+    text:=TextUntilNul(json[:]); if !Wire.PrepareOutput(body,text.count) { return false }
+    result:=Wire.OutputBytes(body); for i: 0..text.count-1 { result[i]=text[i] }; return true
+}
+
 Prepare :: (frame: []u8) -> s32 {
     if frame.count != 16 || frame[0] != 2 || (frame[1] != 1 && frame[1] != 2) { return 2 }
     client_count := cast(s64)Wire.Number(frame[2:4])
@@ -46,15 +75,15 @@ Prepare :: (frame: []u8) -> s32 {
         !Wire.ReadAll(*challenge[0], challenge_count) { return 2 }
     extra: u8
     if Read(0, *extra, 1) != 0 { return 2 }
-    body: [6144]u8
-    signature: [4841]u8
+    body: Vec(u8); signature: Vec(u8)
+    defer { Wire.ClearOutput(*body); Wire.ClearOutput(*signature) }
     client := TextFromBytes(client_id[:client_count])
     prepared: bool
     if frame[1] == 1 {
-        prepared = Sign.Login(public_key[:], private_key[:], client, TextFromBytes(challenge[:challenge_count]), body[:], signature[:])
+        prepared = LoginRequest(public_key[:], private_key[:], client, TextFromBytes(challenge[:challenge_count]), *body, *signature)
     } else {
-        prepared = Sign.Registration(public_key[:], private_key[:], seed[:], client, cast(s64)now, body[:])
+        prepared = RegistrationRequest(public_key[:], private_key[:], seed[:], client, cast(s64)now, *body)
     }
     if !prepared { return 2 }
-    return ifx Send(TextUntilNul(body[:]), TextUntilNul(signature[:])) then 0 else 2
+    return ifx Send(TextFromBytes(VecSlice(body,0,body.count)), TextFromBytes(VecSlice(signature,0,signature.count))) then 0 else 2
 }

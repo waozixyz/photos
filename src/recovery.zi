@@ -1,0 +1,568 @@
+Auth :: #import "vault_auth";
+// Offline encrypted recovery. Plaintext keys/passwords stay in wiped buffers.
+Store :: #import "library_store";
+LibraryFiles :: #import "library_files";
+Types :: #import "service_types";
+Owner :: #import "owner_account";
+Crypt :: #import "recovery_crypto";
+Wire :: #import "sync_crypto";
+Vault :: #import "vault";
+App :: #import "app_lock";
+Guest :: #import "guest";
+Access :: #import "access_registry";
+Native :: #import "daochi_client/crypto_native";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+SQL :: #import "sqlite/SQLite";
+JSON :: #import "std/json_document";
+UTF8 :: #import "std/utf8";
+#import "std/json_scan"
+#import "std/byte_text_linux"
+#import "std/c_string"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+c :: #system_library "c";
+Open :: (path: *u8, flags: s32, mode: s32) -> s32 #foreign c "open";
+Home :: (name: *u8) -> *u8 #foreign c "getenv";
+IdentityError :: "Invalid backup identity; existing keys were preserved";
+Unavailable :: "Existing backup keys are unavailable; no keys were replaced";
+Changed :: "Credentials or backup identity changed; try recovery again";
+Failure :: "Recovery could not finish; existing originals and keys were preserved";
+
+#scope_export
+LIMIT :: 65536;
+// The file header is this ASCII prefix followed by the single byte 1.
+MAGIC :: "PHOTOS-RECOVERY";
+
+#scope_file
+Bytes :: (text: string) -> []u8 { descriptor := cast(*TextDescriptor)*text; return BytesFromPointer(descriptor.data,cast(u64)text.count) }
+Exists :: (path: string) -> bool { return Tree.PathStatus(path,false).kind != Tree.PathKind.Missing }
+Equal :: (left: []u8, right: []u8) -> bool {
+    if left.count != right.count { return false }
+    for i: 0..left.count-1 { if left[i] != right[i] { return false } }
+    return true
+}
+Complete :: (text: string) -> bool {
+    return text.count > 0 && text.count <= LIMIT && UTF8.Valid(text) && Space(text,ValueEnd(text,0,0)) == text.count
+}
+// Strict member names, with Python's last-value semantics for duplicates.
+Fields :: (text: string, at: s32, names: []string, positions: []s32) -> bool {
+    if positions.count < names.count || at < 0 || at >= text.count || text[at] != 123 { return false }
+    for i: 0..names.count-1 { positions[i] = -1 }
+    cursor := Space(text,at+1)
+    key_bytes: [32]u8
+    while cursor < text.count && text[cursor] != 125 {
+        key := ReadString(text,cursor)
+        count := ReadStringText(text,cursor,key_bytes[:])
+        if !key.valid || count < 0 { return false }
+        match: s32 = -1
+        for i: 0..names.count-1 { if TextFromBytes(key_bytes[:count]) == names[i] { match = cast(s32)i } }
+        if match < 0 { return false }
+        cursor = Space(text,key.after)
+        if cursor >= text.count || text[cursor] != 58 { return false }
+        cursor = Space(text,cursor+1); positions[match] = cursor
+        cursor = Space(text,ValueEnd(text,cursor,0))
+        if cursor < 0 || cursor >= text.count { return false }
+        if text[cursor] == 125 { break }
+        if text[cursor] != 44 { return false }
+        cursor = Space(text,cursor+1)
+    }
+    if cursor < 0 || cursor >= text.count || text[cursor] != 125 { return false }
+    for position: positions { if position < 0 { return false } }
+    return true
+}
+Digit :: (byte: u8) -> s32 {
+    if byte >= 48 && byte <= 57 { return cast(s32)byte-48 }
+    if byte >= 65 && byte <= 70 { return cast(s32)byte-55 }
+    if byte >= 97 && byte <= 102 { return cast(s32)byte-87 }
+    return -1
+}
+Hex :: (text: []u8, output: []u8) -> bool {
+    high: s32 = -1; count: s64
+    for byte: text {
+        if byte == 32 || (byte >= 9 && byte <= 13) { if high >= 0 { return false }; continue }
+        digit := Digit(byte)
+        if digit < 0 { return false }
+        if high < 0 { high = digit }
+        else { if count >= output.count { return false }; output[count] = cast(u8)(high*16+digit); count += 1; high = -1 }
+    }
+    return high < 0 && count == output.count
+}
+
+#scope_export
+PasswordError :: (password: []u8) -> string {
+    if password.count > 1024 || !UTF8.Valid(TextFromBytes(password)) { return "Choose at least 12 characters and a recovery password under 1024 bytes" }
+    count: s32
+    for byte: password { if byte == 0 { return "Choose at least 12 characters and a recovery password under 1024 bytes" }; if (byte & 192) != 128 { count += 1 } }
+    return ifx count >= 12 then "" else "Choose at least 12 characters and a recovery password under 1024 bytes"
+}
+// Canonical identity JSON remains caller-owned/wipeable. No JSON getter copies
+// any private key, and C06 supplies the sole keypair validation algorithm.
+Identity :: (raw: []u8, canonical: *Vec(u8), account: []u8) -> string {
+    Wire.ClearOutput(canonical); Native.Clear(account)
+    if account.count != 65 { return IdentityError }
+    id,error := IdentityValue(raw,canonical)
+    if error.count == 0 { for i: 0..64 { account[i] = id[i] } }
+    return error
+}
+#scope_file
+IdentityValue :: (raw: []u8, canonical: *Vec(u8)) -> [65]u8, string {
+    account: [65]u8
+    text := TextFromBytes(raw)
+    if !Complete(text) { return account,IdentityError }
+    names: [3]string = .["content_key","private","public"]
+    fields: [3]s32
+    legacy := Fields(text,Space(text,0),names[:],fields[:])
+    if !legacy {
+        if !Fields(text,Space(text,0),names[:1],fields[:1]) { return account,IdentityError }
+    }
+    // Canonical hex JSON cannot exceed the bounded input. Reserve before any
+    // key byte is copied so growth never leaves an unwiped old allocation.
+    if !Wire.PrepareOutput(canonical,LIMIT) { return account,Failure }
+    VecClear(<<canonical)
+    public: [1312]u8; private: [2560]u8; content: [32]u8; decoded: [65537]u8
+    defer { Native.Clear(public[:]); Native.Clear(private[:]); Native.Clear(content[:]); Native.Clear(decoded[:]) }
+    BuilderPrint(canonical,"{")
+    total: s32 = ifx legacy then 3 else 1
+    for i: 0..total-1 {
+        count := ReadStringText(text,fields[i],decoded[:])
+        if count < 0 { Wire.ClearOutput(canonical); return account,IdentityError }
+        valid: bool
+        if i == 0 { valid = Hex(decoded[:count],content[:]) }
+        else if i == 1 { valid = Hex(decoded[:count],private[:]) }
+        else { valid = Hex(decoded[:count],public[:]) }
+        if !valid { Wire.ClearOutput(canonical); return account,IdentityError }
+        if i > 0 { BuilderPrint(canonical,",") }
+        if !JSON.JsonQuoteInto(canonical,names[i],false) { Wire.ClearOutput(canonical); return account,Failure }
+        BuilderPrint(canonical,":")
+        if !JSON.JsonQuoteInto(canonical,TextFromBytes(decoded[:count]),false) { Wire.ClearOutput(canonical); return account,Failure }
+    }
+    BuilderPrint(canonical,"}")
+    if legacy {
+        owner,error := Owner.FromKeys(public[:],private[:])
+        defer { Owner.Clear(*owner) }
+        if error.count > 0 || !owner.valid { Wire.ClearOutput(canonical); return account,IdentityError }
+        for i: 0..64 { account[i] = owner.account_id[i] }
+    }
+    return account,""
+}
+#scope_export
+ReadFile :: (path: string, maximum: s64, output: *Vec(u8)) -> bool {
+    Wire.ClearOutput(output)
+    name: [4096]u8
+    if !CopyCString(path,name[:]) { return false }
+    file: Files.FileHandle; file.fd = Open(*name[0],2048|131072|524288,0); file.valid = file.fd >= 0
+    if !file.valid { return false }
+    defer { unused Files.CloseFile(file) }
+    descriptor: Vec(u8); BuilderPrint(*descriptor,"/proc/self/fd/%",file.fd)
+    if Tree.PathStatus(TextView(VecSlice(descriptor,0,descriptor.count))).kind != Tree.PathKind.File { return false }
+    size := Files.FileSize(file)
+    if size < 0 || size > maximum || !Wire.PrepareOutput(output,size) { return false }
+    if size > 0 && Files.ReadAt(file,Wire.OutputBytes(output),0) != size { Wire.ClearOutput(output); return false }
+    extra: [1]u8
+    if Files.ReadAt(file,extra[:],size) != 0 { Wire.ClearOutput(output); return false }
+    return true
+}
+FilePath :: (lib: *Store.Library, value: string) -> string,string {
+    if value.count == 0 || value.count > 4096 { return "","Choose a full path for a separate recovery file" }
+    for byte: value { if byte == 0 { return "","Choose a full path for a separate recovery file" } }
+    expanded := value
+    allocation: string
+    defer { Auth.ReleaseOwned(allocation,false) }
+    if value == "~" || (value.count > 1 && value[0:2] == "~/") {
+        home_name: [5]u8 = .[72,79,77,69,0]
+        home := TextFromCString(Home(*home_name[0]))
+        if home.count == 0 { return "","Choose a full path for a separate recovery file" }
+        out: Vec(u8); BuilderPrint(*out,"%",home); BuilderPrint(*out,"%",value[1:]); allocation = BuilderFinish(out); expanded = allocation
+    }
+    if expanded.count == 0 || expanded[0] != 47 || Files.PathIsLink(expanded) { return "","Choose a full path for a separate recovery file" }
+    parent := Tree.ResolvePath(Tree.PathParent(expanded))
+    defer { Auth.ReleaseOwned(parent,false) }
+    if parent.count == 0 { return "","Choose a new recovery file in an existing folder" }
+    resolved := Tree.JoinPath(parent,Tree.PathName(expanded))
+    if resolved == lib.root || (resolved.count > lib.root.count && resolved[:lib.root.count] == lib.root && resolved[lib.root.count] == 47) {
+        Auth.ReleaseOwned(resolved,false); return "","Keep the recovery file outside your photo library"
+    }
+    return resolved,""
+}
+Permitted :: (lib: *Store.Library, app_token: string, hidden_token: string, registry: *Access.Registry = null) -> string {
+    if App.Enabled(lib) && !App.Unlocked(lib,app_token,false,registry) { return "Unlock Photos before saving recovery keys" }
+    if Vault.Configured(lib) && !Vault.Unlocked(lib,hidden_token,registry) { return "Unlock Hidden before saving recovery keys" }
+    return ""
+}
+
+#scope_file
+PermittedInside :: (lib: *Store.Library, app_token: string, hidden_token: string, registry: *Access.Registry) -> string {
+    if App.Enabled(lib) && !App.Unlocked(lib,app_token,false,registry) { return "Unlock Photos before saving recovery keys" }
+    if Vault.Configured(lib) && Access.Deadline(lib.root,Access.HIDDEN,hidden_token,"",false,registry) == 0 { return "Unlock Hidden before saving recovery keys" }
+    return ""
+}
+Stage :: (parent: string, data: []u8) -> string,string {
+    folder := Tree.CreateTemporaryDirectory(parent,".photos-recovery-")
+    defer { Auth.ReleaseOwned(folder,false) }
+    if folder.count == 0 { return "",Failure }
+    target := Tree.JoinPath(folder,"data")
+    output := Files.OpenExclusivePrivate(target)
+    if !output.valid { unused Tree.RemoveTree(folder); Auth.ReleaseOwned(target,false); return "",Failure }
+    at: s64
+    while at < data.count {
+        count := Files.WriteAt(output,data[at:],at)
+        if count <= 0 { unused Files.CloseFile(output); unused Tree.RemoveTree(folder); Auth.ReleaseOwned(target,false); return "",Failure }
+        at += count
+    }
+    synced := Files.SyncFile(output); closed := Files.CloseFile(output)
+    if !synced || !closed { unused Tree.RemoveTree(folder); Auth.ReleaseOwned(target,false); return "",Failure }
+    return target,""
+}
+CredentialSnapshot :: struct { app: Vec(u8); hidden: Vec(u8); app_present: bool; hidden_present: bool }
+ClearSnapshot :: (snapshot: *CredentialSnapshot) {
+    Wire.ClearOutput(*snapshot.app); Wire.ClearOutput(*snapshot.hidden)
+}
+Credentials :: (lib: *Store.Library, snapshot: *CredentialSnapshot) -> bool {
+    app := App.Path(lib); hidden := Vault.Path(lib)
+    defer { Auth.ReleaseOwned(app,false); Auth.ReleaseOwned(hidden,false) }
+    snapshot.app_present = Exists(app); snapshot.hidden_present = Exists(hidden)
+    return (!snapshot.app_present || ReadFile(app,1024,*snapshot.app)) &&
+        (!snapshot.hidden_present || ReadFile(hidden,1048576,*snapshot.hidden))
+}
+CredentialsCurrent :: (lib: *Store.Library, snapshot: *CredentialSnapshot) -> bool {
+    current: CredentialSnapshot
+    defer { ClearSnapshot(*current) }
+    return Credentials(lib,*current) && snapshot.app_present == current.app_present &&
+        snapshot.hidden_present == current.hidden_present &&
+        Equal(Wire.OutputBytes(*snapshot.app),Wire.OutputBytes(*current.app)) &&
+        Equal(Wire.OutputBytes(*snapshot.hidden),Wire.OutputBytes(*current.hidden))
+}
+
+#scope_export
+// Successful Save returns an owned public path; errors are borrowed messages.
+// Read writes a caller-owned identity buffer, empty/wiped on every failure.
+Save :: (lib: *Store.Library, config: *Types.Config, destination: string, password: []u8,
+    app_token: string = "", hidden_token: string = "", registry: *Access.Registry = null) -> string,string {
+    error := PasswordError(password)
+    if error.count > 0 { return "",error }
+    error = Permitted(lib,app_token,hidden_token,registry)
+    if error.count > 0 { return "",error }
+    path,path_error := FilePath(lib,destination)
+    published: bool
+    defer { if !published { Auth.ReleaseOwned(path,false) } }
+    if path_error.count > 0 { return "",path_error }
+    if !Tree.IsDirectory(Tree.PathParent(path)) || Exists(path) { return "","Choose a new recovery file in an existing folder" }
+    if config == null || !Guest.Identity(config.node.id) { return "","Pin the private ThinkPad node before saving recovery keys" }
+    pin: [65]u8
+    for i: 0..63 { pin[i] = config.node.id[i] }
+    credentials: CredentialSnapshot
+    defer { ClearSnapshot(*credentials) }
+    if !Credentials(lib,*credentials) { return "","Local password settings cannot be replaced safely" }
+    marker := Tree.JoinPath(lib.root,"private/identity.json")
+    defer { Auth.ReleaseOwned(marker,false) }
+    before: Vec(u8); identity: Vec(u8); plain: Vec(u8); sealed: Vec(u8); file: Vec(u8)
+    defer { Wire.ClearOutput(*before); Wire.ClearOutput(*identity); Wire.ClearOutput(*plain); Wire.ClearOutput(*sealed); Wire.ClearOutput(*file) }
+    if !ReadFile(marker,LIMIT,*before) { return "",Unavailable }
+    if !Complete(TextFromBytes(Wire.OutputBytes(*before))) { return "","Existing backup keys are invalid; no keys were replaced" }
+    account: [65]u8; defer { Native.Clear(account[:]) }
+    error = Identity(Wire.OutputBytes(*before),*identity,account[:])
+    if error.count > 0 { return "",error }
+    prefix: Vec(u8); suffix: Vec(u8)
+    BuilderPrint(*prefix,"{\"account\":")
+    if !JSON.JsonQuoteInto(*prefix,TextUntilNul(account[:]),false) { return "",Failure }
+    BuilderPrint(*prefix,",\"identity\":")
+    BuilderPrint(*suffix,",\"node_id\":")
+    if !JSON.JsonQuoteInto(*suffix,TextUntilNul(pin[:]),false) { return "",Failure }
+    BuilderPrint(*suffix,",\"version\":1}")
+    size := prefix.count+identity.count+suffix.count
+    if size > LIMIT || !Wire.PrepareOutput(*plain,size) { return "",Failure }
+    for i: 0..prefix.count-1 { plain[i] = prefix[i] }
+    for i: 0..identity.count-1 { plain[prefix.count+i] = identity[i] }
+    for i: 0..suffix.count-1 { plain[prefix.count+identity.count+i] = suffix[i] }
+    if !Crypt.RecoveryCrypt(password,Wire.OutputBytes(*plain),true,*sealed) { return "",Failure }
+    if config.node.id != TextUntilNul(pin[:]) || !CredentialsCurrent(lib,*credentials) { return "",Changed }
+    if !Wire.PrepareOutput(*file,sealed.count+16) { return "",Failure }
+    for i: 0..14 { file[i] = MAGIC[i] }; file[15] = 1
+    sealed_at: s64
+    while sealed_at < sealed.count { file[sealed_at+16] = sealed[sealed_at]; sealed_at += 1 }
+    error = Permitted(lib,app_token,hidden_token,registry)
+    if error.count > 0 { return "",error }
+    current: Vec(u8); defer { Wire.ClearOutput(*current) }
+    if !ReadFile(marker,LIMIT,*current) || !Equal(Wire.OutputBytes(*before),Wire.OutputBytes(*current)) { return "","Backup identity changed; try saving recovery again" }
+    staging,stage_error := Stage(Tree.PathParent(path),Wire.OutputBytes(*file))
+    defer { Auth.ReleaseOwned(staging,false) }
+    if stage_error.count > 0 { return "",stage_error }
+    defer { unused Tree.RemoveTree(Tree.PathParent(staging)) }
+    lease := Vault.BeginAuthorization(lib,hidden_token,false,registry)
+    defer { Vault.EndAuthorization(*lease) }
+    if !lease.held { return "",lease.error }
+    error = PermittedInside(lib,app_token,hidden_token,registry)
+    if error.count > 0 { return "",error }
+    if config.node.id != TextUntilNul(pin[:]) || !CredentialsCurrent(lib,*credentials) { return "",Changed }
+    if !ReadFile(marker,LIMIT,*current) || !Equal(Wire.OutputBytes(*before),Wire.OutputBytes(*current)) { return "","Backup identity changed; try saving recovery again" }
+    if !Files.RenameNoReplace(staging,path) {
+        return "",ifx Exists(path) then "The recovery destination already exists; it was preserved" else Failure
+    }
+    published = true
+    return path,""
+}
+
+Read :: (lib: *Store.Library, config: *Types.Config, source: string, password: []u8, identity: *Vec(u8)) -> string {
+    Wire.ClearOutput(identity)
+    pin: [65]u8
+    if config != null && Guest.Identity(config.node.id) { for i: 0..63 { pin[i] = config.node.id[i] } }
+    path,path_error := FilePath(lib,source)
+    defer { Auth.ReleaseOwned(path,false) }
+    if path_error.count > 0 { return path_error }
+    encrypted: Vec(u8); plain: Vec(u8)
+    defer { Wire.ClearOutput(*encrypted); Wire.ClearOutput(*plain) }
+    if !ReadFile(path,LIMIT+72,*encrypted) || encrypted.count < 16 { return "Choose a valid Photos recovery file" }
+    for i: 0..14 { if encrypted[i] != MAGIC[i] { return "Choose a valid Photos recovery file" } }
+    if encrypted[15] != 1 { return "Choose a valid Photos recovery file" }
+    error := PasswordError(password)
+    if error.count > 0 { return error }
+    data := Wire.OutputBytes(*encrypted)
+    if data.count < 73 || data.count > LIMIT+72 { return "Invalid Photos recovery file" }
+    if !Crypt.RecoveryCrypt(password,data[16:],false,*plain) { return "Incorrect recovery password or altered recovery file" }
+    text := TextFromBytes(Wire.OutputBytes(*plain))
+    names: [4]string = .["account","identity","node_id","version"]
+    fields: [4]s32
+    invalid := "Recovery identity or ThinkPad pin is invalid; existing keys were preserved"
+    if !Complete(text) || !Fields(text,Space(text,0),names[:],fields[:]) ||
+        text[fields[3]] != 49 || ValueEnd(text,fields[3],0) != fields[3]+1 { return invalid }
+    node: [65]u8; expected: [65]u8; recorded: [65]u8
+    defer { Native.Clear(node[:]); Native.Clear(expected[:]); Native.Clear(recorded[:]) }
+    if ReadStringText(text,fields[2],node[:]) != 64 || !Guest.Identity(TextUntilNul(node[:])) ||
+        config == null || TextUntilNul(node[:]) != TextUntilNul(pin[:]) || config.node.id != TextUntilNul(pin[:]) { return invalid }
+    end := ValueEnd(text,fields[1],0)
+    if end < fields[1] { return invalid }
+    error = Identity(Bytes(text[fields[1]:end]),identity,expected[:])
+    if error.count > 0 { return error }
+    count := ReadStringText(text,fields[0],recorded[:])
+    if count < 0 || TextFromBytes(recorded[:count]) != TextUntilNul(expected[:]) { Wire.ClearOutput(identity); return invalid }
+    return ""
+}
+
+#scope_file
+Count :: (lib: *Store.Library, sql: string) -> s64 {
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,sql,-1,*statement,null) != SQL.SQLITE_OK { return -1 }
+    defer { unused SQL.SqliteFinalize(statement) }
+    return ifx SQL.SqliteStep(statement) == SQL.SQLITE_ROW then SQL.SqliteColumnInt64(statement,0) else -1
+}
+Truthy :: (text: string) -> bool {
+    if text.count == 0 { return false }
+    document: JSON.JsonDocument; defer { JSON.JsonReset(*document) }; JSON.JsonSetEraser(*document,Auth.JsonErase)
+    if !JSON.JsonRead(*document,text,Auth.JsonErase) { return true }
+    kind := JSON.JsonKindOf(*document,document.root)
+    if kind == JSON.JsonKind.Null || kind == JSON.JsonKind.False { return false }
+    if kind == JSON.JsonKind.True { return true }
+    if kind == JSON.JsonKind.String { return !JSON.JsonIs(*document,document.root,"") }
+    if kind == JSON.JsonKind.Array || kind == JSON.JsonKind.Object { return JSON.JsonCount(*document,document.root) > 0 }
+    number := ReadNumber(text,Space(text,0))
+    return !number.valid || number.value != 0
+}
+Empty :: (lib: *Store.Library) -> bool {
+    version,version_found := Store.LookupSetting(lib,"server_version")
+    cursor,cursor_found := Store.LookupSetting(lib,"record_cursor")
+    identity := Tree.JoinPath(lib.root,"private/identity.json"); device := Tree.JoinPath(lib.root,"private/device.json")
+    defer { Auth.ReleaseOwned(identity,false); Auth.ReleaseOwned(device,false) }
+    return lib.error.count == 0 && Count(lib,"SELECT count(*) FROM photos") == 0 && Count(lib,"SELECT count(*) FROM albums") == 0 &&
+        !Exists(identity) && !Exists(device) &&
+        !Truthy(version) && !Truthy(cursor)
+}
+
+#scope_export
+Restore :: (lib: *Store.Library, config: *Types.Config, source: string, password: []u8,
+    app_token: string = "", hidden_token: string = "", registry: *Access.Registry = null) -> string {
+    error := PasswordError(password)
+    if error.count > 0 { return error }
+    error = Permitted(lib,app_token,hidden_token,registry)
+    if error.count > 0 { return error }
+    credentials: CredentialSnapshot
+    defer { ClearSnapshot(*credentials) }
+    if !Credentials(lib,*credentials) { return "Local password settings cannot be replaced safely" }
+    identity: Vec(u8); defer { Wire.ClearOutput(*identity) }
+    error = Read(lib,config,source,password,*identity)
+    if error.count > 0 { return error }
+    private := Tree.JoinPath(lib.root,"private")
+    defer { Auth.ReleaseOwned(private,false) }
+    if !Tree.CreateDirectories(private,448) { return Failure }
+    // This real nonblocking OS lock is the evidence that no backup worker owns
+    // the library. Request JSON cannot claim or bypass that condition.
+    lock := Tree.JoinPath(lib.root,".worker.lock"); defer { Auth.ReleaseOwned(lock,false) }
+    worker := Vault.LockCredential(lock,false)
+    if worker < 0 { return "Stop background backup before restoring keys into an empty library" }
+    defer { Vault.UnlockCredential(worker) }
+    error = Permitted(lib,app_token,hidden_token,registry)
+    if error.count > 0 { return error }
+    if !SQL.SqliteGetAutocommit(lib.db) { return "Restore into a new empty library; existing photos and keys were preserved" }
+    if SQL.SqliteExecText(lib.db,"BEGIN IMMEDIATE") != SQL.SQLITE_OK { return Failure }
+    defer { unused SQL.SqliteExecText(lib.db,"ROLLBACK") }
+    if !Empty(lib) { return "Restore into a new empty library; existing photos and keys were preserved" }
+    staged,stage_error := Stage(private,Wire.OutputBytes(*identity))
+    defer { Auth.ReleaseOwned(staged,false) }
+    if stage_error.count > 0 { return stage_error }
+    defer { unused Tree.RemoveTree(Tree.PathParent(staged)) }
+    lease := Vault.BeginAuthorization(lib,hidden_token,false,registry)
+    defer { Vault.EndAuthorization(*lease) }
+    if !lease.held { return lease.error }
+    error = PermittedInside(lib,app_token,hidden_token,registry)
+    if error.count > 0 { return error }
+    if !CredentialsCurrent(lib,*credentials) { return Changed }
+    // BEGIN blocks new records. The no-replace rename also closes the separate
+    // filesystem race with a concurrently created identity marker.
+    destination := Tree.JoinPath(private,"identity.json"); defer { Auth.ReleaseOwned(destination,false) }
+    if !Empty(lib) || !Files.RenameNoReplace(staged,destination) { return "Restore into a new empty library; existing photos and keys were preserved" }
+    return ""
+}
+
+#scope_file
+ResetProof :: (lib: *Store.Library, config: *Types.Config, source: string, password: []u8,
+    replacement: []u8, kind: string, registry: *Access.Registry) -> string {
+    proof: Vec(u8); before: Vec(u8); canonical: Vec(u8); old: Vec(u8); verifier: Vec(u8); updated: Vec(u8); current: Vec(u8)
+    defer {
+        Wire.ClearOutput(*proof); Wire.ClearOutput(*before); Wire.ClearOutput(*canonical); Wire.ClearOutput(*old)
+        Wire.ClearOutput(*verifier); Wire.ClearOutput(*updated); Wire.ClearOutput(*current)
+    }
+    error := Read(lib,config,source,password,*proof)
+    if error.count > 0 { return error }
+    marker := Tree.JoinPath(lib.root,"private/identity.json")
+    defer { Auth.ReleaseOwned(marker,false) }
+    if !ReadFile(marker,LIMIT,*before) { return Unavailable }
+    account: [65]u8; defer { Native.Clear(account[:]) }
+    error = Identity(Wire.OutputBytes(*before),*canonical,account[:])
+    if error.count > 0 { return "Existing backup identity is invalid; keys were preserved" }
+    if !Equal(Wire.OutputBytes(*proof),Wire.OutputBytes(*canonical)) { return "Recovery file belongs to different backup keys; existing keys were preserved" }
+    target := ifx kind == "app" then App.Path(lib) else Vault.Path(lib)
+    lock := Tree.JoinPath(lib.root,ifx kind == "app" then "private/.app-lock.lock" else "private/.hidden-password.lock")
+    defer { Auth.ReleaseOwned(target,false); Auth.ReleaseOwned(lock,false) }
+    descriptor := Vault.LockCredential(lock)
+    if descriptor < 0 { return "Local password settings cannot be replaced safely" }
+    defer { Vault.UnlockCredential(descriptor) }
+    if !Exists(target) { return "The selected local lock is not configured" }
+    if !ReadFile(target,1024,*old) { return "Local password settings cannot be replaced safely" }
+    config_value := App.Settings(lib)
+    defer { App.ClearConfig(*config_value) }
+    if kind == "app" && !config_value.enabled { return "App lock is not enabled" }
+    credentials: CredentialSnapshot
+    defer { ClearSnapshot(*credentials) }
+    if !Credentials(lib,*credentials) { return "Local password settings cannot be replaced safely" }
+    error = Vault.HashPasswordInto(replacement,*verifier)
+    if error.count > 0 { return error }
+    lease := Vault.BeginAuthorization(lib,"",false,registry)
+    defer { Vault.EndAuthorization(*lease) }
+    if !lease.held { return lease.error }
+    if Guest.Active(lib) || !ReadFile(marker,LIMIT,*current) ||
+        !Equal(Wire.OutputBytes(*before),Wire.OutputBytes(*current)) { return Changed }
+    if !ReadFile(target,1024,*current) || !Equal(Wire.OutputBytes(*old),Wire.OutputBytes(*current)) { return Changed }
+    if !CredentialsCurrent(lib,*credentials) { return Changed }
+    if !Wire.PrepareOutput(*updated,512) { return Failure }; VecClear(updated)
+    if kind == "app" { BuilderPrint(*updated,"{\"auto_lock\":%,\"enabled\":true,\"method\":\"password\",",config_value.auto_lock) }
+    else { BuilderPrint(*updated,"{") }
+    BuilderPrint(*updated,"\"verifier\":")
+    if !JSON.JsonQuoteInto(*updated,TextFromBytes(Wire.OutputBytes(*verifier)),false) { return Failure }
+    if kind == "app" { BuilderPrint(*updated,",\"version\":3") }
+    BuilderPrint(*updated,"}")
+    // The Hidden guard is already held; direct registry revocation avoids
+    // recursively entering it. No recovery proof ever grants a viewing token.
+    if !LibraryFiles.Atomic(target,Wire.OutputBytes(*updated)) { return "Local password settings cannot be replaced safely" }
+    Access.Revoke(lib.root,Access.APP,registry); Access.Revoke(lib.root,Access.HIDDEN,registry)
+    return Access.ClearAttempts(lib.root,ifx kind == "app" then Access.APP else Access.HIDDEN,registry)
+}
+
+#scope_export
+// Caller holds Guest.Enter through this operation and the surrounding RPC.
+ResetLocked :: (lib: *Store.Library, config: *Types.Config, source: string, password: []u8,
+    replacement: []u8, kind: string, registry: *Access.Registry = null) -> string {
+    if kind != "app" && kind != "hidden" { return "Choose App lock or Hidden recovery" }
+    error := Vault.PasswordError(replacement)
+    if error.count > 0 { return error }
+    if Guest.Active(lib) { return "Leave Guest view before recovering local credentials" }
+    scope: s32 = ifx kind == "app" then Access.APP else Access.HIDDEN
+    error = Access.CheckAttempts(lib.root,scope,registry)
+    if error.count > 0 { return error }
+    error = ResetProof(lib,config,source,password,replacement,kind,registry)
+    if error.count > 0 {
+        attempt_error := Access.FailedAttempt(lib.root,scope,registry)
+        if attempt_error.count > 0 { return attempt_error }
+    }
+    return error
+}
+Reset :: (lib: *Store.Library, config: *Types.Config, source: string, password: []u8,
+    replacement: []u8, kind: string, registry: *Access.Registry = null) -> string {
+    if !Guest.Enter() { return Failure }
+    defer { Guest.Leave() }
+    return ResetLocked(lib,config,source,password,replacement,kind,registry)
+}
+
+#scope_file
+// Allocation-free request decoding keeps even escaped passwords under the
+// caller-owned stack wipe. The caller still owns the original RPC input.
+Member :: (text: string, name: string) -> s32 {
+    cursor := Space(text,1); result: s32 = -1
+    decoded: [32]u8
+    while cursor >= 0 && cursor < text.count && text[cursor] != 125 {
+        key := ReadString(text,cursor)
+        if !key.valid { return -1 }
+        count := ReadStringText(text,cursor,decoded[:])
+        cursor = Space(text,key.after)
+        if cursor >= text.count || text[cursor] != 58 { return -1 }
+        cursor = Space(text,cursor+1)
+        if count >= 0 && TextFromBytes(decoded[:count]) == name { result = cursor }
+        cursor = Space(text,ValueEnd(text,cursor,0))
+        if cursor >= text.count || cursor < 0 || text[cursor] == 125 { break }
+        if text[cursor] != 44 { return -1 }
+        cursor = Space(text,cursor+1)
+    }
+    return result
+}
+Response :: (lib: *Store.Library, error: string, reset: bool, message: string, registry: *Access.Registry) -> string {
+    output: JSON.JsonDocument; defer { JSON.JsonReset(*output) }; JSON.JsonSetEraser(*output,Auth.JsonErase)
+    empty := App.Empty(lib,ifx error.count > 0 then "Photos is locked" else message,registry); defer { Auth.ReleaseOwned(empty) }
+    unused JSON.JsonRead(*output,empty,Auth.JsonErase)
+    if reset { unused JSON.JsonSet(*output,output.root,"recovery_reset",JSON.JsonNewInteger(*output,ifx error.count == 0 then 1 else 0)) }
+    if error.count > 0 { unused JSON.JsonSet(*output,output.root,"error",JSON.JsonNewString(*output,error)) }
+    return JSON.JsonWrite(*output,output.root,JSON.JsonCompactStyle(false))
+}
+
+#scope_export
+RecoveryRouteLocked :: (lib: *Store.Library, request: string, config: *Types.Config,
+    registry: *Access.Registry = null) -> string,bool {
+    if lib == null || lib.db == null { return Auth.CloneOwned("{\"error\":\"Photo library is not open\"}"),true }
+    Store.ClearError(lib)
+    if request.count == 0 || request.count > 131072 || !UTF8.Valid(request) ||
+        Space(request,ValueEnd(request,0,0)) != request.count || request[Space(request,0)] != 123 { return Auth.CloneOwned("{\"error\":\"Choose a valid Photos request\"}"),true }
+    action_bytes: [64]u8
+    action_count := ReadStringText(request,Member(request,"action"),action_bytes[:])
+    if action_count < 0 { return "",false }
+    action := TextFromBytes(action_bytes[:action_count])
+    reset := action == "recovery_reset_app" || action == "recovery_reset_hidden"
+    if !reset { return "",false }
+    if Guest.Active(lib) { return Guest.Empty(),true }
+    values: [40001]u8; path: [4097]u8; password: [1025]u8; replacement: [1025]u8
+    app_token: [65]u8; hidden_token: [65]u8
+    defer { Native.Clear(values[:]); Native.Clear(path[:]); Native.Clear(password[:]); Native.Clear(replacement[:]); Native.Clear(app_token[:]); Native.Clear(hidden_token[:]) }
+    count := ReadStringText(request,Member(request,"value"),values[:])
+    malformed := ifx reset then "Choose a recovery file, its password and a new local password" else "Choose a recovery file and its password"
+    if count < 0 { return Response(lib,malformed,reset,"",registry),true }
+    text := TextFromBytes(values[:count]); positions: [3]s32
+    needed: s32 = ifx reset then 3 else 2
+    if !Complete(text) || ArrayPositions(text,Space(text,0),positions[:]) != needed { return Response(lib,malformed,reset,"",registry),true }
+    path_count := ReadStringText(text,positions[0],path[:])
+    password_count := ReadStringText(text,positions[1],password[:])
+    replacement_count: s32
+    if reset { replacement_count = ReadStringText(text,positions[2],replacement[:]) }
+    if path_count < 0 || password_count < 0 || (reset && replacement_count < 0) { return Response(lib,malformed,reset,"",registry),true }
+    app_count := ReadStringText(request,Member(request,"app_lock_token"),app_token[:]); if app_count < 0 { app_count = 0 }
+    hidden_count := ReadStringText(request,Member(request,"vault_token"),hidden_token[:]); if hidden_count < 0 { hidden_count = 0 }
+    error := ResetLocked(lib,config,TextFromBytes(path[:path_count]),password[:password_count],replacement[:replacement_count],
+        ifx action == "recovery_reset_app" then "app" else "hidden",registry)
+    message := ifx action == "recovery_reset_app" then "App password recovered; unlock Photos with your new password" else "Hidden password recovered; unlock again with your new password"
+    return Response(lib,error,reset,message,registry),true
+}
+RecoveryRoute :: (lib: *Store.Library, request: string, config: *Types.Config,
+    registry: *Access.Registry = null) -> string,bool {
+    if !Guest.Enter() { return Auth.CloneOwned("{\"error\":\"Recovery could not finish; existing originals and keys were preserved\"}"),true }
+    defer { Guest.Leave() }
+    response,handled := RecoveryRouteLocked(lib,request,config,registry)
+    return response,handled
+}

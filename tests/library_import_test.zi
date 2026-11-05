@@ -1,0 +1,317 @@
+Import :: #import "library_import";
+LibraryFiles :: #import "library_files";
+Store :: #import "library_store";
+Motion :: #import "live_motion";
+SQL :: #import "sqlite/SQLite";
+Kit :: #import "kit";
+Tree :: #import "std/file_tree_linux";
+Files :: #import "std/file";
+JSON :: #import "std/json_document";
+Timer :: #import "std/timer_linux";
+Float :: #import "std/float_text";
+#import "std/text_buffer"
+#import "std/byte_text_linux"
+using Vectors :: #import "std/vec";
+
+#scope_file
+c :: #system_library "c";
+HeapInfo :: struct { arena: usize; blocks: usize; small: usize; mappings: usize; mapped: usize; unused_high: usize; free_fast: usize; used: usize; free: usize; releasable: usize }
+Heap :: () -> HeapInfo #foreign c "mallinfo2";
+Bytes :: (text: string) -> []u8 {
+    descriptor := cast(*TextDescriptor)*text
+    return BytesFromPointer(descriptor.data,cast(u64)text.count)
+}
+StampCases :: () -> bool {
+    value: s64
+    info: Tree.PathInfo
+    info.modified = 1700000000; info.modified_nanoseconds = 123456789
+    if !Import.MtimeNanoseconds(info,*value) || value != 1700000000123456789 { return false }
+    info.modified = -1; info.modified_nanoseconds = 750000000
+    if !Import.MtimeNanoseconds(info,*value) || value != -250000000 { return false }
+    info.modified = 9223372036; info.modified_nanoseconds = 854775807
+    if !Import.MtimeNanoseconds(info,*value) || value != 9223372036854775807 { return false }
+    info.modified_nanoseconds += 1
+    if Import.MtimeNanoseconds(info,*value) { return false }
+    info.modified = -9223372037; info.modified_nanoseconds = 145224192
+    if !Import.MtimeNanoseconds(info,*value) || value != -9223372036854775807-1 { return false }
+    info.modified_nanoseconds -= 1
+    if Import.MtimeNanoseconds(info,*value) { return false }
+    info.modified = 1; info.modified_nanoseconds = 1000000000
+    return !Import.MtimeNanoseconds(info,*value)
+}
+
+ResetCases :: () -> bool {
+    result: Import.ImportResult
+    defer { Import.ClearImportResult(*result) }
+    for at: 0..31 {
+        if !Import.AddImportFailure(*result,"/synthetic/source 日本語/a.jpg","LibraryError") ||
+            !Import.AddImportFailure(*result,"/synthetic/b.jpg","FolderDiscoveryError") { return false }
+        Import.ClearImportResult(*result)
+    }
+    before := Heap()
+    for at: 0..1999 {
+        if !Import.AddImportFailure(*result,"/synthetic/source 日本語/a.jpg","LibraryError") ||
+            !Import.AddImportFailure(*result,"/synthetic/b.jpg","FolderDiscoveryError") { return false }
+        Import.ClearImportResult(*result)
+    }
+    after := Heap()
+    growth := ifx after.used > before.used then after.used-before.used else 0
+    print("Photos import result: 4000 failure records reset, heap growth % bytes\n",growth)
+    if growth > 8192 || result.failures.count != 0 || result.counters.errors != 0 { return false }
+    if !Import.AddImportFailure(*result,"/synthetic 日本語.jpg","LibraryError") { return false }
+    result.counters.errors = 1; result.complete = true
+    output: Vec(u8)
+    if !Import.ImportResultInto(*output,*result) { return false }
+    Import.ClearImportResult(*result)
+    document: JSON.JsonDocument
+    defer { JSON.JsonReset(*document) }
+    if !JSON.JsonRead(*document,TextView(VecSlice(output,0,output.count))) { return false }
+    failure := JSON.JsonElement(*document,JSON.JsonMember(*document,document.root,"failures"),0)
+    return JSON.JsonIs(*document,JSON.JsonMember(*document,failure,"path"),"/synthetic 日本語.jpg")
+}
+
+ReaderDiagnostic :: (reader: *Import.Reader, stage: string) {
+    text: Vec(u8)
+    if !Import.ReaderErrorInto(*text,reader) { print("Cannot copy diagnostic\n"); return }
+    print("%: %\n",stage,TextView(VecSlice(text,0,text.count)))
+}
+ReaderCases :: (root: string) -> bool {
+    source := Kit.Join(root,"source/photo.jpg")
+    if !Tree.CreateDirectories(Tree.PathParent(source),448) || !Kit.Jpeg(source,24,12,0xa03060) { return false }
+    sidecar := Kit.Join(root,"source/metadata/photo.jpg.json")
+    metadata := "{\"description\":\"Synthetic 日本語\",\"unknown\":{\"integer\":1152921504606846987},\"photoTakenTime\":{\"timestamp\":\"1600000000\"}}"
+    if !LibraryFiles.Atomic(sidecar,Bytes(metadata)) { return false }
+    reader: Import.Reader
+    defer { Import.CloseReader(*reader) }
+    options: LibraryFiles.FileOptions = .{application_root=Tree.WorkingDirectory()}
+    if !Import.StartReader(*reader,options) { ReaderDiagnostic(*reader,"Reader start"); return false }
+    response: Vec(u8)
+    document: JSON.JsonDocument
+    defer { JSON.JsonReset(*document) }
+    if !Import.ReadMetadata(*reader,*response,*document,"sidecar",source) { ReaderDiagnostic(*reader,"Sidecar read"); return false }
+    fields := JSON.JsonMember(*document,document.root,"metadata")
+    if !JSON.JsonIs(*document,JSON.JsonMember(*document,fields,"description"),"Synthetic 日本語") { print("Sidecar fixture: %\n",TextView(VecSlice(response,0,response.count))); return false }
+    mode, modeValid := JSON.JsonInteger(*document,JSON.JsonMember(*document,document.root,"capture_mode"))
+    if !modeValid || mode != 1 { print("Sidecar capture: %\n",TextView(VecSlice(response,0,response.count))); return false }
+    if !Import.ReadMetadata(*reader,*response,*document,"camera",source,1.0,1,1600000000.0) { ReaderDiagnostic(*reader,"Camera read"); return false }
+    width, widthValid := JSON.JsonInteger(*document,JSON.JsonMember(*document,document.root,"width"))
+    height, heightValid := JSON.JsonInteger(*document,JSON.JsonMember(*document,document.root,"height"))
+    takenBytes: Vec(u8)
+    if !JSON.JsonNumberTextInto(*document,JSON.JsonMember(*document,document.root,"taken"),*takenBytes) { return false }
+    taken, takenValid := Float.ParseFloat64(TextView(VecSlice(takenBytes,0,takenBytes.count)))
+    return widthValid && heightValid && takenValid && width == 24 && height == 12 && taken == 1600000000.0 && reader.starts == 1
+}
+
+ReaderFailureCases :: (root: string) -> bool {
+    helperRoot := Kit.Join(root,"helpers")
+    if !Tree.CreateDirectories(helperRoot,448) { return false }
+    helper := Kit.Join(helperRoot,"read_metadata")
+    script := "#!/bin/sh\nexec sleep 5\n"
+    if !LibraryFiles.Atomic(helper,Bytes(script)) || !Tree.SetPathMode(helper,448) { return false }
+    reader: Import.Reader
+    defer { Import.CloseReader(*reader) }
+    options: LibraryFiles.FileOptions = .{application_root=helperRoot,metadata_timeout_ms=50}
+    if !Import.StartReader(*reader,options) { return false }
+    response: Vec(u8)
+    document: JSON.JsonDocument
+    defer { JSON.JsonReset(*document) }
+    before := Timer.MonotonicMilliseconds()
+    if Import.ReadMetadata(*reader,*response,*document,"sidecar","/missing") ||
+        Timer.MonotonicMilliseconds()-before > 3000 || reader.allocation_failed { return false }
+    script = "#!/bin/sh\nwhile IFS= read -r request; do printf '{\"metadata\":{},\"stamp\":\"\",\"capture_mode\":0,\"capture_value\":0}\\n'; done\n"
+    if !LibraryFiles.Atomic(helper,Bytes(script)) || !Tree.SetPathMode(helper,448) ||
+        !Import.ReadMetadata(*reader,*response,*document,"sidecar","/missing") || reader.starts != 2 { return false }
+    Import.CloseReader(*reader)
+    script = "#!/bin/sh\nprintf '[]\\n'\n"
+    if !LibraryFiles.Atomic(helper,Bytes(script)) || !Tree.SetPathMode(helper,448) { return false }
+    return !Import.ReadMetadata(*reader,*response,*document,"sidecar","/missing") && !reader.allocation_failed
+}
+
+Scalar :: (lib: *Store.Library, query: string) -> s64 {
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,query,-1,*statement,null) != SQL.SQLITE_OK { return -1 }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if SQL.SqliteStep(statement) != SQL.SQLITE_ROW { return -1 }
+    return SQL.SqliteColumnInt64(statement,0)
+}
+ResultDiagnostic :: (result: *Import.ImportResult) {
+    output: Vec(u8)
+    if Import.ImportResultInto(*output,result) { print("Import fixture: %\n",TextView(VecSlice(output,0,output.count))) }
+}
+BatchCases :: (root: string) -> bool {
+    source := Kit.Join(root,"batch/source 日本語")
+    if !Tree.CreateDirectories(source,448) { return false }
+    image := Kit.Join(source,"trip.JPG")
+    if !Kit.Jpeg(image,24,12,0xa03060) { return false }
+    sidecar := Kit.Join(source,"metadata/trip.JPG.json")
+    first := "{\"description\":\"Synthetic 日本語\",\"unknown\":{\"integer\":1152921504606846987},\"photoTakenTime\":{\"timestamp\":\"1600000000\"},\"albums\":[\"Takeout 日本語\",\"Auto album\"],\"photosAutoAlbums\":{\" Auto album \":[\"1111111111111111111111111111111111111111111111111111111111111111\"]}}"
+    if !LibraryFiles.Atomic(sidecar,Bytes(first)) ||
+        !LibraryFiles.Atomic(Kit.Join(source,".photos-album.json"),Bytes("{\"name\":\" Favorites \",\"description\":\"Private 日本語\",\"pinned\":true}")) { return false }
+    outside := Kit.Join(root,"batch/outside")
+    if !Tree.CreateDirectories(outside,448) || !Kit.Jpeg(Kit.Join(outside,"excluded.jpg"),24,12,0x208060) ||
+        !LibraryFiles.Atomic(Kit.Join(source,"unsupported.txt"),Bytes("readonly fixture")) { return false }
+    file_link: [4]string = .["ln","-s",image,Kit.Join(source,"link.JPG")]
+    folder_link: [4]string = .["ln","-s",outside,Kit.Join(source,"linked-folder")]
+    pipe: [2]string = .["mkfifo",Kit.Join(source,"pipe.jpg")]
+    if !LibraryFiles.RunHelper(file_link[:],2000) || !LibraryFiles.RunHelper(folder_link[:],2000) ||
+        !LibraryFiles.RunHelper(pipe[:],2000) || !Tree.SetPathMode(image,292) || !Tree.SetPathMode(source,365) { return false }
+    defer { unused Tree.SetPathMode(source,448) }
+    before := Tree.FileSnapshot(image)
+    library := Kit.Library(Kit.Join(root,"batch/library"))
+    lib, error := Store.Open(library)
+    if lib == null || error != "" { return false }
+    defer { Store.Close(lib) }
+    files: LibraryFiles.FileOptions = .{application_root=Tree.WorkingDirectory()}
+    options: Import.ImportOptions = .{files=files,motion=Motion.MotionForImport,motion_context=cast(*void)*files}
+    folders: [1]string = .[source]
+    result: Import.ImportResult
+    defer { Import.ClearImportResult(*result) }
+    if !Import.ImportFolders(lib,folders[:],*result,options) { ResultDiagnostic(*result); return false }
+    if result.counters.added != 1 || result.counters.skipped != 4 || result.counters.errors != 0 || result.counters.warning != 0 || !result.complete {
+        ResultDiagnostic(*result); return false
+    }
+    if !Tree.SameFileSnapshot(before,Tree.FileSnapshot(image)) ||
+        Scalar(lib,"SELECT count(*) FROM photos WHERE favorite=1 AND caption='Synthetic 日本語' AND width=24 AND height=12 AND taken=1600000000 AND extension='.jpg' AND json_extract(metadata,'$.unknown.integer')=1152921504606846987") != 1 ||
+        Scalar(lib,"SELECT count(*) FROM albums WHERE name='Favorites' AND description='Private 日本語' AND pinned=1") != 1 ||
+        Scalar(lib,"SELECT json_extract(value,'$.added') FROM settings WHERE key='import'") != 1 ||
+        Scalar(lib,"SELECT json_array_length(value) FROM settings WHERE key='import_failures'") != 0 { return false }
+    if Scalar(lib,"SELECT count(*) FROM photos p,json_each(p.edits,'$.auto_albums') provenance JOIN albums a ON a.id=provenance.key WHERE a.name='Auto album' AND json_extract(provenance.value,'$[0]')='1111111111111111111111111111111111111111111111111111111111111111'") != 1 ||
+        Scalar(lib,"SELECT count(*) FROM photos WHERE json_type(metadata,'$.photosAutoAlbums') IS NULL") != 1 { return false }
+    mtime: s64
+    if !Import.MtimeNanoseconds(before,*mtime) || Scalar(lib,"SELECT mtime FROM sources") != mtime { return false }
+    if !Import.ImportFolders(lib,folders[:],*result,options) || result.counters.unchanged != 1 || result.counters.added != 0 || result.counters.warning != 0 {
+        ResultDiagnostic(*result); return false
+    }
+    duplicate_root := Kit.Join(root,"batch/duplicates")
+    duplicate := Kit.Join(duplicate_root,"same.jpeg")
+    if !Tree.CreateDirectories(duplicate_root,448) || !Tree.CopyFile(image,duplicate) ||
+        !LibraryFiles.Atomic(Kit.Join(duplicate_root,"same.jpeg.json"),Bytes("{\"albums\":[\"Takeout 日本語\"],\"takeoutUnknown\":{\"large\":9223372036854775808123,\"null\":null,\"unicode\":\"旅行\"}}")) { return false }
+    folders[0] = duplicate_root
+    if !Import.ImportFolders(lib,folders[:],*result,options) || result.counters.merged != 1 || result.counters.added != 0 ||
+        Scalar(lib,"SELECT count(*) FROM photos") != 1 || Scalar(lib,"SELECT count(*) FROM sources") != 2 ||
+        Scalar(lib,"SELECT count(*) FROM photos,json_each(photos.albums) WHERE value='Takeout 日本語'") != 1 ||
+        Scalar(lib,"SELECT count(*) FROM photos WHERE instr(metadata,'9223372036854775808123')>0 AND json_extract(metadata,'$.takeoutUnknown.unicode')='旅行' AND caption='Synthetic 日本語'") != 1 {
+        ResultDiagnostic(*result); return false
+    }
+    folders[0] = source
+    second := "{\"description\":\"Changed sidecar\",\"unknown\":{\"integer\":1152921504606846989},\"photoTakenTime\":{\"timestamp\":\"1600000001\"}}"
+    if !LibraryFiles.Atomic(sidecar,Bytes(second)) || !Import.ImportFolders(lib,folders[:],*result,options) || result.counters.merged != 1 ||
+        Scalar(lib,"SELECT count(*) FROM photos WHERE caption='Synthetic 日本語' AND json_extract(metadata,'$.unknown.integer')=1152921504606846989 AND taken=1600000001") != 1 {
+        ResultDiagnostic(*result); return false
+    }
+    if !LibraryFiles.Atomic(sidecar,Bytes("{\"photosAutoAlbums\":{\"Auto album\":[\"invalid\"]}}")) ||
+        !Import.ImportFolders(lib,folders[:],*result,options) || result.counters.warning != 1 || result.counters.errors != 0 { return false }
+    if !LibraryFiles.Atomic(sidecar,Bytes("{")) || !Import.ImportFolders(lib,folders[:],*result,options) || result.counters.warning != 1 || result.counters.errors != 0 {
+        ResultDiagnostic(*result); return false
+    }
+    if SQL.SqliteExecText(lib.db,"BEGIN") != SQL.SQLITE_OK { return false }
+    refused := !Import.ImportFile(lib,image,source,*result,options) && !SQL.SqliteGetAutocommit(lib.db)
+    unused SQL.SqliteExecText(lib.db,"ROLLBACK")
+    if !refused { return false }
+    folders[0] = library
+    if Import.ImportFolders(lib,folders[:],*result,options) { return false }
+    folders[0] = Tree.PathParent(library)
+    if Import.ImportFolders(lib,folders[:],*result,options) { return false }
+    folders[0] = Kit.Join(library,"originals")
+    return !Import.ImportFolders(lib,folders[:],*result,options) && !result.complete &&
+        Scalar(lib,"SELECT count(*) FROM photos") == 1 && Tree.SameFileSnapshot(before,Tree.FileSnapshot(image))
+}
+
+CopyHelper :: (options: LibraryFiles.FileOptions, root: string, name: string, folder: string) -> bool {
+    program: Vec(u8)
+    if !LibraryFiles.HelperProgramInto(*program,options,name,folder) { return false }
+    target := Kit.Join(root,name)
+    return Tree.CopyFile(TextView(VecSlice(program,0,program.count)),target) && Tree.SetPathMode(target,448)
+}
+Script :: (path: string, text: string) -> bool {
+    return LibraryFiles.Atomic(path,Bytes(text)) && Tree.SetPathMode(path,448)
+}
+FailureCases :: (root: string) -> bool {
+    source := Kit.Join(root,"failed/source")
+    helper_root := Kit.Join(root,"failed/helpers")
+    if !Tree.CreateDirectories(source,448) || !Tree.CreateDirectories(helper_root,448) { return false }
+    trusted: LibraryFiles.FileOptions = .{application_root=Tree.WorkingDirectory()}
+    if !CopyHelper(trusted,helper_root,"read_metadata","read-metadata") ||
+        !CopyHelper(trusted,helper_root,"import_original","import-original") ||
+        !CopyHelper(trusted,helper_root,"motion_photo","motion-photo") { return false }
+    writer := Kit.Join(helper_root,"import_metadata")
+    if !Script(writer,"#!/bin/sh\ncat >/dev/null\nexec sleep 5\n") { return false }
+    library := Kit.Library(Kit.Join(root,"failed/library"))
+    lib, error := Store.Open(library)
+    if lib == null || error != "" { return false }
+    defer { Store.Close(lib) }
+    first := Kit.Join(source,"one.jpg")
+    second := Kit.Join(source,"two.jpg")
+    third := Kit.Join(source,"three.jpg")
+    if !Kit.Jpeg(first,24,12,0xc04080) || !Kit.Jpeg(second,24,12,0x402080) || !Kit.Jpeg(third,24,12,0x203040) { return false }
+    snapshot := Tree.FileSnapshot(first)
+    options: Import.ImportOptions = .{files=.{application_root=helper_root},merge_timeout_ms=50}
+    result: Import.ImportResult
+    defer { Import.ClearImportResult(*result) }
+    started := Timer.MonotonicMilliseconds()
+    if !Import.ImportFile(lib,first,source,*result,options) || result.counters.errors != 1 || result.failures.count != 1 ||
+        Timer.MonotonicMilliseconds()-started > 3000 || Scalar(lib,"SELECT count(*) FROM photos") != 0 ||
+        Scalar(lib,"SELECT count(*) FROM sources") != 0 { ResultDiagnostic(*result); return false }
+    options.merge_timeout_ms = 2000
+    if !CopyHelper(trusted,helper_root,"import_metadata","import-metadata") ||
+        !Import.ImportFile(lib,first,source,*result,options) || result.counters.added != 1 || Scalar(lib,"SELECT count(*) FROM photos") != 1 ||
+        !Tree.SameFileSnapshot(snapshot,Tree.FileSnapshot(first)) { ResultDiagnostic(*result); return false }
+    if !Script(writer,"#!/bin/sh\ncat >/dev/null\nprintf '[]\\n'\n") { return false }
+    for at: 0..15 {
+        if !Import.ImportFile(lib,second,source,*result,options) || result.counters.errors != 1 { ResultDiagnostic(*result); return false }
+        Import.ClearImportResult(*result)
+    }
+    before := Heap()
+    for at: 0..63 {
+        if !Import.ImportFile(lib,second,source,*result,options) || result.counters.errors != 1 { return false }
+        Import.ClearImportResult(*result)
+    }
+    after := Heap()
+    growth := ifx after.used > before.used then after.used-before.used else 0
+    print("Photos failed import/retry: 64 actual rejected writer requests, retained heap growth % bytes\n",growth)
+    if Scalar(lib,"SELECT count(*) FROM photos") != 1 || Scalar(lib,"SELECT count(*) FROM sources") != 1 { return false }
+    if !Script(writer,"#!/bin/sh\ncat >/dev/null\nhead -c 65537 /dev/zero\nexec sleep 60\n") { return false }
+    options.merge_timeout_ms = 2000
+    started = Timer.MonotonicMilliseconds()
+    if !Import.ImportFile(lib,second,source,*result,options) || result.counters.errors != 1 || Timer.MonotonicMilliseconds()-started > 3000 { return false }
+    if !CopyHelper(trusted,helper_root,"import_metadata","import-metadata") ||
+        !Import.ImportFile(lib,second,source,*result,options) || result.counters.added != 1 { ResultDiagnostic(*result); return false }
+    if SQL.SqliteExecText(lib.db,"CREATE TRIGGER reject_source BEFORE INSERT ON sources BEGIN SELECT RAISE(ABORT,'synthetic source failure'); END") != SQL.SQLITE_OK { return false }
+    if !Import.ImportFile(lib,third,source,*result,options) || result.counters.errors != 1 ||
+        Scalar(lib,"SELECT count(*) FROM photos") != 2 || Scalar(lib,"SELECT count(*) FROM sources") != 2 { return false }
+    if SQL.SqliteExecText(lib.db,"DROP TRIGGER reject_source") != SQL.SQLITE_OK ||
+        !Import.ImportFile(lib,third,source,*result,options) || result.counters.added != 1 ||
+        Scalar(lib,"SELECT count(*) FROM photos") != 3 { return false }
+    if !Files.RemoveFile(Kit.Join(helper_root,"motion_photo")) || SQL.SqliteExecText(lib.db,"DELETE FROM motion_scans") != SQL.SQLITE_OK ||
+        !Import.ImportFile(lib,first,source,*result,options) || result.counters.warning != 1 ||
+        Scalar(lib,"SELECT count(*) FROM photos") != 3 || !CopyHelper(trusted,helper_root,"motion_photo","motion-photo") { return false }
+    walker := Kit.Join(helper_root,"import_folders")
+    if !Script(walker,"#!/bin/sh\nprintf '{\"kind\":\"file\",\"path\":\"/outside-source.jpg\"}\\n'\n") { return false }
+    folders: [1]string = .[source]
+    if Import.ImportFolders(lib,folders[:],*result,options) || result.complete || Scalar(lib,"SELECT count(*) FROM photos") != 3 { return false }
+    if !Script(walker,"#!/bin/sh\nexec sleep 5\n") { return false }
+    options.discovery_timeout_ms = 50
+    started = Timer.MonotonicMilliseconds()
+    if Import.ImportFolders(lib,folders[:],*result,options) || Timer.MonotonicMilliseconds()-started > 3000 { return false }
+    if !Script(walker,"#!/bin/sh\nhead -c 65537 /dev/zero\nexec sleep 60\n") { return false }
+    options.discovery_timeout_ms = 2000
+    return !Import.ImportFolders(lib,folders[:],*result,options) && !result.complete &&
+        Scalar(lib,"SELECT count(*) FROM photos") == 3 && Tree.SameFileSnapshot(snapshot,Tree.FileSnapshot(first)) && growth <= 8192
+}
+
+#program_export
+main :: () -> s32 {
+    relative := Kit.TempDirectory("library-import")
+    if relative == "" { return 1 }
+    defer { unused Kit.Cleanup(relative) }
+    root := Tree.ResolvePath(relative)
+    if root == "" { return 1 }
+    if !Kit.Expect(StampCases(),"exact signed source mtime nanoseconds and overflow") { return 2 }
+    if !Kit.Expect(ResetCases(),"owned nested failure buffers reset without heap growth") { return 5 }
+    if !Kit.Expect(ReaderCases(root),"one native metadata reader for sidecar and camera with exact capture precedence") { return 3 }
+    if !Kit.Expect(ReaderFailureCases(root),"reader timeout/reap/later restart and response validation") { return 4 }
+    if !Kit.Expect(BatchCases(root),"read-only batch import, album/sidecar/camera, exact cache, merge/warnings and transaction/source boundaries") { return 6 }
+    if !Kit.Expect(FailureCases(root),"actual writer stall/flood/malformed replies, cleanup, rollback/retry and discovery boundaries") { return 7 }
+    print("Photos native import: reader/lifetimes and integrated batch cases passed\n")
+    return 0
+}

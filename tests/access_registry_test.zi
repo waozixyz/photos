@@ -1,0 +1,69 @@
+Access :: #import "access_registry";
+Kit :: #import "kit";
+Clock :: #import "std/timer_linux";
+Threads :: #import "std/thread_linux";
+using Vectors :: #import "std/vec";
+
+Parallel :: struct { registry: *Access.Registry; tokens: [16]string; good: bool }
+Run :: (raw: *void) {
+    job := cast(*Parallel)raw; job.good = true
+    for i: 0..15 {
+        token,error := Access.Grant("parallel",Access.HIDDEN,"",job.registry)
+        job.tokens[i] = token
+        if error.count > 0 || Access.Deadline("parallel",Access.HIDDEN,token,"",false,job.registry) == 0 { job.good = false }
+    }
+}
+main :: () -> s32 {
+    registry: Access.Registry
+    if !Access.Initialize(*registry,500,80) { return 1 }
+    defer { Access.Close(*registry) }
+    token,error := Access.Grant("root-a",Access.HIDDEN,"",*registry)
+    if !Kit.Expect(error.count == 0 && token.count == 64,"native random token") { return 2 }
+    if !Kit.Expect(Access.Deadline("root-b",Access.HIDDEN,token,"",false,*registry) == 0 &&
+        Access.Deadline("root-a",Access.APP,token,"",false,*registry) == 0,"root and kind isolation") { return 3 }
+    stamp := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    changed := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    app,app_error := Access.Grant("root-a",Access.APP,stamp,*registry)
+    if app_error.count > 0 || Access.Deadline("root-a",Access.APP,app,stamp,false,*registry) == 0 { return 4 }
+    if Access.Deadline("root-a",Access.APP,app,changed,false,*registry) != 0 || Access.Deadline("root-a",Access.APP,app,stamp,false,*registry) != 0 { return 5 }
+    for i: 0..4 { if Access.CheckAttempts("root-a",Access.HIDDEN,*registry).count > 0 || Access.FailedAttempt("root-a",Access.HIDDEN,*registry).count > 0 { return 6 } }
+    if !Kit.Equal(Access.CheckAttempts("root-a",Access.HIDDEN,*registry),"Too many attempts; wait one minute before trying again","five failures") { return 7 }
+    if Access.CheckAttempts("root-b",Access.HIDDEN,*registry).count > 0 || Access.CheckAttempts("root-a",Access.APP,*registry).count > 0 { return 8 }
+    unused Clock.SleepMilliseconds(90)
+    if Access.CheckAttempts("root-a",Access.HIDDEN,*registry).count > 0 { return 9 }
+    Access.Reset(*registry)
+    if Access.Deadline("root-a",Access.HIDDEN,token,"",false,*registry) != 0 { return 10 }
+    // Parallel grants share the real registry mutex, not a test stub.
+    jobs: [4]Parallel; threads: [4]Threads.Thread
+    procedure: Threads.ThreadProcedure = Run
+    for i: 0..3 { jobs[i].registry = *registry; if !Threads.ThreadStart(*threads[i],procedure,cast(*void)*jobs[i]) { return 11 } }
+    for i: 0..3 { Threads.ThreadWait(*threads[i]); if !jobs[i].good { return 12 } }
+    for i: 0..3 { for j: 0..15 { for k: 0..3 { for l: 0..15 { if (i != k || j != l) && jobs[i].tokens[j] == jobs[k].tokens[l] { return 13 } } } } }
+    Access.Reset(*registry)
+    keep: string
+    for i: 0..255 { next,next_error := Access.Grant("capacity",Access.HIDDEN,"",*registry); if next_error.count > 0 { return 14 }; if i == 0 { keep = next } }
+    overflow,overflow_error := Access.Grant("capacity",Access.HIDDEN,"",*registry)
+    if overflow_error.count == 0 || Access.Deadline("capacity",Access.HIDDEN,keep,"",false,*registry) == 0 { return 15 }
+    Access.Revoke("capacity",Access.HIDDEN,*registry)
+    if Access.Deadline("capacity",Access.HIDDEN,keep,"",false,*registry) != 0 { return 16 }
+    // A malformed transport frame invalidates every outstanding session.
+    live,live_error := Access.Grant("protocol",Access.HIDDEN,"",*registry)
+    header: [100]u8; reply: [41]u8; header[0] = 2
+    if Access.Handle(*registry,header[:],reply[:]) || Access.Deadline("protocol",Access.HIDDEN,live,"",false,*registry) != 0 { return 17 }
+    Access.Close(*registry)
+    if !Access.Initialize(*registry,70,70) { return 18 }
+    expiring,expiry_error := Access.Grant("expiry",Access.HIDDEN,"",*registry)
+    initial := Access.Deadline("expiry",Access.HIDDEN,expiring,"",false,*registry)
+    unused Clock.SleepMilliseconds(30)
+    renewed := Access.Deadline("expiry",Access.HIDDEN,expiring,"",true,*registry)
+    if expiry_error.count > 0 || renewed <= initial { return 19 }
+    unused Clock.SleepMilliseconds(80)
+    if Access.Deadline("expiry",Access.HIDDEN,expiring,"",true,*registry) != 0 { return 20 }
+    Access.Close(*registry)
+    if !Access.Initialize(*registry) || Access.Deadline("expiry",Access.HIDDEN,expiring,"",false,*registry) != 0 { return 21 }
+    shared,shared_error := Access.Grant("synthetic-default-registry",Access.HIDDEN)
+    if shared_error.count > 0 || Access.Deadline("synthetic-default-registry",Access.HIDDEN,shared) == 0 { return 22 }
+    Access.Revoke("synthetic-default-registry",Access.HIDDEN)
+    print("Photos access registry: isolation, stamps, attempts, capacity, parallelism, expiry, renewal and restart passed\n")
+    return 0
+}

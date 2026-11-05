@@ -1,0 +1,275 @@
+// Register Photos on an existing local-only Daochi node. Operator credentials
+// are read only after a missing registration; no shell or remote transport.
+#scope_module
+Transport :: #import "sync_http";
+Frames :: #import "sync_frame";
+Policy :: #import "node_policy";
+Wire :: #import "sync_crypto";
+Http :: #import "std/net_http";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+UTF8 :: #import "std/utf8";
+#import "std/byte_text_linux"
+#import "std/json_scan"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+c :: #system_library "c";
+Environment :: (name: *u8) -> *u8 #foreign c "getenv";
+Write :: (fd: s32,bytes: *u8,count: usize) -> s64 #foreign c "write";
+Release :: (memory: *void) #foreign c "free";
+
+#scope_export
+DefaultOrigin :: "http://127.0.0.1:18080";
+Registration :: "{\"app_id\":\"photos\",\"display_name\":\"Photos\",\"status\":\"active\",\"app_schema_version\":1,\"description\":\"Private local-only Photos library\",\"collections\":[{\"collection_prefix\":\"private.photos.v1.records.*\",\"visibility\":\"private\",\"schema_version\":1}],\"capabilities\":[\"photos.local-sync\",\"photos.encrypted-originals\"]}";
+Result :: struct { node_id: [65]u8 }
+Options :: struct { origin: string; environment: string; help: bool }
+
+#scope_module
+Bytes :: (text: string) -> []u8 {
+    descriptor:=cast(*TextDescriptor)*text; return BytesFromPointer(descriptor.data,cast(u64)text.count)
+}
+View :: (out: *Vec(u8)) -> string { return TextFromBytes(Wire.OutputBytes(out)) }
+Whitespace :: (byte: u8) -> bool { return byte==32 || byte==9 || byte==13 }
+Trim :: (text: string) -> string {
+    first: s64; last:=text.count
+    while first<last && Whitespace(text[first]) { first+=1 }
+    while last>first && Whitespace(text[last-1]) { last-=1 }
+    return text[first:last]
+}
+ReadPrivate :: (path: string,out: *Vec(u8),limit: s64) -> bool {
+    Wire.ClearOutput(out)
+    for byte: path { if byte==0 { return false } }
+    input:=Files.OpenRead(path)
+    if !input.valid { return false }; defer { unused Files.CloseFile(input) }
+    size:=Files.FileSize(input)
+    if size<0 || size>limit || !Wire.PrepareOutput(out,size) { return false }
+    buffer:=Wire.OutputBytes(out); at: s64
+    while at<size {
+        count:=Files.ReadAt(input,buffer[at:],at)
+        if count<=0 { Wire.ClearOutput(out); return false }; at+=count
+    }
+    extra: [1]u8
+    if Files.ReadAt(input,extra[:],size)!=0 || !UTF8.Valid(View(out)) { Wire.ClearOutput(out); return false }
+    return true
+}
+// One POSIX shell word, parsed as data. Quotes/backslashes work, variables and
+// commands remain literal, and extra words/operators are never evaluated.
+TokenByte :: (out: *Vec(u8),byte: u8) -> bool {
+    if out.count>=8191 || !VecPush(<<out,byte) { Wire.ClearOutput(out); return false }
+    return true
+}
+Word :: (text: string,out: *Vec(u8)) -> bool {
+    Wire.ClearOutput(out)
+    // Reserve only after wiping the previous allocation. No token-bearing
+    // allocation may be relocated as a later byte is appended.
+    if out==null || !VecReserve(<<out,8191) { return false }
+    value:=Trim(text); quote: u8; at: s64; ended:=false
+    while at<value.count {
+        byte:=value[at]; at+=1
+        if quote==0 && Whitespace(byte) { ended=true; break }
+        if byte<32 || byte>126 { Wire.ClearOutput(out); return false }
+        if quote==39 {
+            if byte==39 { quote=0 } else if !TokenByte(out,byte) { return false }
+        } else if byte==92 {
+            if at>=value.count { Wire.ClearOutput(out); return false }
+            next:=value[at]; at+=1
+            if next<32 || next>126 { Wire.ClearOutput(out); return false }
+            if quote==34 && next!=34 && next!=92 && next!=36 && next!=96 && !TokenByte(out,byte) { return false }
+            if !TokenByte(out,next) { return false }
+        } else if quote==34 {
+            if byte==34 { quote=0 } else if !TokenByte(out,byte) { return false }
+        } else if byte==34 || byte==39 { quote=byte }
+        else if !TokenByte(out,byte) { return false }
+    }
+    if quote!=0 { Wire.ClearOutput(out); return false }
+    if ended {
+        while at<value.count && Whitespace(value[at]) { at+=1 }
+        if at<value.count && value[at]!=35 { Wire.ClearOutput(out); return false }
+    }
+    return true
+}
+Credentials :: (environment: string,port: u16,out: *Vec(u8)) -> string {
+    Wire.ClearOutput(out)
+    file: Vec(u8); parsed: Vec(u8)
+    defer { Wire.ClearOutput(*file); Wire.ClearOutput(*parsed) }
+    if environment=="" || !ReadPrivate(environment,*file,65536) { return "Local node operator authorization is unavailable" }
+    text:=View(*file); at: s64
+    while at<text.count {
+        end:=at; while end<text.count && text[end]!=10 { end+=1 }
+        line:=Trim(text[at:end]); at=end+1
+        separator: s64=-1
+        for index: 0..line.count-1 { if line[index]==61 { separator=index; break } }
+        if separator<0 { continue }
+        name:=Trim(line[:separator])
+        if name!="DAOCHI_ADMIN_TOKEN" && name!="DAOCHI_BASE_URL" && name!="DAOCHI_ADDR" { continue }
+        if !Word(line[separator+1:],*parsed) { return "Malformed local node operator authorization" }
+        if name=="DAOCHI_ADMIN_TOKEN" {
+            if !Wire.PrepareOutput(out,parsed.count) { return "Could not read local node operator authorization" }
+            target:=Wire.OutputBytes(out); source:=Wire.OutputBytes(*parsed)
+            for index: 0..source.count-1 { target[index]=source[index] }
+        } else if parsed.count>0 {
+            declared: Vec(u8)
+            if name=="DAOCHI_ADDR" { BuilderPrint(*declared,"http://%",View(*parsed)) }
+            else { BuilderPrint(*declared,"%",View(*parsed)) }
+            declaredPort,error:=LoopbackPort(View(*declared))
+            if error!="" || declaredPort!=port { return "Node environment does not match the selected loopback origin" }
+        }
+    }
+    if out.count==0 {
+        // A named environment chooses its own sibling fallback. An override
+        // must never silently borrow credentials from another node's home dir.
+        fallback:=Tree.JoinPath(Tree.PathParent(environment),"admin-token")
+        descriptor:=cast(*TextDescriptor)*fallback
+        defer { Release(cast(*void)descriptor.data) }
+        if !ReadPrivate(fallback,*parsed,8192) { return "Local node operator authorization is unavailable" }
+        token:=Trim(View(*parsed))
+        // strip() also removes the normal final newline in a token file.
+        end:=token.count
+        while end>0 && (token[end-1]==10 || Whitespace(token[end-1])) { end-=1 }
+        first: s64
+        while first<end && (token[first]==10 || Whitespace(token[first])) { first+=1 }
+        token=token[first:end]
+        if token.count<1 || token.count>=8192 || !Wire.PrepareOutput(out,token.count) { return "Local node operator authorization is unavailable" }
+        target:=Wire.OutputBytes(out)
+        for index: 0..token.count-1 {
+            if token[index]<32 || token[index]>126 { Wire.ClearOutput(out); return "Malformed local node operator authorization" }
+            target[index]=token[index]
+        }
+    }
+    if out.count==0 { return "Local node operator authorization is unavailable" }
+    return ""
+}
+Document :: (json: string,names: []string,positions: []s32) -> bool {
+    if json.count<2 || !UTF8.Valid(json) { return false }
+    at:=Space(json,0); end:=ValueEnd(json,at,0)
+    return at>=0 && at<json.count && json[at]==123 && end>=0 && Space(json,end)==json.count && Policy.Fields(json,at,names,positions)
+}
+Request :: (port: u16,path: string) -> Frames.SyncResponse,string {
+    empty: []u8
+    response,error:=Request(port,path,1,empty)
+    return response,error
+}
+Request :: (port: u16,path: string,method: u8,token: []u8) -> Frames.SyncResponse,string {
+    frame: Frames.SyncFrame
+    frame.version=1; frame.port=port; frame.path=path; frame.method=method; frame.response_limit=1048576; frame.timeout_ms=60000
+    headers: [2]Http.HttpHeader
+    if method==2 {
+        frame.body=Bytes(Registration)
+        headers[0].name="Content-Type"; headers[0].value="application/json"
+        headers[1].name="X-Daochi-Admin"; headers[1].value=TextFromBytes(token)
+        frame.headers=headers[:]
+    }
+    response,error:=Transport.HttpRequest(frame)
+    return response,error
+}
+App :: (json: string) -> string {
+    names: [2]string=.{"app_id","status"}; positions: [2]s32
+    if !Document(json,names[:],positions[:]) { return "Invalid Photos app registration response" }
+    id: [33]u8; status: [33]u8
+    idCount:=ReadStringText(json,positions[0],id[:]); statusCount:=ReadStringText(json,positions[1],status[:])
+    if idCount!=6 || TextFromBytes(id[:idCount])!="photos" || statusCount<1 { return "Invalid Photos app registration response" }
+    if TextFromBytes(status[:statusCount])!="active" { return "Existing Photos registration is inactive; refusing to overwrite" }
+    return ""
+}
+
+#scope_export
+// Numeric loopback only. Trailing slashes retain the old CLI's normalization;
+// only the parsed port reaches native HTTP, never an untrusted origin string.
+LoopbackPort :: (origin: string) -> u16,string {
+    end:=origin.count
+    while end>0 && origin[end-1]==47 { end-=1 }
+    value:=origin[:end]; prefix:="http://127.0.0.1:"
+    if value.count<=prefix.count || value[:prefix.count]!=prefix { return 0,"Photos provisioning requires a numeric loopback node origin" }
+    port: s64
+    for byte: value[prefix.count:] {
+        if byte<48 || byte>57 { return 0,"Photos provisioning requires a numeric loopback node origin" }
+        port=port*10+cast(s64)byte-48
+        if port>65535 { return 0,"Invalid Photos loopback node port" }
+    }
+    if port<1 { return 0,"Invalid Photos loopback node port" }; return cast(u16)port,""
+}
+// RESULT is optional caller-owned public output, cleared on failure. Existing
+// active registration performs no credential read or POST. Token storage is
+// owned only within this call, wiped on every return, and never printed.
+Provision :: (origin: string,environment: string,result: *Result = null) -> bool,string {
+    if result!=null { result.* = .{} }
+    port,originError:=LoopbackPort(origin)
+    if originError!="" { return false,originError }
+    node,nodeError:=Request(port,"/api/v1/node")
+    defer { Transport.ClearResponse(*node) }
+    if nodeError!="" { return false,nodeError }
+    json:=TextFromBytes(node.body); names: [1]string=.{"node_id"}; positions: [1]s32
+    identity: [65]u8; pin: [32]u8
+    if !Document(json,names[:],positions[:]) || ReadStringText(json,positions[0],identity[:])!=64 { return false,"Malformed local node identity or replication policy" }
+    digits:="0123456789abcdef"
+    for index: 0..31 {
+        high: s32=-1; low: s32=-1
+        for nibble: 0..15 {
+            if identity[index*2]==digits[nibble] { high=cast(s32)nibble }
+            if identity[index*2+1]==digits[nibble] { low=cast(s32)nibble }
+        }
+        if high<0 || low<0 { return false,"Malformed local node identity or replication policy" }
+        pin[index]=cast(u8)(high*16+low)
+    }
+    policy:=Policy.Check(json,pin[:])
+    if policy==7 { return false,"Outward Photos replication must be disabled before registration" }
+    if policy!=0 { return false,"Malformed local node identity or replication policy" }
+    app,appError:=Request(port,"/api/v1/apps/photos")
+    defer { Transport.ClearResponse(*app) }
+    if app.status==404 && app.code==0 {
+        token: Vec(u8); defer { Wire.ClearOutput(*token) }
+        credentialError:=Credentials(environment,port,*token)
+        if credentialError!="" { return false,credentialError }
+        created,createError:=Request(port,"/api/v1/apps",2,Wire.OutputBytes(*token))
+        defer { Transport.ClearResponse(*created) }
+        if createError!="" { return false,createError }
+        validationError:=App(TextFromBytes(created.body))
+        if validationError!="" { return false,validationError }
+    } else {
+        if appError!="" { return false,appError }
+        validationError:=App(TextFromBytes(app.body))
+        if validationError!="" { return false,validationError }
+    }
+    if result!=null { for index: 0..63 { result.node_id[index]=identity[index] } }
+    return true,""
+}
+ParseArgs :: (argc: s32,argv: **u8,defaultEnvironment: string,options: *Options) -> bool,string {
+    if options==null { return false,"Invalid Photos provisioning options" }
+    options.* = .{}; options.origin=DefaultOrigin; options.environment=defaultEnvironment
+    at: s32=1
+    while at<argc {
+        argument:=TextFromCString(argv[at]); at+=1
+        if argument=="--help" || argument=="-h" { options.help=true; return true,"" }
+        if argument=="--origin" || argument=="--env" {
+            if at>=argc { return false,"Supply a value for --origin or --env" }
+            value:=TextFromCString(argv[at]); at+=1
+            if argument=="--origin" { options.origin=value } else { options.environment=value }
+        } else if argument.count>=9 && argument[:9]=="--origin=" { options.origin=argument[9:] }
+        else if argument.count>=6 && argument[:6]=="--env=" { options.environment=argument[6:] }
+        else { return false,"Unknown Photos provisioning option" }
+    }
+    return true,""
+}
+main :: (argc: s32,argv: **u8) -> s32 {
+    homeName: [5]u8=.{72,79,77,69,0}; environment: Vec(u8)
+    home:=TextFromCString(Environment(*homeName[0]))
+    if home!="" { BuilderPrint(*environment,"%/daochi-local/daochi.env",home) }
+    options: Options
+    parsed,error:=ParseArgs(argc,argv,View(*environment),*options)
+    if parsed && options.help {
+        print("Register Photos on an existing local-only Daochi node.\nUsage: provision_node [--origin http://127.0.0.1:18080] [--env PATH]\nDefaults: numeric loopback port 18080; ~/daochi-local/daochi.env.\n")
+        return 0
+    }
+    if !parsed {
+        message: Vec(u8); BuilderPrint(*message,"%\n",error); bytes:=Wire.OutputBytes(*message)
+        unused Write(2,*bytes[0],cast(usize)bytes.count); return 2
+    }
+    result: Result
+    success,provisionError:=Provision(options.origin,options.environment,*result)
+    if !success {
+        message: Vec(u8); BuilderPrint(*message,"%\n",provisionError); bytes:=Wire.OutputBytes(*message)
+        unused Write(2,*bytes[0],cast(usize)bytes.count); return 1
+    }
+    print("{\"node_id\":\"%\",\"app_id\":\"photos\",\"local_only\":true}\n",TextUntilNul(result.node_id[:]))
+    return 0
+}

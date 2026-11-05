@@ -1,0 +1,495 @@
+// Photos owns schema and storage policy; SQLite and JSON stay canonical libraries.
+SQL :: #import "sqlite/SQLite";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+JSON :: #import "std/json_document";
+Float :: #import "std/float_text";
+UTF8 :: #import "std/utf8";
+Crypto :: #import "crypto/sha256";
+Clock :: #import "std/date_time_linux";
+#import "std/c_string"
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_export
+Library :: struct {
+    root: string
+    db: *void
+    // Borrowed until the next operation; consumers use SetError/ClearError.
+    error: string
+    // Only these allocations belong to the handle. Public strings may also
+    // contain literals or caller views, which Close must never free.
+    root_allocation: *u8
+    error_allocation: *u8
+}
+
+PhotoRow :: struct {
+    id: string
+    name: string
+    extension: string
+    kind: string
+    size: s64
+    taken: float64
+    width: s32
+    height: s32
+    metadata: string
+    albums: string
+    favorite: bool
+    hidden: bool
+    archived: bool
+    // A nonzero trash timestamp is persisted, rather than a boolean flag.
+    trashed: s64
+    caption: string
+    tags: string
+    updated: float64
+    dirty: bool
+    manifest: string
+    edits: string
+    // Private ownership tokens recorded only by library_files.Photo. Row copies
+    // borrow these fields; only the original owner calls ClearPhoto.
+    photo_allocations: [10]*u8
+}
+
+#scope_file
+c :: #system_library "c";
+Allocate :: (count: usize, size: usize) -> *void #foreign c "calloc";
+Release :: (memory: *void) #foreign c "free";
+Environment :: (name: *u8) -> *u8 #foreign c "getenv";
+Schema :: "\n            \n            CREATE TABLE IF NOT EXISTS photos (\n                id TEXT PRIMARY KEY, name TEXT NOT NULL, extension TEXT NOT NULL,\n                kind TEXT NOT NULL, size INTEGER NOT NULL, taken REAL NOT NULL,\n                width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0,\n                metadata TEXT NOT NULL, albums TEXT NOT NULL,\n                favorite INTEGER NOT NULL DEFAULT 0, hidden INTEGER NOT NULL DEFAULT 0,\n                archived INTEGER NOT NULL DEFAULT 0,\n                trashed INTEGER NOT NULL DEFAULT 0, caption TEXT NOT NULL DEFAULT '',\n                tags TEXT NOT NULL DEFAULT '', updated REAL NOT NULL,\n                dirty INTEGER NOT NULL DEFAULT 1, manifest TEXT NOT NULL DEFAULT '{}');\n            CREATE INDEX IF NOT EXISTS photo_dates ON photos(taken DESC, id);\n            CREATE TABLE IF NOT EXISTS sources (\n                path TEXT PRIMARY KEY, size INTEGER, mtime INTEGER,\n                meta_stamp TEXT, photo_id TEXT REFERENCES photos(id));\n            CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);\n            CREATE TABLE IF NOT EXISTS motion_scans (\n                photo_id TEXT PRIMARY KEY, reader_version INTEGER NOT NULL);\n            CREATE TABLE IF NOT EXISTS semantic_embeddings (\n                photo_id TEXT PRIMARY KEY, model TEXT NOT NULL,\n                embedding BLOB, error TEXT NOT NULL DEFAULT '');\n            CREATE TABLE IF NOT EXISTS people (\n                id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '',\n                ignored INTEGER NOT NULL DEFAULT 0, updated REAL NOT NULL,\n                birth TEXT NOT NULL DEFAULT '');\n            CREATE TABLE IF NOT EXISTS face_scans (\n                photo_id TEXT PRIMARY KEY, model TEXT NOT NULL, error TEXT NOT NULL DEFAULT '');\n            CREATE TABLE IF NOT EXISTS faces (\n                id TEXT PRIMARY KEY, photo_id TEXT NOT NULL, person_id TEXT NOT NULL,\n                rect TEXT NOT NULL, embedding BLOB NOT NULL,\n                excluded TEXT NOT NULL DEFAULT '[]');\n            CREATE INDEX IF NOT EXISTS faces_person ON faces(person_id,photo_id);\n            CREATE INDEX IF NOT EXISTS faces_photo ON faces(photo_id);\n            CREATE TABLE IF NOT EXISTS person_tags (\n                photo_id TEXT NOT NULL, person_id TEXT NOT NULL,\n                PRIMARY KEY(photo_id,person_id));\n            CREATE INDEX IF NOT EXISTS person_tags_person ON person_tags(person_id,photo_id);\n            CREATE TABLE IF NOT EXISTS person_tag_edits (photo_id TEXT PRIMARY KEY);\n            CREATE VIEW IF NOT EXISTS person_photos AS\n                SELECT photo_id,person_id FROM faces UNION SELECT photo_id,person_id FROM person_tags;\n            CREATE TABLE IF NOT EXISTS albums (\n                id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL DEFAULT '',\n                cover TEXT NOT NULL DEFAULT '', pinned INTEGER NOT NULL DEFAULT 0,\n                archived INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0,\n                created REAL NOT NULL, updated REAL NOT NULL, dirty INTEGER NOT NULL DEFAULT 1);\n        ";
+
+// Only exact owned results of Copy, RootPath and JSON.JsonWrite reach here.
+FreeOwned :: (text: string) {
+    if text.count == 0 { return }
+    descriptor := cast(*TextDescriptor)*text
+    Release(cast(*void)descriptor.data)
+}
+
+Copy :: (text: string) -> string {
+    out: Vec(u8)
+    if !BuilderAppend(out,text) { return "" }
+    return BuilderFinish(out)
+}
+
+ColumnView :: (statement: *void, index: s32) -> string {
+    bytes := SQL.SqliteColumnText(statement, index)
+    count := SQL.SqliteColumnBytes(statement, index)
+    if bytes == null { return "" }
+    return TextFromBytes(BytesFromPointer(bytes, cast(u64)count))
+}
+
+SqlError :: (lib: *Library) -> bool {
+    SetError(lib, TextFromCString(SQL.SqliteErrorMessage(lib.db)))
+    return false
+}
+
+Exec :: (lib: *Library, sql: string) -> bool {
+    if SQL.SqliteExecText(lib.db, sql) != SQL.SQLITE_OK { return SqlError(lib) }
+    return true
+}
+
+RootPath :: (root: string) -> string {
+    if root.count == 0 || root.count >= 4096 { return "" }
+    for byte: root { if byte == 0 { return "" } }
+    path: Vec(u8)
+    if root == "~" || (root.count > 1 && root[0] == 126 && root[1] == 47) {
+        name: [5]u8 = .[72, 79, 77, 69, 0]
+        home := TextFromCString(Environment(*name[0]))
+        if home.count == 0 || !BuilderAppend(path,home) || !BuilderAppend(path,root[1:]) { return "" }
+    } else if !BuilderAppend(path,root) { return "" }
+    if path.count == 0 { return "" }
+    if path[0] != 47 {
+        directory := Tree.WorkingDirectory()
+        defer { FreeOwned(directory) }
+        absolute: Vec(u8)
+        if directory.count == 0 || !BuilderAppend(absolute,directory) ||
+            !VecPush(absolute,cast(u8)47) || !BuilderAppend(absolute,TextView(VecSlice(path,0,path.count))) { return "" }
+        VecSwap(path,absolute)
+    }
+    // Resolve existing links before processing '..'; all intermediate path
+    // views stay inside their local vectors or exact resolver allocations.
+    current: Vec(u8)
+    if !VecPush(current,cast(u8)47) { return "" }
+    at: s64 = 0
+    while at < path.count {
+        if path[at] == 47 { at += 1; continue }
+        start := at
+        while at < path.count && path[at] != 47 { at += 1 }
+        part := TextView(VecSlice(path,start,at))
+        if part == "." { continue }
+        if part == ".." {
+            parent := Tree.PathParent(TextView(VecSlice(current,0,current.count)))
+            if !VecResize(current,parent.count) { return "" }
+            continue
+        }
+        next: Vec(u8)
+        if !BuilderAppend(next,TextView(VecSlice(current,0,current.count))) ||
+            (current[current.count-1] != 47 && !VecPush(next,cast(u8)47)) || !BuilderAppend(next,part) { return "" }
+        view := TextView(VecSlice(next,0,next.count))
+        resolved := Tree.ResolvePath(view)
+        if resolved.count > 0 {
+            defer { FreeOwned(resolved) }
+            VecClear(current)
+            if !BuilderAppend(current,resolved) { return "" }
+        } else {
+            if Files.PathIsLink(view) { return "" }
+            VecSwap(current,next)
+        }
+    }
+    view := TextView(VecSlice(current,0,current.count))
+    if !Tree.CreateDirectories(view,448) { return "" }
+    return Tree.ResolvePath(view)
+}
+
+// Copy through the public JSON API; JsonSet keeps the last duplicate key.
+Normalize :: (target: *JSON.JsonDocument, source: *JSON.JsonDocument, node: s32) -> s32 {
+    kind := JSON.JsonKindOf(source, node)
+    if kind != JSON.JsonKind.Object && kind != JSON.JsonKind.Array {
+        return JSON.JsonCopy(target, source, node)
+    }
+    result := ifx kind == JSON.JsonKind.Object then JSON.JsonNewObject(target) else JSON.JsonNewArray(target)
+    child := JSON.JsonFirst(source, node)
+    while child >= 0 {
+        copy := Normalize(target, source, child)
+        if kind == JSON.JsonKind.Array {
+            if !JSON.JsonAppend(target, result, copy) { return -1 }
+        } else {
+            keyBytes: Vec(u8)
+            if !JSON.JsonKeyInto(source, child, *keyBytes) ||
+                !JSON.JsonSetCopy(target, result, TextView(VecSlice(keyBytes, 0, keyBytes.count)), copy) { return -1 }
+        }
+        child = JSON.JsonNext(source, child)
+    }
+    return result
+}
+
+#scope_export
+Packed :: (value: string) -> string {
+    document: JSON.JsonDocument
+    defer { JSON.JsonReset(*document) }
+    if !JSON.JsonRead(*document, value) { return "" }
+    normalized: JSON.JsonDocument
+    defer { JSON.JsonReset(*normalized) }
+    node := Normalize(*normalized, *document, document.root)
+    style := JSON.JsonCompactStyle(false, true)
+    style.python_floats = true
+    return JSON.JsonWrite(*normalized, node, style)
+}
+
+#scope_file
+Truthy :: (value: string) -> bool {
+    document: JSON.JsonDocument
+    defer { JSON.JsonReset(*document) }
+    if !JSON.JsonRead(*document, value) { return false }
+    kind := JSON.JsonKindOf(*document, document.root)
+    if kind == JSON.JsonKind.Null || kind == JSON.JsonKind.False { return false }
+    if kind == JSON.JsonKind.String { return !JSON.JsonIs(*document, document.root, "") }
+    if kind == JSON.JsonKind.Array || kind == JSON.JsonKind.Object { return JSON.JsonCount(*document, document.root) > 0 }
+    if kind == JSON.JsonKind.Number {
+        numberBytes: Vec(u8)
+        if !JSON.JsonNumberTextInto(*document, document.root, *numberBytes) { return false }
+        text := TextView(VecSlice(numberBytes, 0, numberBytes.count))
+        for byte: text {
+            if byte == 46 || byte == 101 || byte == 69 {
+                number, valid := Float.ParseFloat64(text)
+                return valid && number != 0.0
+            }
+        }
+        for byte: text {
+            if byte == 101 || byte == 69 { break }
+            if byte >= 49 && byte <= 57 { return true }
+        }
+        return false
+    }
+    return true
+}
+
+HasColumn :: (lib: *Library, table: string, column: string) -> s32 {
+    query: Vec(u8)
+    if !BuilderAppend(query,"PRAGMA table_info(") || !BuilderAppend(query,table) || !VecPush(query,cast(u8)41) { SetError(lib,"Could not allocate Photos schema query"); return -1 }
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db, TextView(VecSlice(query,0,query.count)), -1, *statement, null) != SQL.SQLITE_OK {
+        unused SqlError(lib)
+        return -1
+    }
+    defer { unused SQL.SqliteFinalize(statement) }
+    while true {
+        code := SQL.SqliteStep(statement)
+        if code == SQL.SQLITE_DONE { return 0 }
+        if code != SQL.SQLITE_ROW { unused SqlError(lib); return -1 }
+        if ColumnView(statement, 1) == column { return 1 }
+    }
+}
+
+AddColumn :: (lib: *Library, table: string, column: string, declaration: string) -> bool {
+    exists := HasColumn(lib, table, column)
+    if exists != 0 { return exists > 0 }
+    query: Vec(u8)
+    if !BuilderAppend(query,"ALTER TABLE ") || !BuilderAppend(query,table) || !BuilderAppend(query," ADD COLUMN ") || !BuilderAppend(query,column) || !VecPush(query,cast(u8)32) || !BuilderAppend(query,declaration) { SetError(lib,"Could not allocate Photos schema query"); return false }
+    return Exec(lib, TextView(VecSlice(query,0,query.count)))
+}
+
+Whitespace :: (point: u32) -> bool {
+    return point == 32 || point == 133 || point == 160 || point == 5760 ||
+        (point >= 8192 && point <= 8202) || point == 8232 || point == 8233 ||
+        point == 8239 || point == 8287 || point == 12288
+}
+
+#scope_export
+AlbumName :: (value: string) -> string {
+    at: s32 = 0
+    start: s32 = -1
+    end: s32 = 0
+    while at < value.count {
+        point := UTF8.Decode(value, at)
+        if !point.valid || point.value < 32 { return "" }
+        if !Whitespace(point.value) {
+            if start < 0 { start = at }
+            end = point.after
+        }
+        at = point.after
+    }
+    if start < 0 || end - start > 512 { return "" }
+    return value[start:end]
+}
+
+#scope_file
+AlbumExists :: (lib: *Library, column: string, value: string) -> s32 {
+    query: Vec(u8)
+    if !BuilderAppend(query,"SELECT 1 FROM albums WHERE ") || !BuilderAppend(query,column) || !BuilderAppend(query,"=?") { SetError(lib,"Could not allocate Photos album query"); return -1 }
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db, TextView(VecSlice(query,0,query.count)), -1, *statement, null) != SQL.SQLITE_OK {
+        unused SqlError(lib)
+        return -1
+    }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if SQL.SqliteBindTextString(statement, 1, value, cast(s32)value.count) != SQL.SQLITE_OK {
+        unused SqlError(lib)
+        return -1
+    }
+    code := SQL.SqliteStep(statement)
+    if code == SQL.SQLITE_ROW { return 1 }
+    if code == SQL.SQLITE_DONE { return 0 }
+    unused SqlError(lib)
+    return -1
+}
+
+DigestInto :: (value: string, hash: *u8) {
+    descriptor := cast(*TextDescriptor)*value
+    Crypto.Sha256Hex(descriptor.data,value.count,hash)
+}
+
+#scope_export
+EnsureAlbum :: (lib: *Library, value: string, dirty: s32 = 1) -> bool {
+    name := AlbumName(value)
+    if name.count == 0 { SetError(lib, "Enter an album name of at most 512 bytes"); return false }
+    exists := AlbumExists(lib, "name", name)
+    if exists != 0 { return exists > 0 }
+    key: Vec(u8)
+    if !BuilderAppend(key,"photos.album.v1:") || !BuilderAppend(key,name) { SetError(lib,"Could not allocate Photos album identifier"); return false }
+    hash: [65]u8
+    DigestInto(TextView(VecSlice(key,0,key.count)),*hash[0])
+    id := Copy(TextUntilNul(hash[:]))
+    if id.count == 0 { SetError(lib,"Could not allocate Photos album identifier"); return false }
+    defer { FreeOwned(id) }
+    while true {
+        exists = AlbumExists(lib, "id", id)
+        if exists < 0 { return false }
+        if exists == 0 { break }
+        next: Vec(u8)
+        if !BuilderAppend(next,id) || !BuilderAppend(next,":next") { SetError(lib,"Could not allocate Photos album identifier"); return false }
+        DigestInto(TextView(VecSlice(next,0,next.count)),*hash[0])
+        following := Copy(TextUntilNul(hash[:]))
+        if following.count == 0 { SetError(lib,"Could not allocate Photos album identifier"); return false }
+        FreeOwned(id)
+        id = following
+    }
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,
+        "INSERT OR IGNORE INTO albums(id,name,created,updated,dirty) VALUES(?,?,?,?,?)",
+        -1, *statement, null) != SQL.SQLITE_OK { return SqlError(lib) }
+    defer { unused SQL.SqliteFinalize(statement) }
+    now := ifx dirty != 0 then cast(float64)Clock.UnixMilliseconds() / 1000.0 else 0.0
+    if SQL.SqliteBindTextString(statement, 1, id, cast(s32)id.count) != SQL.SQLITE_OK ||
+        SQL.SqliteBindTextString(statement, 2, name, cast(s32)name.count) != SQL.SQLITE_OK ||
+        SQL.SqliteBindDouble(statement, 3, now) != SQL.SQLITE_OK ||
+        SQL.SqliteBindDouble(statement, 4, now) != SQL.SQLITE_OK ||
+        SQL.SqliteBindInt(statement, 5, dirty) != SQL.SQLITE_OK ||
+        SQL.SqliteStep(statement) != SQL.SQLITE_DONE { return SqlError(lib) }
+    return true
+}
+
+#scope_file
+FreeNames :: (names: *Vec(string)) {
+    owned: Vec(string)
+    VecSwap(owned,<<names)
+    index: s64 = 0
+    while index < owned.count { FreeOwned(owned[index]); index += 1 }
+    VecSwap(owned,<<names)
+}
+
+BackfillAlbums :: (lib: *Library) -> bool {
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,
+        "SELECT DISTINCT value,type FROM photos,json_each(photos.albums)",
+        -1, *statement, null) != SQL.SQLITE_OK { return SqlError(lib) }
+    defer { unused SQL.SqliteFinalize(statement) }
+    names: Vec(string)
+    defer { FreeNames(*names) }
+    while true {
+        code := SQL.SqliteStep(statement)
+        if code == SQL.SQLITE_DONE { break }
+        if code != SQL.SQLITE_ROW { return SqlError(lib) }
+        if ColumnView(statement, 1) != "text" {
+            SetError(lib, "Enter an album name of at most 512 bytes")
+            return false
+        }
+        view := ColumnView(statement,0)
+        name := Copy(view)
+        if (view.count > 0 && name.count == 0) || !VecPush(names,name) { FreeOwned(name); SetError(lib,"Could not allocate Photos album names"); return false }
+    }
+    index: s64 = 0
+    while index < names.count {
+        if !EnsureAlbum(lib, names[index]) { return false }
+        index += 1
+    }
+    return SetSetting(lib, "album_catalog_migrated", "true")
+}
+
+Migrate :: (lib: *Library) -> bool {
+    if !Exec(lib, "BEGIN IMMEDIATE") { return false }
+    committed := false
+    defer { if !committed { unused SQL.SqliteExecText(lib.db, "ROLLBACK") } }
+    if !Exec(lib, Schema) ||
+        !AddColumn(lib, "photos", "edits", "TEXT NOT NULL DEFAULT '{}'") ||
+        !AddColumn(lib, "photos", "archived", "INTEGER NOT NULL DEFAULT 0") ||
+        !AddColumn(lib, "albums", "filter", "TEXT NOT NULL DEFAULT ''") ||
+        !AddColumn(lib, "albums", "auto_people", "TEXT NOT NULL DEFAULT '[]'") ||
+        !AddColumn(lib, "albums", "entity", "TEXT NOT NULL DEFAULT ''") ||
+        !AddColumn(lib, "albums", "record", "TEXT NOT NULL DEFAULT '{}'") ||
+        !AddColumn(lib, "people", "birth", "TEXT NOT NULL DEFAULT ''") { return false }
+    marker, found := LookupSetting(lib, "album_catalog_migrated")
+    defer { FreeOwned(marker) }
+    if lib.error.count > 0 { return false }
+    if (!found || !Truthy(marker)) && !BackfillAlbums(lib) { return false }
+    if !Exec(lib, "COMMIT") { return false }
+    committed = true
+    return true
+}
+
+#scope_export
+ClearError :: (lib: *Library) {
+    if lib == null { return }
+    if lib.error_allocation != null { Release(cast(*void)lib.error_allocation) }
+    lib.error_allocation = null
+    lib.error = ""
+}
+
+SetError :: (lib: *Library, message: string) {
+    if lib == null { return }
+    // Copy before releasing: MESSAGE may itself be the previous error view.
+    owned := cast(*u8)Allocate(cast(usize)message.count + 1, 1)
+    if owned != null {
+        index: s64 = 0
+        while index < message.count { owned[index] = message[index]; index += 1 }
+    }
+    ClearError(lib)
+    if owned == null { lib.error = "Could not allocate Photos error"; return }
+    lib.error_allocation = owned
+    lib.error = TextFromCString(owned)
+}
+
+// A successful handle owns its root. Every nonempty returned error is owned.
+// Release error, Packed and Setting/LookupSetting results with ReleaseResult.
+Open :: (root: string) -> *Library, string {
+    path := RootPath(root)
+    if path.count == 0 { return null, Copy("Could not open Photos library directory") }
+    lib := cast(*Library)Allocate(1, cast(usize)size_of(Library))
+    if lib == null { FreeOwned(path); return null, Copy("Could not allocate Photos library") }
+    lib.root = path
+    // RootPath finishes with std/file_tree_linux.ResolvePath, whose CopyText
+    // transfers a fresh builder allocation into the returned native String.
+    pathDescriptor := cast(*TextDescriptor)*path
+    lib.root_allocation = pathDescriptor.data
+    databasePath: Vec(u8)
+    if !BuilderAppend(databasePath,path) || !BuilderAppend(databasePath,"/library.sqlite") { Close(lib); return null, Copy("Could not allocate Photos database path") }
+    if SQL.SqliteOpenText(TextView(VecSlice(databasePath,0,databasePath.count)), *lib.db,
+        SQL.SQLITE_OPEN_READWRITE | SQL.SQLITE_OPEN_CREATE) != SQL.SQLITE_OK {
+        message := Copy(ifx lib.db != null then TextFromCString(SQL.SqliteErrorMessage(lib.db)) else "Could not open Photos library database")
+        Close(lib)
+        return null, message
+    }
+    if SQL.SqliteBusyTimeout(lib.db, 60000) != SQL.SQLITE_OK { unused SqlError(lib) }
+    else if Exec(lib, "PRAGMA journal_mode=WAL") && Migrate(lib) { return lib, "" }
+    error := Copy(lib.error)
+    Close(lib)
+    return null, error
+}
+
+Close :: (lib: *Library) {
+    if lib == null { return }
+    if lib.db != null { unused SQL.SqliteClose(lib.db) }
+    if lib.root_allocation != null { Release(cast(*void)lib.root_allocation) }
+    ClearError(lib)
+    Release(cast(*void)lib)
+}
+
+// Releases only exact owned results from Open's error, Packed, Setting or
+// LookupSetting. Never pass caller views, literals, or lib.error. Repeated
+// release of the same reset variable is harmless.
+ReleaseResult :: (result: *string) {
+    if result == null { return }
+    FreeOwned(result.*)
+    result.* = ""
+}
+
+// Raw JSON: absent returns ("", false); a stored JSON null returns ("null", true).
+// SQL/invalid-JSON failures set lib.error and return ("", false).
+// Nonempty successful values are owned; ReleaseResult after consuming them.
+LookupSetting :: (lib: *Library, key: string) -> string, bool {
+    if lib == null || lib.db == null { return "", false }
+    ClearError(lib)
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db, "SELECT value FROM settings WHERE key=?", -1,
+        *statement, null) != SQL.SQLITE_OK { unused SqlError(lib); return "", false }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if SQL.SqliteBindTextString(statement, 1, key, cast(s32)key.count) != SQL.SQLITE_OK {
+        unused SqlError(lib)
+        return "", false
+    }
+    code := SQL.SqliteStep(statement)
+    if code == SQL.SQLITE_DONE { return "", false }
+    if code != SQL.SQLITE_ROW { unused SqlError(lib); return "", false }
+    value := ColumnView(statement, 0)
+    document: JSON.JsonDocument
+    defer { JSON.JsonReset(*document) }
+    if !JSON.JsonRead(*document, value) {
+        SetError(lib, "Invalid Photos setting JSON")
+        return "", false
+    }
+    owned := Copy(value)
+    if owned.count == 0 { SetError(lib,"Could not allocate Photos setting"); return "", false }
+    return owned, true
+}
+
+Setting :: (lib: *Library, key: string) -> string {
+    value, found := LookupSetting(lib, key)
+    unused found
+    return value
+}
+
+SetSetting :: (lib: *Library, key: string, value: string) -> bool {
+    if lib == null || lib.db == null { return false }
+    ClearError(lib)
+    encoded := Packed(value)
+    defer { FreeOwned(encoded) }
+    if encoded.count == 0 { SetError(lib, "Invalid Photos setting JSON"); return false }
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db, "INSERT OR REPLACE INTO settings VALUES(?,?)", -1,
+        *statement, null) != SQL.SQLITE_OK { return SqlError(lib) }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if SQL.SqliteBindTextString(statement, 1, key, cast(s32)key.count) != SQL.SQLITE_OK ||
+        SQL.SqliteBindTextString(statement, 2, encoded, cast(s32)encoded.count) != SQL.SQLITE_OK ||
+        SQL.SqliteStep(statement) != SQL.SQLITE_DONE { return SqlError(lib) }
+    return true
+}

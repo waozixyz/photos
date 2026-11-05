@@ -1,0 +1,123 @@
+Store :: #import "library_store";
+Policy :: #import "library_files";
+Decode :: #import "decode_service";
+SQL :: #import "sqlite/SQLite";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+c :: #system_library "c";
+Free :: (pointer: *void) #foreign c "free";
+FreeData :: (value: string) { if value.count > 0 { descriptor := cast(*TextDescriptor)*value; Free(cast(*void)descriptor.data) } }
+root: string;
+working: string;
+destination: string;
+lib: *Store.Library;
+Id :: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+Bad :: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+Trashed :: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+Source :: "tests/fixtures/codec/still.heic";
+
+#scope_export
+#program_export
+FinishDecodeLifetime :: () {
+    if lib != null { Store.Close(lib); lib = null }
+    Policy.ReleasePath(*working)
+    Policy.ReleasePath(*destination)
+    if root != "" { unused Tree.RemoveTree(root); Policy.ReleasePath(*root) }
+}
+
+#program_export
+PrepareDecodeLifetime :: () -> s32 {
+    if !Tree.CreateDirectories("build/tests/tmp",448) { return 0 }
+    root = Tree.CreateTemporaryDirectory("build/tests/tmp","decode-life-")
+    if root == "" { return 0 }
+    handle,error := Store.Open(root)
+    Store.ReleaseResult(*error)
+    lib = handle
+    if lib == null { return 0 }
+    working = Tree.WorkingDirectory()
+    if working == "" { return 0 }
+    path: Vec(u8)
+    if !BuilderAppend(path,lib.root) || !BuilderAppend(path,"/output.png") { return 0 }
+    destination = BuilderFinish(path)
+    photo: Store.PhotoRow = .{id=Id,extension=".heic",kind="photo"}
+    original: Vec(u8)
+    if !Policy.OriginalInto(*original,lib,Id,".heic") { return 0 }
+    view := TextView(VecSlice(original,0,original.count))
+    if !Tree.CreateDirectories(Tree.PathParent(view),448) { return 0 }
+    data,read := Files.ReadEntireFile(Source)
+    // ReadEntireFile returns an owned byte string, including binary NULs.
+    defer { FreeData(data) }
+    if !read || !Files.WriteEntireFile(view,data) { return 0 }
+    // Name explicit columns: migration appends edits after existing columns.
+    if SQL.SqliteExecText(lib.db,"INSERT INTO photos(id,name,extension,kind,size,taken,metadata,albums,caption,tags,updated,manifest,edits) VALUES('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','Owned 夜','.heic','photo',1,1,'{}','[]','caption','tags',1,'{}','{}')") != SQL.SQLITE_OK { return 0 }
+    if SQL.SqliteExecText(lib.db,"INSERT INTO photos(id,name,extension,kind,size,taken,metadata,albums,caption,tags,updated,manifest,edits,trashed) SELECT 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',name,'.jpg','video',size,taken,metadata,albums,caption,tags,updated,manifest,edits,0 FROM photos WHERE id='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; INSERT INTO photos(id,name,extension,kind,size,taken,metadata,albums,caption,tags,updated,manifest,edits,trashed) SELECT 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',name,extension,kind,size,taken,metadata,albums,caption,tags,updated,manifest,edits,1 FROM photos WHERE id='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'") != SQL.SQLITE_OK { return 0 }
+    options: Policy.FileOptions = .{application_root=working}
+    cache,failure := Decode.Display(lib,photo,"",null,options)
+    defer { Policy.ReleasePath(*cache) }
+    return ifx failure == "" && cache != "" then 42 else 0
+}
+
+#program_export
+PhotoLifetime :: () -> s32 {
+    photo,error := Policy.Photo(lib,Id)
+    defer { Policy.ClearPhoto(*photo) }
+    if error != "" || photo.id != Id || photo.name != "Owned 夜" || photo.caption != "caption" || photo.edits != "{}" { return 0 }
+    Policy.ClearPhoto(*photo)
+    Policy.ClearPhoto(*photo)
+    borrowed: Store.PhotoRow = .{id=Id,name="borrowed literal",metadata="borrowed view"}
+    Policy.ClearPhoto(*borrowed)
+    return ifx photo.id == "" && borrowed.id == "" then 42 else 0
+}
+
+#program_export
+CachedDecodeLifetime :: () -> s32 {
+    photo: Store.PhotoRow = .{id=Id}
+    options: Policy.FileOptions = .{application_root="/nonexistent-helper-root"}
+    cache,error := Decode.Display(lib,photo,"",null,options)
+    defer { Policy.ReleasePath(*cache) }
+    return ifx cache != "" && error == "" && SQL.SqliteGetAutocommit(lib.db) then 42 else 0
+}
+
+#program_export
+RejectedDecodeLifetime :: () -> s32 {
+    bad: Store.PhotoRow = .{id=Bad}
+    trashed: Store.PhotoRow = .{id=Trashed}
+    first,error := Decode.Display(lib,bad,"",null,.{})
+    defer { Policy.ReleasePath(*first) }
+    if first != "" || error == "" { return 0 }
+    second,next := Decode.Display(lib,trashed,"",null,.{})
+    defer { Policy.ReleasePath(*second) }
+    return ifx second == "" && next != "" then 42 else 0
+}
+
+#program_export
+SourceDecodeLifetime :: () -> s32 {
+    options: Policy.FileOptions = .{application_root=working}
+    dimensions,error := Decode.DecodeSource(Source,".heic",destination,false,options)
+    return ifx error == "" && dimensions.width == 96 && dimensions.height == 64 then 42 else 0
+}
+
+#program_export
+FailedSourceLifetime :: () -> s32 {
+    options: Policy.FileOptions = .{application_root=working}
+    dimensions,error := Decode.DecodeSource("/missing-photo-lifetime",".heic",destination,false,options)
+    unused dimensions
+    return ifx error != "" then 42 else 0
+}
+
+#program_export
+main :: () -> s32 {
+    defer { FinishDecodeLifetime() }
+    if PrepareDecodeLifetime() != 42 { return 1 }
+    for at: 0..127 {
+        if PhotoLifetime() != 42 || CachedDecodeLifetime() != 42 || RejectedDecodeLifetime() != 42 { return 2 }
+    }
+    for at: 0..3 { if SourceDecodeLifetime() != 42 || FailedSourceLifetime() != 42 { return 3 } }
+    print("Photos decoder lifetime: checked owned rows, borrowed fixtures, cached/rejected display and real successful/failed source decode passed\n")
+    return 0
+}

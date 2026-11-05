@@ -1,0 +1,138 @@
+// Synthetic fixture helpers. All temporary data stays in this checkout.
+Files :: #import "std/file";
+Picture :: #import "std/image";
+JPEG :: #import "std/jpeg";
+PNG :: #import "std/png_linux";
+SQL :: #import "sqlite/SQLite";
+#import "std/c_string"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+c :: #system_library "c";
+MakeTemporary :: (pattern: *u8) -> *u8 #foreign c "mkdtemp";
+RemoveDirectory :: (path: *u8) -> s32 #foreign c "rmdir";
+TemporaryRoot :: "build/tests/tmp";
+
+Component :: (name: string) -> bool {
+    if name.count == 0 || name.count > 80 { return false }
+    for byte: name {
+        if !((byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 90) ||
+            (byte >= 97 && byte <= 122) || byte == 45 || byte == 95) {
+            return false
+        }
+    }
+    return true
+}
+
+PrivateDirectory :: (path: string) -> bool {
+    return !Files.PathIsLink(path) && Files.CreatePrivateDirectory(path)
+}
+
+RemoveTree :: (path: string) -> bool {
+    if Files.PathIsLink(path) {
+        return Files.RemoveFile(path)
+    }
+    cursor := Files.OpenDirectory(path)
+    if !cursor.valid { return Files.RemoveFile(path) }
+    ok := true
+    while true {
+        entry := Files.NextDirectoryEntry(*cursor)
+        if !entry.valid { break }
+        name := TextUntilNul(entry.name[:])
+        if name == "." || name == ".." { continue }
+        if !RemoveTree(Join(path, name)) { ok = false }
+    }
+    ok = !cursor.failed && ok
+    if !Files.CloseDirectory(*cursor) { ok = false }
+    if !ok { return false }
+    buffer: [4096]u8
+    return CopyCString(path, buffer[:]) && RemoveDirectory(*buffer[0]) == 0
+}
+
+Solid :: (w: s32, h: s32, rgb: u32) -> Picture.Image {
+    // Keep accidental huge fixtures from consuming the build pool.
+    if w <= 0 || h <= 0 || w > 4096 || h > 4096 ||
+        cast(s64)w * h > 1048576 {
+        return Picture.NewImage(0, 0)
+    }
+    return Picture.NewImage(w, h, cast(u8)((rgb >> 16) & 255),
+        cast(u8)((rgb >> 8) & 255), cast(u8)(rgb & 255), 255)
+}
+
+#scope_export
+Join :: (directory: string, name: string) -> string {
+    out: Vec(u8)
+    BuilderPrint(*out, "%/%", directory, name)
+    return BuilderFinish(out)
+}
+
+TempDirectory :: (name: string = "fixture") -> string {
+    if !Component(name) || !PrivateDirectory("build") ||
+        !PrivateDirectory("build/tests") || !PrivateDirectory(TemporaryRoot) {
+        return ""
+    }
+    pattern: Vec(u8)
+    BuilderPrint(*pattern, "%/%-XXXXXX", TemporaryRoot, name)
+    buffer: [4096]u8
+    if !CopyCString(BuilderFinish(pattern), buffer[:]) ||
+        MakeTemporary(*buffer[0]) == null {
+        return ""
+    }
+    // Copy the native buffer so the returned path owns its storage.
+    out: Vec(u8)
+    BuilderPrint(*out, "%", TextUntilNul(buffer[:]))
+    return BuilderFinish(out)
+}
+
+Cleanup :: (root: string) -> bool {
+    prefix := Join(TemporaryRoot, "")
+    if root.count <= prefix.count || root[0:prefix.count] != prefix ||
+        !Component(root[prefix.count:]) {
+        return false
+    }
+    return RemoveTree(root)
+}
+
+// Creates a private, empty library layout. C14 owns schema creation/migration.
+Library :: (dir: string) -> string {
+    if !PrivateDirectory(dir) || !PrivateDirectory(Join(dir, "originals")) ||
+        !PrivateDirectory(Join(dir, "previews")) ||
+        !PrivateDirectory(Join(dir, "private")) {
+        return ""
+    }
+    return dir
+}
+
+Jpeg :: (path: string, w: s32, h: s32, rgb: u32) -> bool {
+    image := Solid(w, h, rgb)
+    if !Picture.ImageValid(*image) { return false }
+    bytes: Vec(u8)
+    return JPEG.WriteJPEG(*image, *bytes, 90) &&
+        Files.WriteEntireFile(path, BuilderFinish(bytes))
+}
+
+Png :: (path: string, w: s32, h: s32, rgb: u32) -> bool {
+    image := Solid(w, h, rgb)
+    return Picture.ImageValid(*image) && PNG.WritePNGFile(path, *image)
+}
+
+// Accepts a small, synthetic SQL fixture, including sqlite dump transactions.
+LoadSql :: (database: *void, path: string) -> bool {
+    file := Files.OpenRead(path)
+    if !file.valid { return false }
+    size := Files.FileSize(file)
+    unused Files.CloseFile(file)
+    if database == null || size <= 0 || size > 1048576 { return false }
+    sql, ok := Files.ReadEntireFile(path)
+    return ok && SQL.SqliteExecText(database, sql) == SQL.SQLITE_OK
+}
+
+Expect :: (condition: bool, label: string) -> bool {
+    if !condition { print("FAIL: %\n", label) }
+    return condition
+}
+
+Equal :: (actual: string, expected: string, label: string) -> bool {
+    return Expect(actual == expected, label)
+}

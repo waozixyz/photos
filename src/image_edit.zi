@@ -1,7 +1,12 @@
 // Headless raster transformations. Codec I/O is GdkPixbuf; editing is Ziran.
 // This process owns only its decoded buffers and the supplied output file.
 #import "std/byte_text_linux"
+#import "std/c_string"
 #import "crop"
+Raster :: #import "std/image";
+JPEG :: #import "std/jpeg";
+Files :: #import "std/file";
+using Vectors :: #import "std/vec";
 CollagePixels :: #import "collage_pixels";
 pixbuf :: #system_library "gdk_pixbuf-2.0";
 object :: #system_library "gobject-2.0";
@@ -35,6 +40,22 @@ Gray :: (red: u8, green: u8, blue: u8) -> float64 {
     return cast(float64)red * 0.299 + cast(float64)green * 0.587 + cast(float64)blue * 0.114
 }
 main :: (argc: s32, argv: **u8) -> s32 {
+    if argc == 4 && TextFromCString(argv[1]) == "thumbnail" {
+        encoded: Vec(u8)
+        dimensions: ThumbnailDimensions
+        if !Thumbnail(TextFromCString(argv[2]), *encoded, *dimensions) { return 3 }
+        target := Files.OpenReplace(TextFromCString(argv[3]))
+        if !target.valid { return 3 }
+        written: s64 = 0
+        while written < encoded.count {
+            count := Files.WriteAt(target, VecSlice(encoded, written, encoded.count), written)
+            if count <= 0 { unused Files.CloseFile(target); return 3 }
+            written += count
+        }
+        saved := Files.SyncFile(target)
+        saved = Files.CloseFile(target) && saved
+        return ifx saved then 0 else 3
+    }
     if argc == 3 && TextFromCString(argv[1]) == "collage" { return CollagePixels.Run(argv[2]) }
     if argc == 4 && TextFromCString(argv[1]) == "blur" { return Blur(argv[2],argv[3]) }
     if argc != 11 && argc != 15 { print("Expected source, output, adjustments and preview limit\n"); return 2 }
@@ -136,4 +157,57 @@ Blur :: (path: *u8, destination: *u8) -> s32 {
     image := Scale(small,width,height,2); if image == null { return 3 }; defer { Unref(image) }
     format: [4]u8 = .{112,110,103,0}
     if Save(image,destination,*format[0],null,null,null) == 0 { return 3 }; return 0
+}
+
+// Gallery policy: embedded orientation, RGB conversion, a 640-pixel bound,
+// and quality 85. Resampling and JPEG encoding belong to the standard library.
+ThumbnailDimensions :: struct { width: s32; height: s32 }
+Dimensions :: (path: string, dimensions: *ThumbnailDimensions) -> bool {
+    name: [4096]u8
+    if !CopyCString(path, name[:]) { return false }
+    image := Load(*name[0], null)
+    if image == null { return false }
+    defer { Unref(image) }
+    width := Width(image); height := Height(image)
+    if width <= 0 || height <= 0 || width > 100000 || height > 100000 ||
+        cast(s64)width * height > 100000000 { return false }
+    dimensions.width = width; dimensions.height = height
+    return true
+}
+Thumbnail :: (path: string, encoded: *Vec(u8), dimensions: *ThumbnailDimensions) -> bool {
+    name: [4096]u8
+    if !CopyCString(path, name[:]) { return false }
+    loaded := Load(*name[0], null)
+    if loaded == null { return false }
+    defer { Unref(loaded) }
+    source := Orient(loaded)
+    if source == null { return false }
+    defer { Unref(source) }
+    width := Width(source)
+    height := Height(source)
+    channels := Channels(source)
+    if width <= 0 || height <= 0 || cast(s64)width * height > 100000000 ||
+        (channels != 3 && channels != 4) { return false }
+    image := Raster.NewImage(width, height, 0, 0, 0, 255)
+    if !Raster.ImageValid(*image) { return false }
+    pixels := Pixels(source)
+    stride := Stride(source)
+    y: s32 = 0
+    while y < height {
+        x: s32 = 0
+        while x < width {
+            from := cast(s64)y * stride + cast(s64)x * channels
+            to := (cast(s64)y * width + x) * 4
+            image.pixels[to] = pixels[from]
+            image.pixels[to + 1] = pixels[from + 1]
+            image.pixels[to + 2] = pixels[from + 2]
+            x += 1
+        }
+        y += 1
+    }
+    small := Raster.Thumbnail(*image, 640, 640)
+    if !Raster.ImageValid(*small) || !JPEG.WriteJPEG(*small, encoded, 85) { return false }
+    dimensions.width = width
+    dimensions.height = height
+    return true
 }

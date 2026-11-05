@@ -1,9 +1,12 @@
 // Passwords arrive only on stdin, never process arguments or diagnostic output.
 // Libsodium supplies Argon2id and its random salts; this tool owns no windows.
 #import "std/byte_text_linux"
+using Vectors :: #import "std/vec";
+#scope_file
 libc :: #system_library "libc";
 sodium :: #system_library "sodium";
 Read :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign libc "read";
+Release :: (memory: *void) #foreign libc "free";
 Init :: () -> s32 #foreign sodium "sodium_init";
 Wipe :: (bytes: *u8, count: usize) #foreign sodium "sodium_memzero";
 HashBytes :: () -> usize #foreign sodium "crypto_pwhash_strbytes";
@@ -13,6 +16,68 @@ Algorithm :: () -> s32 #foreign sodium "crypto_pwhash_alg_argon2id13";
 Hash :: (output: *u8, password: *u8, length: u64, ops: u64, memory: usize, algorithm: s32) -> s32 #foreign sodium "crypto_pwhash_str_alg";
 Verify :: (hash: *u8, password: *u8, length: u64) -> s32 #foreign sodium "crypto_pwhash_str_verify";
 Profile :: (hash: *u8, ops: u64, memory: usize) -> s32 #foreign sodium "crypto_pwhash_str_needs_rehash";
+
+#scope_export
+// Caller owns the password bytes and wipes them after use. Codes match the
+// original private helper: 0 success, 1 wrong secret, 2 invalid/unavailable.
+Valid :: (password: []u8, pin: bool = false) -> bool {
+    if password.count < (ifx pin then 4 else 8) || password.count > (ifx pin then 12 else 1024) { return false }
+    if pin { for byte: password { if byte < 48 || byte > 57 { return false } } }
+    return true
+}
+NativeHash :: (password: []u8, pin: bool = false) -> string, s32 {
+    out: Vec(u8)
+    code := NativeHashInto(password,*out,pin)
+    if code != 0 { return "",code }
+    return BuilderFinish(out),0
+}
+NativeHashInto :: (password: []u8, out: *Vec(u8), pin: bool = false) -> s32 {
+    WipeOwned(out)
+    hash: [128]u8
+    defer { Wipe(*hash[0],128) }
+    if !Valid(password,pin) || Init() < 0 || HashBytes() > 128 ||
+        Hash(*hash[0],*password[0],cast(u64)password.count,Ops(),Memory(),Algorithm()) != 0 { return 2 }
+    count: s64
+    while count < 128 && hash[count] != 0 { count += 1 }
+    if count < 1 || count >= 128 || !VecResize(<<out,count) { WipeOwned(out); return 2 }
+    for i: 0..count-1 { (<<out)[i] = hash[i] }
+    return 0
+}
+NativeVerify :: (password: []u8, verifier: string, pin: bool = false) -> s32 {
+    hash: [128]u8
+    defer { Wipe(*hash[0],128) }
+    if !Valid(password,pin) || verifier.count < 1 || verifier.count >= 128 || Init() < 0 || HashBytes() > 128 { return 2 }
+    for i: 0..verifier.count-1 { hash[i] = verifier[i] }
+    if Profile(*hash[0],Ops(),Memory()) != 0 { return 2 }
+    return ifx Verify(*hash[0],*password[0],cast(u64)password.count) == 0 then 0 else 1
+}
+WipePassword :: (password: []u8) { if password.count > 0 { Wipe(*password[0],cast(usize)password.count) } }
+// Canonical JSON invokes this for every decoded/owned string before dropping
+// storage, including malformed escaped secrets and allocation failures.
+JsonErase :: (context: *void, bytes: []u8) { unused context; WipePassword(bytes) }
+CloneOwned :: (text: string) -> string {
+    bytes: Vec(u8)
+    if !BuilderAppend(bytes,text) { WipeOwned(*bytes); return "" }
+    return BuilderFinish(bytes)
+}
+// Detached BuilderFinish/JSON getter/native token results only. A caller must
+// never pass literals, borrowed text, or an error message to this operation.
+ReleaseOwned :: (text: string, wipe: bool = true) {
+    if text.count == 0 { return }
+    descriptor := cast(*TextDescriptor)*text
+    if descriptor.data != null {
+        if wipe { Wipe(descriptor.data,cast(usize)text.count) }
+        Release(cast(*void)descriptor.data)
+    }
+}
+// Only caller-owned vectors may enter this API, never borrowed text/literals.
+WipeOwned :: (out: *Vec(u8)) {
+    if out == null { return }
+    if out.count > 0 { Wipe(*(<<out)[0],cast(usize)out.count) }
+    VecClear(<<out)
+}
+
+#scope_export
 main :: (argc: s32, argv: **u8) -> s32 {
     if argc != 2 || Init() < 0 || HashBytes() > 128 { return 2 }
     action := TextFromCString(argv[1])
@@ -31,13 +96,14 @@ main :: (argc: s32, argv: **u8) -> s32 {
     if length < (ifx pin then 4 else 8) || length > (ifx pin then 12 else 1024) || size < 4 + length { return 2 }
     if pin { for i: 0..length-1 { if input[4+i] < 48 || input[4+i] > 57 { return 2 } } }
     if hashing {
-        if size != 4 + length || Hash(*hash[0], *input[4], cast(u64)length, Ops(), Memory(), Algorithm()) != 0 { return 2 }
-        print("%\n", TextFromCString(*hash[0])); return 0
+        if size != 4 + length { return 2 }
+        verifier, code := NativeHash(input[4:4+length],pin)
+        if code != 0 { return code }
+        print("%\n", verifier); return 0
     }
     extra := cast(s64)size - 4 - length
     if extra < 1 || extra >= 128 { return 2 }
-    for i: 0..extra - 1 { hash[i] = input[4 + length + i] }
-    if Profile(*hash[0], Ops(), Memory()) != 0 { return 2 }
-    if Verify(*hash[0], *input[4], cast(u64)length) != 0 { return 1 }
+    code := NativeVerify(input[4:4+length],TextFromBytes(input[4+length:size]),pin)
+    if code != 0 { return code }
     print("ok\n"); return 0
 }

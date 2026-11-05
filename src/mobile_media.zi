@@ -5,6 +5,7 @@ Clock :: #import "kryon/ClockLinux";
 #import "std/byte_text_linux"
 #import "std/json_scan"
 #import "std/text_buffer"
+#import "std/c_string"
 #if #defined(PHOTOS_VERIFY) {
     BackupVerify :: #import "backup_crypto_test";
     crypto_checked: bool;
@@ -18,6 +19,7 @@ photos: [Capacity]Photo; albums: [AlbumCapacity]Album;
 count: s32; album_count: s32; permission_bits: s32; page: s32; total: s32; more: bool; loading: bool;
 selected: s64 = -1; generation: s64; revision: s64; view: [16]u8; album: [32]u8; status: [257]u8;
 today: [16]u8; yesterday: [16]u8;
+locale: [32]u8;
 lock_enabled: bool; locked: bool; hide_content: bool; auth_pending: bool; device_secure: bool;
 security_status: [257]u8;
 backup_configured: bool; backup_ready: bool; backup_pending: bool; recovery_selected: bool;
@@ -39,10 +41,40 @@ Clear :: () {
     for i: 0..count-1 { photos[i]=Photo.{} }; for i: 0..album_count-1 { albums[i]=Album.{} }
     count=0; album_count=0; selected=-1; total=0; more=false; loading=false; permission_bits=0; state_size=0
 }
+// Read the Android configuration's current language even when media is unchanged.
+ReadLocale :: (session: *AndroidJniSession) {
+    env := session.env
+    defer {
+        if env.functions.ExceptionCheck(env) != 0 { env.functions.ExceptionClear(env) }
+    }
+    class_name: [32]u8; method_name: [32]u8; signature: [48]u8
+    unused CopyCString("java/util/Locale", class_name[:])
+    locale_class := env.functions.FindClass(env, *class_name[0])
+    if locale_class == null || env.functions.ExceptionCheck(env) != 0 { return }
+    defer { env.functions.DeleteLocalRef(env, locale_class) }
+    unused CopyCString("getDefault", method_name[:]); unused CopyCString("()Ljava/util/Locale;", signature[:])
+    get_default := env.functions.GetStaticMethodID(env, locale_class, *method_name[0], *signature[0])
+    if get_default == null || env.functions.ExceptionCheck(env) != 0 { return }
+    current := env.functions.CallStaticObjectMethodA(env, locale_class, get_default, null)
+    if current == null || env.functions.ExceptionCheck(env) != 0 { return }
+    defer { env.functions.DeleteLocalRef(env, current) }
+    unused CopyCString("toLanguageTag", method_name[:]); unused CopyCString("()Ljava/lang/String;", signature[:])
+    to_tag := env.functions.GetMethodID(env, locale_class, *method_name[0], *signature[0])
+    if to_tag == null || env.functions.ExceptionCheck(env) != 0 { return }
+    tag := env.functions.CallObjectMethodA(env, current, to_tag, null)
+    if tag == null || env.functions.ExceptionCheck(env) != 0 { return }
+    defer { env.functions.DeleteLocalRef(env, tag) }
+    text := env.functions.GetStringUTFChars(env, tag, null)
+    if text == null || env.functions.ExceptionCheck(env) != 0 { return }
+    // Language tags contain ASCII only; modified UTF-8 has the same bytes here.
+    unused CopyCString(TextFromCString(text), locale[:])
+    env.functions.ReleaseStringUTFChars(env, tag, text)
+}
 Poll :: () {
     now:=cast(float64)Clock.Milliseconds(); if last_poll>=0.0 && now-last_poll<150.0 { return }; last_poll=now
     session: AndroidJniSession
     if AndroidJniAttachCurrent(*session)==0 { Clear(); return }; defer { AndroidJniDetachCurrent(*session) }
+    ReadLocale(*session)
     method:=AndroidJniMethod(*session,"galleryState","()[B"); if method==null { Clear(); return }
     response:=session.env.functions.CallObjectMethodA(session.env,session.activity,method,null)
     if response==null || session.env.functions.ExceptionCheck(session.env)!=0 { Clear(); return }

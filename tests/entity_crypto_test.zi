@@ -1,0 +1,77 @@
+Crypto :: #import "entity_crypto";
+Wire :: #import "sync_crypto";
+Test :: #import "sync_crypto_test";
+#import "std/byte_text_linux"
+using Vectors :: #import "std/vec";
+
+main :: () -> s32 {
+    private: Vec(u8); key: Vec(u8); plain: Vec(u8); aad: Vec(u8); record: Vec(u8); chunk: Vec(u8); hash: Vec(u8)
+    derived: Vec(u8); sealed: Vec(u8); out: Vec(u8)
+    defer { Wire.ClearOutput(*derived); Wire.ClearOutput(*out); Wire.ClearOutput(*sealed) }
+    if !Test.Expect(Test.Fixture("private.bin",*private) && Test.Fixture("record-key.bin",*key) &&
+        Test.Fixture("plain.bin",*plain) && Test.Fixture("aad.bin",*aad) && Test.Fixture("record.bin",*record) &&
+        Test.Fixture("chunk.bin",*chunk) && Test.Fixture("hash.txt",*hash), "Python entity fixtures") { return 1 }
+    p := VecSlice(plain,0,plain.count); a := VecSlice(aad,0,aad.count)
+    {
+    k := VecSlice(key,0,key.count)
+    secret := VecSlice(private,0,private.count); digest := TextFromBytes(VecSlice(hash,0,hash.count))
+    if !Test.Expect(Crypto.EntityRecordKey(secret,"photos",*derived) && Test.Equal(VecSlice(derived,0,derived.count),k) &&
+        Crypto.EntityOpen(k,VecSlice(record,0,record.count),a,*out) && Test.Equal(VecSlice(out,0,out.count),p) &&
+        Crypto.EntitySeal(k,p,a,*sealed) && Test.Save("record",*sealed) &&
+        Crypto.EntityOpen(k,VecSlice(sealed,0,sealed.count),a,*out) && Test.Equal(VecSlice(out,0,out.count),p),
+        "record key and Python/Ziran nonce-prefixed records") { return 1 }
+    if !Test.Expect(Crypto.EntitySeal(k,p,*sealed) && Crypto.EntityOpen(k,VecSlice(sealed,0,sealed.count),*out) &&
+        Test.Equal(VecSlice(out,0,out.count),p), "three-argument entity API") { return 1 }
+    if !Test.Expect(Crypto.EntityOpenChunk(secret,"photos",digest,0,VecSlice(chunk,0,chunk.count),*out) &&
+        Test.Equal(VecSlice(out,0,out.count),p) && Crypto.EntitySealChunk(secret,"photos",digest,0,p,*sealed) &&
+        Test.Equal(VecSlice(sealed,0,sealed.count),VecSlice(chunk,0,chunk.count)) && Test.Save("chunk",*sealed),
+        "canonical deterministic ChaCha20-Poly1305 entity chunks match Python") { return 1 }
+    }
+    for mode: 0..5 {
+        chunk[0] ^= ifx mode==0 then cast(u8)1 else cast(u8)0
+        private[0] ^= ifx mode==1 then cast(u8)1 else cast(u8)0
+        hash[0] ^= ifx mode==2 then cast(u8)1 else cast(u8)0
+        size := chunk.count - ifx mode==3 then 1 else 0
+        kind := ifx mode==4 then "levels" else "photos"
+        index := ifx mode==5 then 1 else 0
+        failed: bool
+        {
+            secret := VecSlice(private,0,private.count)
+            digest := TextFromBytes(VecSlice(hash,0,hash.count))
+            failed = !Crypto.EntityOpenChunk(secret,kind,digest,index,VecSlice(chunk,0,size),*out)
+        }
+        chunk[0] ^= ifx mode==0 then cast(u8)1 else cast(u8)0
+        private[0] ^= ifx mode==1 then cast(u8)1 else cast(u8)0
+        hash[0] ^= ifx mode==2 then cast(u8)1 else cast(u8)0
+        if !Test.Expect(failed && Test.Wiped(*out), "tamper/key/hash/truncation/kind/index failures wipe chunks") { return 1 }
+    }
+    large: [8193]u8; longKey: [33]u8
+    {
+    k := VecSlice(key,0,key.count)
+    secret := VecSlice(private,0,private.count); digest := TextFromBytes(VecSlice(hash,0,hash.count))
+    if !Test.Expect(!Crypto.EntityRecordKey(secret[:0],"photos",*out) && Test.Wiped(*out) &&
+        !Crypto.EntityRecordKey(large[:],"photos",*out) && Test.Wiped(*out) &&
+        !Crypto.EntityRecordKey(secret,"Photos",*out) && Test.Wiped(*out) &&
+        !Crypto.EntitySealChunk(secret,"photos",digest,-1,p,*out) && Test.Wiped(*out) &&
+        !Crypto.EntitySealChunk(secret,"photos",digest,1000000,p,*out) && Test.Wiped(*out) &&
+        !Crypto.EntityOpenChunk(secret,"photos",digest,0,VecSlice(chunk,0,16),*out) && Test.Wiped(*out) &&
+        !Crypto.EntitySealChunk(secret,"photos",digest,0,p[:0],*out) && Test.Wiped(*out) &&
+        !Crypto.EntitySeal(k[:31],p,a,*out) && Test.Wiped(*out) &&
+        !Crypto.EntityOpen(longKey[:],VecSlice(record,0,record.count),a,*out) && Test.Wiped(*out),
+        "entity key/index/content bounds") { return 1 }
+    }
+    for mode: 0..2 {
+        key[0] ^= ifx mode==0 then cast(u8)1 else cast(u8)0
+        record[record.count-1] ^= ifx mode==1 then cast(u8)1 else cast(u8)0
+        size := record.count - ifx mode==2 then 1 else 0
+        failed: bool
+        {
+            k := VecSlice(key,0,key.count)
+            failed = !Crypto.EntityOpen(k,VecSlice(record,0,size),a,*out)
+        }
+        key[0] ^= ifx mode==0 then cast(u8)1 else cast(u8)0
+        record[record.count-1] ^= ifx mode==1 then cast(u8)1 else cast(u8)0
+        if !Test.Expect(failed && Test.Wiped(*out), "record authentication failures wipe output") { return 1 }
+    }
+    print("entity_crypto: local tests passed\n"); return 0
+}

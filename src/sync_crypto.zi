@@ -3,6 +3,98 @@
 Native :: #import "daochi_client/crypto_native";
 Backup :: #import "backup_crypto";
 #import "std/byte_text_linux"
+using Vectors :: #import "std/vec";
+
+// VecSlice borrows only a local Vec binding. At this native boundary the
+// caller retains the vector while DaochiClient writes its initialized bytes.
+OutputBytes :: (out: *Vec(u8)) -> []u8 {
+    empty: []u8
+    if out == null || out.count == 0 { return empty }
+    return BytesFromPointer(*(<<out)[0], cast(u64)out.count)
+}
+
+// Caller owns the result. Inputs must not borrow the output vector. Wipe the
+// whole allocation, including capacity retained by an earlier, longer result.
+ClearOutput :: (out: *Vec(u8)) {
+    if out == null { return }
+    if VecResize(<<out, out.capacity) {
+        Native.Clear(OutputBytes(out))
+    }
+    unused VecResize(<<out, 0)
+}
+
+PrepareOutput :: (out: *Vec(u8), count: s64) -> bool {
+    ClearOutput(out)
+    return out != null && count >= 0 && VecResize(<<out, count)
+}
+
+SyncEncrypt :: (key: []u8, data: []u8, aad: []u8, nonce: []u8, out: *Vec(u8)) -> bool {
+    ClearOutput(out)
+    if key.count != 32 || nonce.count != 24 || data.count < 0 || data.count > 134217728 ||
+        aad.count < 0 || aad.count > 1048576 || !PrepareOutput(out, data.count+16) { return false }
+    if Native.Seal(data, aad, key, nonce, OutputBytes(out)) != data.count+16 {
+        ClearOutput(out); return false
+    }
+    return true
+}
+
+SyncDecrypt :: (key: []u8, data: []u8, aad: []u8, nonce: []u8, out: *Vec(u8)) -> bool {
+    ClearOutput(out)
+    if key.count != 32 || nonce.count != 24 || data.count < 16 || data.count > 134217744 ||
+        aad.count < 0 || aad.count > 1048576 || !PrepareOutput(out, data.count-16) { return false }
+    if Native.Open(data, aad, key, nonce, OutputBytes(out)) != data.count-16 {
+        ClearOutput(out); return false
+    }
+    return true
+}
+
+// The released blob/record framing: nonce[24] followed by ciphertext and tag.
+SyncSeal :: (key: []u8, data: []u8, aad: []u8, resumable: bool, out: *Vec(u8)) -> bool {
+    ClearOutput(out)
+    if key.count != 32 || data.count < 0 || data.count > 134217728 || aad.count < 0 ||
+        aad.count > 1048576 || !PrepareOutput(out, data.count+40) { return false }
+    if Backup.Seal(data, aad, key, OutputBytes(out), resumable) != data.count+40 {
+        ClearOutput(out); return false
+    }
+    return true
+}
+
+SyncOpen :: (key: []u8, data: []u8, aad: []u8, out: *Vec(u8)) -> bool {
+    ClearOutput(out)
+    if key.count != 32 || data.count < 40 || data.count > 134217768 || aad.count < 0 ||
+        aad.count > 1048576 || !PrepareOutput(out, data.count-40) { return false }
+    if Backup.Open(data, aad, key, OutputBytes(out)) != data.count-40 {
+        ClearOutput(out); return false
+    }
+    return true
+}
+
+SyncCrypt :: (key: []u8, data: []u8, seal: bool, out: *Vec(u8)) -> bool {
+    empty: [0]u8
+    if seal { return SyncSeal(key, data, empty[:], false, out) }
+    return SyncOpen(key, data, empty[:], out)
+}
+
+DeviceSignature :: (seed: []u8, message: []u8, out: *Vec(u8)) -> bool {
+    ClearOutput(out)
+    if seed.count != 32 || message.count < 0 || message.count > 134217728 ||
+        !PrepareOutput(out, 64) { return false }
+    if !Native.SignDevice(seed, message, OutputBytes(out)) { ClearOutput(out); return false }
+    return true
+}
+
+DevicePublic :: (seed: []u8, out: *Vec(u8)) -> bool {
+    ClearOutput(out)
+    if seed.count != 32 || !PrepareOutput(out, 32) { return false }
+    if !Native.DevicePublic(seed, OutputBytes(out)) { ClearOutput(out); return false }
+    return true
+}
+
+DeviceSeed :: (out: *Vec(u8)) -> bool {
+    if !PrepareOutput(out, 32) { return false }
+    if !Native.RandomBytes(OutputBytes(out)) { ClearOutput(out); return false }
+    return true
+}
 c :: #system_library "c";
 Read :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign c "read";
 Write :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign c "write";

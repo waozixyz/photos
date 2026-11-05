@@ -1,0 +1,276 @@
+// Public model preparation only: no Photos library or account is opened.
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+JSON :: #import "std/json_document";
+Crypto :: #import "crypto/sha256";
+Process :: #import "std/process_run_linux";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+#import "std/option"
+using Vectors :: #import "std/vec";
+
+#scope_export
+ModelProfile :: struct {
+    manifest: string
+    destination: string
+    licenses: [2]string
+    message: string
+}
+
+Profile :: (kind: string) -> ModelProfile {
+    profile: ModelProfile
+    if kind == "face" {
+        profile.manifest = "FACE-MODELS.json"
+        profile.destination = "build/models/face"
+        profile.licenses[0] = "SFACE-LICENSE.txt"
+        profile.licenses[1] = "YUNET-LICENSE.txt"
+        profile.message = "Local face recognition models verified and ready"
+    }
+    if kind == "text" {
+        profile.manifest = "TEXT-MODELS.json"
+        profile.destination = "build/models/ocr"
+        profile.licenses[0] = "TESSERACT-LICENSE.txt"
+        profile.message = "Local text recognition models verified and ready"
+    }
+    if kind == "semantic" {
+        profile.manifest = "SEMANTIC-MODELS.json"
+        profile.destination = "build/models"
+        profile.licenses[0] = "CLIP-LICENSE.txt"
+        profile.message = "Local semantic search models verified and ready"
+    }
+    return profile
+}
+
+#scope_file
+Model :: struct { name: string; source: string; sha256: string; bytes: s64; }
+
+Error :: (message: string, path: string) -> string {
+    out: Vec(u8)
+    BuilderPrint(*out, "%: %", message, path)
+    return BuilderFinish(out)
+}
+
+NameValid :: (name: string) -> bool {
+    if name.count == 0 || name == "." || name == ".." { return false }
+    for name { if it == 0 || it == #char "/" || it == #char "\\" { return false } }
+    return true
+}
+
+HashValid :: (hash: string) -> bool {
+    if hash.count != 64 { return false }
+    for hash {
+        if !((it >= #char "0" && it <= #char "9") ||
+            (it >= #char "a" && it <= #char "f")) { return false }
+    }
+    return true
+}
+
+// Cache verification streams bytes and deliberately follows the Python rule:
+// an existing regular file with the expected SHA-256 is already complete.
+HashMatches :: (path: string, expected: string) -> bool {
+    if !Tree.IsFile(path) { return false }
+    file := Files.OpenRead(path)
+    if !file.valid { return false }
+    defer { unused Files.CloseFile(file) }
+    context: Crypto.Sha256Context
+    Crypto.Sha256Initialize(*context)
+    block: [65536]u8
+    offset: s64 = 0
+    while true {
+        count := Files.ReadAt(file, block[:], offset)
+        if count < 0 { return false }
+        if count == 0 { break }
+        Crypto.Sha256Update(*context, *block[0], count)
+        offset += count
+    }
+    digest: [32]u8
+    hex: [65]u8
+    Crypto.Sha256Finish(*context, *digest[0])
+    return Crypto.BytesToHex(*digest[0], 32, *hex[0], hex.count) == 1 &&
+        TextUntilNul(hex[:]) == expected
+}
+
+ReadManifest :: (path: string, models: *Vec(Model)) -> string {
+    info := Tree.PathStatus(path)
+    if info.kind != Tree.PathKind.File || info.size > 1048576 { return Error("Cannot read model manifest", path) }
+    text, read := Files.ReadEntireFile(path)
+    document: JSON.JsonDocument
+    if !read || !JSON.JsonRead(*document, text) ||
+        JSON.JsonKindOf(*document, document.root) != JSON.JsonKind.Object {
+        return Error("Invalid model manifest", path)
+    }
+    files := JSON.JsonMember(*document, document.root, "files")
+    if JSON.JsonKindOf(*document, files) != JSON.JsonKind.Array { return "Model manifest requires a files array" }
+    node := JSON.JsonFirst(*document, files)
+    while node >= 0 {
+        name := JSON.JsonMember(*document, node, "name")
+        source := JSON.JsonMember(*document, node, "source")
+        hash := JSON.JsonMember(*document, node, "sha256")
+        bytes, integer := JSON.JsonInteger(*document, JSON.JsonMember(*document, node, "bytes"))
+        model: Model = .{name = JSON.JsonString(*document, name),
+            source = JSON.JsonString(*document, source),
+            sha256 = JSON.JsonString(*document, hash), bytes = bytes}
+        if JSON.JsonKindOf(*document, node) != JSON.JsonKind.Object ||
+            JSON.JsonKindOf(*document, name) != JSON.JsonKind.String || !NameValid(model.name) ||
+            JSON.JsonKindOf(*document, source) != JSON.JsonKind.String || model.source.count == 0 ||
+            !HashValid(model.sha256) || !integer || bytes < 0 {
+            return "Invalid model entry: name, source, bytes and lowercase SHA-256 are required"
+        }
+        for index: 0..models.count - 1 {
+            if VecGet(<<models, index).value.name == model.name { return Error("Duplicate model name", model.name) }
+        }
+        if !VecPush(<<models, model) { return "Cannot allocate model manifest" }
+        node = JSON.JsonNext(*document, node)
+    }
+    return ""
+}
+
+CopyBounded :: (source: string, target: string, maximum: s64) -> bool {
+    if !Tree.IsFile(source) { return false }
+    input := Files.OpenRead(source)
+    if !input.valid { return false }
+    defer { unused Files.CloseFile(input) }
+    output := Files.OpenUpdate(target)
+    if !output.valid { return false }
+    defer { unused Files.CloseFile(output) }
+    block: [65536]u8
+    offset: s64 = 0
+    while true {
+        count := Files.ReadAt(input, block[:], offset)
+        if count < 0 || count > maximum - offset { return false }
+        if count == 0 { break }
+        written: s64 = 0
+        while written < count {
+            amount := Files.WriteAt(output, block[written:count], offset + written)
+            if amount <= 0 { return false }
+            written += amount
+        }
+        offset += count
+    }
+    return offset == maximum && Files.SyncFile(output)
+}
+
+Download :: (source: string, target: string, maximum: s64) -> bool {
+    limit: Vec(u8)
+    // curl interprets a limit of zero as unlimited. One byte still bounds an
+    // empty model's transfer; the exact zero-byte check below rejects it.
+    BuilderPrint(*limit, "%", ifx maximum == 0 then 1 else maximum)
+    // The standard native HTTP adapters use curl as their transport too.
+    // RunProcess passes argv directly; output goes to disk rather than a
+    // model-sized response buffer. Disable curlrc so it cannot redirect writes.
+    arguments: [20]string = .["curl", "--disable", "--fail", "--silent",
+        "--show-error", "--location", "--max-time", "60", "--max-filesize",
+        BuilderFinish(limit), "--proto", "=https,http,file", "--proto-redir",
+        "=https,http", "--output", target, "--url", source, "--user-agent", "Photos/1.0"]
+    run: Process.ProcessRun
+    return Process.RunProcess(.{arguments = arguments[:]}, *run) &&
+        run.started && run.finished && run.code == 0
+}
+
+PrepareModel :: (model: Model, destination: string, source: string) -> string {
+    target := Tree.JoinPath(destination, model.name)
+    if HashMatches(target, model.sha256) { return "" }
+    staging := Tree.CreateTemporaryDirectory(destination, ".model-")
+    if staging.count == 0 { return Error("Cannot create model staging directory", destination) }
+    defer { unused Tree.RemoveTree(staging) }
+    incoming := Tree.JoinPath(staging, model.name)
+    file := Files.OpenExclusivePrivate(incoming)
+    if !file.valid { return Error("Cannot create model staging file", incoming) }
+    if !Files.CloseFile(file) { return Error("Cannot close model staging file", incoming) }
+    copied: bool
+    if source.count > 0 { copied = CopyBounded(Tree.JoinPath(source, model.name), incoming, model.bytes) }
+    else { copied = Download(model.source, incoming, model.bytes) }
+    if !copied { return Error("Model download failed", model.name) }
+    if Tree.PathStatus(incoming).size != model.bytes || !HashMatches(incoming, model.sha256) {
+        return Error("Model integrity check failed", model.name)
+    }
+    file = Files.OpenUpdate(incoming)
+    if !file.valid { return Error("Cannot reopen model staging file", incoming) }
+    synced := Files.SyncFile(file)
+    closed := Files.CloseFile(file)
+    if !synced || !closed { return Error("Cannot sync model staging file", incoming) }
+    if !Files.RenamePath(incoming, target) { return Error("Cannot publish verified model", target) }
+    return ""
+}
+
+CopyLicense :: (source: string, destination: string) -> bool {
+    staging := Tree.CreateTemporaryDirectory(Tree.PathParent(destination), ".model-license-")
+    if staging.count == 0 { return false }
+    defer { unused Tree.RemoveTree(staging) }
+    incoming := Tree.JoinPath(staging, "license")
+    return Tree.CopyFile(source, incoming) && Files.RenamePath(incoming, destination)
+}
+
+FindRoot :: (start: string) -> string {
+    path := start
+    while path.count > 0 {
+        if Tree.IsFile(Tree.JoinPath(path, "assets/FACE-MODELS.json")) &&
+            Tree.IsFile(Tree.JoinPath(path, "assets/TEXT-MODELS.json")) &&
+            Tree.IsFile(Tree.JoinPath(path, "assets/SEMANTIC-MODELS.json")) { return path }
+        parent := Tree.PathParent(path)
+        if parent == path { break }
+        path = parent
+    }
+    return ""
+}
+
+#scope_export
+// Existing files are replaced individually, only after exact size and SHA-256
+// verification. A later failure keeps previously verified files, as in Python.
+FetchFrom :: (manifest: string, dest: string, source: string) -> (ok: bool, error: string) {
+    models: Vec(Model)
+    error := ReadManifest(manifest, *models)
+    if error.count > 0 { return false, error }
+    if !Tree.CreateDirectories(dest, 448) { return false, Error("Cannot create model destination", dest) }
+    for model: models {
+        error = PrepareModel(model, dest, source)
+        if error.count > 0 { return false, error }
+    }
+    return true, ""
+}
+
+Fetch :: (manifest: string, dest: string) -> (ok: bool, error: string) {
+    return FetchFrom(manifest, dest, "")
+}
+
+// Arguments exclude the executable. ROOT owns assets and default destinations.
+Run :: (arguments: []string, root: string) -> s32 {
+    if arguments.count == 1 && (arguments[0] == "--help" || arguments[0] == "-h") {
+        print("Usage: fetch_models <face|text|semantic> [--source DIR] [--destination DIR]\n")
+        return 0
+    }
+    if arguments.count == 0 { print("Model kind required: face, text or semantic\n"); return 2 }
+    profile := Profile(arguments[0])
+    if profile.manifest.count == 0 { print("Unknown model kind: %\n", arguments[0]); return 2 }
+    source: string
+    dest := Tree.JoinPath(root, profile.destination)
+    index: s64 = 1
+    while index < arguments.count {
+        option := arguments[index]
+        if (option != "--source" && option != "--destination") || index + 1 >= arguments.count ||
+            arguments[index + 1].count == 0 { print("Invalid model option: %\n", option); return 2 }
+        if option == "--source" { source = arguments[index + 1] }
+        else { dest = arguments[index + 1] }
+        index += 2
+    }
+    manifest := Tree.JoinPath(Tree.JoinPath(root, "assets"), profile.manifest)
+    ok, error := FetchFrom(manifest, dest, source)
+    if !ok { print("%\n", error); return 1 }
+    for license: profile.licenses {
+        if license.count == 0 { continue }
+        if !CopyLicense(Tree.JoinPath(Tree.JoinPath(root, "assets"), license), Tree.JoinPath(dest, license)) {
+            print("Cannot copy model license: %\n", license)
+            return 1
+        }
+    }
+    print("%\n", profile.message)
+    return 0
+}
+
+main :: (argc: s32, argv: **u8) -> s32 {
+    root := FindRoot(Tree.PathParent(Tree.ResolvePath("/proc/self/exe")))
+    if root.count == 0 { root = FindRoot(Tree.WorkingDirectory()) }
+    arguments: Vec(string)
+    for index: 1..argc - 1 { VecPush(arguments, TextFromCString(argv[index])) }
+    return Run(VecSlice(arguments, 0, arguments.count), root)
+}

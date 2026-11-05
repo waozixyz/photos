@@ -6,6 +6,18 @@ Native :: #import "daochi_client/crypto_native";
 AccountRequest :: #import "sync_account";
 #import "std/byte_text_linux"
 #import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+// The digest is of the exact request bytes; no copy of a large body is needed.
+// Caller-owned output must not alias input storage; failures wipe its capacity.
+BuildTransaction :: (public: []u8, private: []u8, seed: []u8, method: u8, path: string,
+    digest: []u8, expires: s64, out: *Vec(u8)) -> bool {
+    Wire.ClearOutput(out)
+    header: [8192]u8; defer { Native.Clear(header[:]) }
+    if !Sign.Header(public,private,seed,method,path,digest,expires,header[:]) { return false }
+    text:=TextUntilNul(header[:]); if !Wire.PrepareOutput(out,text.count) { return false }
+    result:=Wire.OutputBytes(out); for i: 0..text.count-1 { result[i]=text[i] }; return true
+}
 c :: #system_library "c";
 Read :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign c "read";
 main :: () -> s32 {
@@ -29,8 +41,8 @@ main :: () -> s32 {
         !Wire.ReadAll(*seed[0],32) || !Wire.ReadAll(*digest[0],32) || !Wire.ReadAll(*path[0],count) { return 2 }
     extra: u8
     if Read(0,*extra,1)!=0 { return 2 }
-    header: [8192]u8
-    if !Sign.Header(public_key[:],private_key[:],seed[:],frame[1],TextFromBytes(path[:count]),digest[:],cast(s64)expires,header[:]) { return 2 }
-    text:=TextUntilNul(header[:]); descriptor:=cast(*TextDescriptor)*text
-    return ifx Wire.SendAll(descriptor.data,text.count) then 0 else 2
+    header: Vec(u8); defer { Wire.ClearOutput(*header) }
+    if !BuildTransaction(public_key[:],private_key[:],seed[:],frame[1],TextFromBytes(path[:count]),digest[:],cast(s64)expires,*header) { return 2 }
+    bytes:=VecSlice(header,0,header.count)
+    return ifx Wire.SendAll(*bytes[0],header.count) then 0 else 2
 }

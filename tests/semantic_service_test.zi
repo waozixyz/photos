@@ -1,0 +1,383 @@
+S :: #import "semantic_service";
+Index :: #import "semantic_index";
+Store :: #import "library_store";
+Gallery :: #import "gallery_query";
+LibraryFiles :: #import "library_files";
+Kit :: #import "kit";
+Auth :: #import "vault_auth";
+SQL :: #import "sqlite/SQLite";
+JSON :: #import "std/json_document";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+Timer :: #import "std/timer_linux";
+Thread :: #import "std/thread_linux";
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+c :: #system_library "c";
+Kill :: (pid: s32, signal: s32) -> s32 #foreign c "kill";
+
+#scope_file
+First :: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+Second :: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+Hidden :: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+Missing :: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+lifetime_root: string;
+lifetime_lib: *Store.Library;
+lifetime_service: S.Service;
+Exec :: (lib: *Store.Library, sql: string) -> bool { return SQL.SqliteExecText(lib.db,sql) == SQL.SQLITE_OK }
+Scalar :: (lib: *Store.Library, sql: string) -> s64 {
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,sql,-1,*statement,null) != SQL.SQLITE_OK { return -1 }
+    defer { unused SQL.SqliteFinalize(statement) }
+    return ifx SQL.SqliteStep(statement) == SQL.SQLITE_ROW then SQL.SqliteColumnInt64(statement,0) else -1
+}
+Add :: (lib: *Store.Library, identity: string, hidden: bool = false, original: bool = true) -> bool {
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,"INSERT INTO photos(id,name,extension,kind,size,taken,metadata,albums,updated,hidden) VALUES(?,'synthetic.png','.png','photo',100,1700000000,'{}','[]',100,?)",-1,*statement,null) != SQL.SQLITE_OK { return false }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if SQL.SqliteBindTextString(statement,1,identity,-1) != SQL.SQLITE_OK || SQL.SqliteBindInt(statement,2,ifx hidden then 1 else 0) != SQL.SQLITE_OK || SQL.SqliteStep(statement) != SQL.SQLITE_DONE { return false }
+    if !original { return true }
+    path: Vec(u8)
+    if !LibraryFiles.OriginalInto(*path,lib,identity,".png") { return false }
+    text := TextView(VecSlice(path,0,path.count))
+    return Tree.CreateDirectories(Tree.PathParent(text),448) && Tree.CopyFile("tests/fixtures/clip-image/alpha.png",text)
+}
+GetNumber :: (document: *JSON.JsonDocument, name: string) -> s64 {
+    value,ok := JSON.JsonInteger(document,JSON.JsonMember(document,document.root,name)); return ifx ok then value else -1
+}
+State :: (service: *S.Service, lib: *Store.Library, enabled: s64, processing: s64, indexed: s64, failed: s64, status: string = "") -> bool {
+    text := S.State(service,lib); defer { Auth.ReleaseOwned(text,false) }
+    document: JSON.JsonDocument; defer { JSON.JsonReset(*document) }
+    return JSON.JsonRead(*document,text) && GetNumber(*document,"semantic_enabled") == enabled &&
+        GetNumber(*document,"semantic_processing") == processing && GetNumber(*document,"semantic_indexed") == indexed && GetNumber(*document,"semantic_failed") == failed &&
+        (status.count == 0 || JSON.JsonIs(*document,JSON.JsonMember(*document,document.root,"semantic_status"),status))
+}
+Legacy :: () -> string {
+    bytes: Vec(u8); BuilderPrint(*bytes,"{\"model\":\"clip-vit-b32-int8-v1\",\"unknown\":{\"keep\":42},\"values\":[1")
+    for at: 1..511 { BuilderPrint(*bytes,",0") }
+    BuilderPrint(*bytes,"]}"); return BuilderFinish(bytes)
+}
+IndexCases :: (lib: *Store.Library) -> bool {
+    legacy := Legacy(); defer { Auth.ReleaseOwned(legacy,false) }
+    if !S.AcceptIndex(lib,First,legacy) { return false }
+    blob := S.IndexBlob(lib,First); defer { Auth.ReleaseOwned(blob,false) }
+    if blob.count < 2732 || !S.AcceptIndex(lib,Second,blob) { return false }
+    second := S.IndexBlob(lib,Second); defer { Auth.ReleaseOwned(second,false) }
+    if blob != second { return false }
+    invalid: [6]string = .["true","[]","{\"model\":\"unknown\"}","{\"model\":\"clip-vit-b32-int8-v1\",\"vector\":\"bad\"}","{\"model\":\"clip-vit-b32-int8-v1\",\"values\":[1]}","null trailing"]
+    for text: invalid {
+        if S.AcceptIndex(lib,First,text) { return false }
+        after := S.IndexBlob(lib,First); defer { Auth.ReleaseOwned(after,false) }
+        if after != blob { return false }
+    }
+    // A caller rollback includes the accepted index; no hidden transaction.
+    if !Exec(lib,"BEGIN IMMEDIATE") || !S.AcceptIndex(lib,First,"null") || !Exec(lib,"ROLLBACK") { return false }
+    after := S.IndexBlob(lib,First); defer { Auth.ReleaseOwned(after,false) }
+    return after == blob && S.AcceptIndex(lib,Second,"null")
+}
+Boundary :: (service: *S.Service) -> bool {
+    bytes: Vec(u8)
+    if !S.TextTensor(*service.tokenizer,"\x1c cafe\xcc\x81 ΟΣ 🙂 \x1f",*bytes) || bytes.count != 616 || bytes[0] != 254 || bytes[1] != 192 { return false }
+    invalid: [4]string = .[""," \t\n\x1c\x1f","\x00","a\x00b"]
+    for text: invalid { if S.TextTensor(*service.tokenizer,text,*bytes) || bytes.count != 0 { return false } }
+    too_long: [513]u8
+    for at: 0..512 { too_long[at] = 32 }; too_long[256] = 120
+    return !S.TextTensor(*service.tokenizer,TextView(too_long[:]),*bytes) && bytes.count == 0
+}
+SearchCases :: (service: *S.Service, lib: *Store.Library) -> bool {
+    tensor: Vec(u8); embedding: Vec(u8)
+    if !S.TextTensor(*service.tokenizer,"a red photo",*tensor) || S.Infer(service,lib,"text",VecSlice(tensor,0,tensor.count),*embedding) != "" || !S.ValidEmbedding(VecSlice(embedding,0,embedding.count)) { return false }
+    // Store this real model's normalized output, so a fresh identical query
+    // has cosine score 1 independently of image/text similarity thresholds.
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,"INSERT OR REPLACE INTO semantic_embeddings VALUES(?,'clip-vit-b32-int8-v1',?,'')",-1,*statement,null) != SQL.SQLITE_OK { return false }
+    defer { unused SQL.SqliteFinalize(statement) }
+    ids: [3]string = .[First,Second,Hidden]
+    for id: ids {
+        if SQL.SqliteBindTextString(statement,1,id,-1) != SQL.SQLITE_OK || SQL.SqliteBindBlob(statement,2,VecSlice(embedding,0,embedding.count)) != SQL.SQLITE_OK || SQL.SqliteStep(statement) != SQL.SQLITE_DONE { return false }
+        unused SQL.SqliteReset(statement); unused SQL.SqliteClearBindings(statement)
+    }
+    services: Gallery.QueryServices; services.context = cast(*void)service; services.semantic_page = S.SearchService; services.semantic_state = S.StateService; services.semantic_kick = S.KickService
+    response := Gallery.LibraryQuery(lib,"{\"view\":\"semantic\",\"search\":\"a red photo\",\"limit\":10}",*services)
+    defer { Auth.ReleaseOwned(response,false) }
+    document: JSON.JsonDocument; defer { JSON.JsonReset(*document) }
+    if lib.error.count > 0 || !JSON.JsonRead(*document,response) || GetNumber(*document,"count") != 2 || JSON.JsonCount(*document,JSON.JsonMember(*document,document.root,"photos")) != 2 { print("C18 semantic response %\n",response); return false }
+    blank := S.SearchPage(service,lib,"{\"view\":\"semantic\",\"search\":\" \\t\\u001c\"}"); defer { Auth.ReleaseOwned(blank,false) }
+    if !JSON.JsonRead(*document,blank) || GetNumber(*document,"count") != 0 { return false }
+    // Index round trip preserves the exact inference bytes in compact form.
+    exported := S.IndexBlob(lib,First); defer { Auth.ReleaseOwned(exported,false) }
+    if !S.AcceptIndex(lib,Missing,exported) { return false }
+    imported := S.IndexBlob(lib,Missing); defer { Auth.ReleaseOwned(imported,false) }
+    return imported == exported
+}
+DatabaseFailure :: (service: *S.Service, lib: *Store.Library) -> bool {
+    if !Exec(lib,"ALTER TABLE settings RENAME TO semantic_test_settings") { return false }
+    restored: bool
+    defer { if !restored { unused Exec(lib,"ALTER TABLE semantic_test_settings RENAME TO settings") } }
+    state := S.State(service,lib); defer { Auth.ReleaseOwned(state,false) }
+    if state.count != 0 || lib.error.count == 0 { return false }
+    kick_error := S.Kick(service,lib)
+    if kick_error.count == 0 || kick_error != lib.error { return false }
+    page := S.SearchPage(service,lib,"{\"view\":\"semantic\",\"search\":\"a photo\"}"); defer { Auth.ReleaseOwned(page,false) }
+    if page.count != 0 || lib.error.count == 0 { return false }
+    if !Exec(lib,"ALTER TABLE semantic_test_settings RENAME TO settings") { return false }
+    restored = true
+    state_after := S.State(service,lib); defer { Auth.ReleaseOwned(state_after,false) }
+    return state_after.count > 0 && lib.error.count == 0
+}
+Wait :: (service: *S.Service, milliseconds: s64 = 10000) -> bool {
+    start := Timer.MonotonicMilliseconds()
+    while service.worker.running {
+        if Thread.ThreadFinished(*service.worker) { return true }
+        if Timer.MonotonicMilliseconds()-start > milliseconds { return false }
+        unused Timer.SleepMilliseconds(10)
+    }
+    return true
+}
+Path :: (root: string, name: string) -> string { output: Vec(u8); BuilderPrint(*output,"%/%",root,name); return BuilderFinish(output) }
+Remove :: (path: string) { if Files.PathExists(path) { unused Files.RemoveFile(path) } }
+Ready :: (service: *S.Service, marker: string, previous: string = "") -> string {
+    start := Timer.MonotonicMilliseconds()
+    while Timer.MonotonicMilliseconds()-start < 10000 {
+        bytes: Vec(u8)
+        if Files.ReadFileInto(marker,*bytes) && bytes.count > 0 {
+            text := TextView(VecSlice(bytes,0,bytes.count))
+            if text != previous { return Auth.CloneOwned(text) }
+        }
+        if Thread.ThreadFinished(*service.worker) { break }
+        unused Timer.SleepMilliseconds(5)
+    }
+    return ""
+}
+ScratchEmpty :: (lib: *Store.Library) -> bool {
+    path := Path(lib.root,"private/semantic"); defer { Auth.ReleaseOwned(path,false) }
+    cursor := Files.OpenDirectory(path); if !cursor.valid { return false }
+    defer { unused Files.CloseDirectory(*cursor) }
+    while true {
+        entry := Files.NextDirectoryEntry(*cursor); if !entry.valid { break }
+        name := TextUntilNul(entry.name[:])
+        if name != "." && name != ".." { return false }
+    }
+    return !cursor.failed
+}
+DelayCases :: (lib: *Store.Library) -> bool {
+    helper := Path(lib.root,"delayed-infer"); defer { Auth.ReleaseOwned(helper,false) }
+    marker := Path(lib.root,"ready"); defer { Auth.ReleaseOwned(marker,false) }
+    release := Path(lib.root,"release"); defer { Auth.ReleaseOwned(release,false) }
+    vector := Path(lib.root,"vector"); defer { Auth.ReleaseOwned(vector,false) }
+    guest := Path(lib.root,"private/guest-view.json"); defer { Auth.ReleaseOwned(guest,false) }
+    // Typed native process supervision supplies cancellation/deadlines. This
+    // trusted fixture exercises the boundary with an inference held in flight.
+    script := "#!/bin/sh\nset -eu\ntest -z \"${DISPLAY-}${WAYLAND_DISPLAY-}${XAUTHORITY-}${DBUS_SESSION_BUS_ADDRESS-}${SESSION_MANAGER-}\" || exit 97\nroot=$(cd -- \"$(dirname -- \"$5\")/../../..\" && pwd)\nprintf '%s' \"$$\" > \"$root/ready\"\nwhile test ! -e \"$root/release\"; do sleep 0.01; done\nrm -f -- \"$root/release\"\ncp -- \"$root/vector\" \"$5\"\n"
+    if !Files.WriteEntireFile(helper,script) || !Tree.SetPathMode(helper,448) { return false }
+    bytes: [2048]u8; bytes[6] = 128; bytes[7] = 63
+    file := Files.OpenReplace(vector)
+    if !file.valid { return false }
+    written := Files.WriteAt(file,bytes[:],0) == 2048
+    unused Files.CloseFile(file)
+    if !written { return false }
+    legacy := Legacy(); defer { Auth.ReleaseOwned(legacy,false) }
+    options: S.Options; options.program = helper; options.timeout_ms = 10000
+    service: S.Service
+    if !S.Open(*service,lib,options) { return false }
+    defer { S.Close(*service) }
+    for mode: 0..8 {
+        Remove(marker); Remove(release); Remove(guest)
+        if !Exec(lib,"DELETE FROM semantic_embeddings; UPDATE photos SET hidden=(id<>'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),updated=100; DROP TRIGGER IF EXISTS reject_semantic") ||
+            !Store.SetSetting(lib,"semantic_enabled","true") || !Store.SetSetting(lib,"semantic_processing","true") || S.Kick(*service,lib) != "" { return false }
+        pid := Ready(*service,marker); defer { Auth.ReleaseOwned(pid,false) }
+        if pid.count == 0 { print("Semantic delayed helper did not start at case %\n",mode); return false }
+        if !State(*service,lib,1,1,0,0,"Indexing locally · 0 of 1 photos · 0 unavailable") { return false }
+        if mode == 0 && !Exec(lib,"UPDATE photos SET hidden=1") { return false }
+        if mode == 1 && !Exec(lib,"UPDATE photos SET updated=101") { return false }
+        if mode == 2 && !Store.SetSetting(lib,"semantic_processing","false") { return false }
+        if mode == 3 && !Store.SetSetting(lib,"semantic_enabled","false") { return false }
+        restored: string
+        defer { Auth.ReleaseOwned(restored,false) }
+        if mode == 4 {
+            if !S.AcceptIndex(lib,First,legacy) { return false }
+            restored = S.IndexBlob(lib,First)
+        }
+        if mode == 5 && !Files.WriteEntireFile(guest,"{}") { return false }
+        if mode == 6 && !Exec(lib,"CREATE TRIGGER reject_semantic BEFORE UPDATE OF dirty ON photos BEGIN SELECT RAISE(ABORT,'synthetic write failure'); END") { return false }
+        if mode == 7 && S.Enable(*service,lib,false) != "" { return false }
+        if mode == 8 {
+            start := Timer.MonotonicMilliseconds(); S.Close(*service)
+            if Timer.MonotonicMilliseconds()-start > 2000 || !ScratchEmpty(lib) || Scalar(lib,"SELECT count(*) FROM semantic_embeddings") != 0 { return false }
+            parsed: JSON.JsonDocument; defer { JSON.JsonReset(*parsed) }
+            if !JSON.JsonRead(*parsed,pid) { return false }
+            process,ok := JSON.JsonInteger(*parsed,parsed.root)
+            if !ok || Kill(cast(s32)process,0) == 0 { return false }
+            break
+        }
+        if mode != 7 && !Files.WriteEntireFile(release,"release") { return false }
+        if mode == 1 {
+            // The old snapshot must not publish. Wait until a new snapshot
+            // retries, then cancel that separate job before it can publish.
+            next := Ready(*service,marker,pid); defer { Auth.ReleaseOwned(next,false) }
+            if next.count == 0 || Scalar(lib,"SELECT count(*) FROM semantic_embeddings") != 0 || S.Enable(*service,lib,false) != "" { return false }
+        }
+        if !Wait(*service) || !ScratchEmpty(lib) { return false }
+        count := Scalar(lib,"SELECT count(*) FROM semantic_embeddings")
+        if count != (ifx mode == 4 then 1 else 0) { print("Semantic stale/cancel case % left % rows\n",mode,count); return false }
+        if mode == 4 {
+            after := S.IndexBlob(lib,First); defer { Auth.ReleaseOwned(after,false) }
+            if after.count == 0 || after != restored { return false }
+        }
+    }
+    Remove(marker); Remove(release); Remove(guest)
+    return Exec(lib,"DROP TRIGGER IF EXISTS reject_semantic; DELETE FROM semantic_embeddings; UPDATE photos SET hidden=(id='cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc')")
+}
+FailureCases :: (lib: *Store.Library) -> bool {
+    helper := Path(lib.root,"failed-infer"); defer { Auth.ReleaseOwned(helper,false) }
+    programs: [3]string = .["#!/bin/sh\nexec sleep 10\n","#!/bin/sh\nprintf bad > \"$5\"\n","#!/bin/sh\nexit 23\n"]
+    for mode: 0..2 {
+        if !Files.WriteEntireFile(helper,programs[mode]) || !Tree.SetPathMode(helper,448) { return false }
+        options: S.Options; options.program = helper; options.timeout_ms = ifx mode == 0 then 100 else 10000
+        service: S.Service
+        if !S.Open(*service,lib,options) { return false }
+        defer { S.Close(*service) }
+        if S.Prepare(*service) != "" { return false }
+        tensor: Vec(u8); output: Vec(u8)
+        if !S.TextTensor(*service.tokenizer,"a photo",*tensor) { return false }
+        start := Timer.MonotonicMilliseconds()
+        error := S.Infer(*service,lib,"text",VecSlice(tensor,0,tensor.count),*output)
+        if error.count == 0 || output.count != 0 || !ScratchEmpty(lib) || (mode == 0 && Timer.MonotonicMilliseconds()-start > 2000) { return false }
+    }
+    return true
+}
+RAWCancel :: (lib: *Store.Library) -> bool {
+    helper_root := Path(lib.root,"raw-helpers"); defer { Auth.ReleaseOwned(helper_root,false) }
+    helper := Path(helper_root,"photo_decode"); defer { Auth.ReleaseOwned(helper,false) }
+    marker := Path(lib.root,"raw-ready"); defer { Auth.ReleaseOwned(marker,false) }
+    if !Tree.CreateDirectories(helper_root,448) { return false }
+    script := "#!/bin/sh\nset -eu\nroot=$(cd -- \"$(dirname -- \"$2\")/../..\" && pwd)\nprintf '%s' \"$$\" > \"$root/raw-ready\"\nexec sleep 30\n"
+    if !Files.WriteEntireFile(helper,script) || !Tree.SetPathMode(helper,448) ||
+        !Exec(lib,"DELETE FROM semantic_embeddings; UPDATE photos SET hidden=(id<>'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'); UPDATE photos SET extension='.heic',updated=200 WHERE id='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'") { return false }
+    original: Vec(u8)
+    if !LibraryFiles.OriginalInto(*original,lib,First,".heic") { return false }
+    original_path := TextView(VecSlice(original,0,original.count))
+    if !Tree.CopyFile("tests/fixtures/codec/still.heic",original_path) { return false }
+    service: S.Service; options: S.Options
+    options.file_options.application_root = helper_root; options.file_options.decode_timeout_ms = 10000
+    if !S.Open(*service,lib,options) { return false }
+    defer { S.Close(*service) }
+    if S.Enable(*service,lib,true) != "" { return false }
+    pid := Ready(*service,marker); defer { Auth.ReleaseOwned(pid,false) }
+    if pid.count == 0 { print("RAW cancellation: decoder never reached its marker\n"); return false }
+    start := Timer.MonotonicMilliseconds(); S.Close(*service)
+    elapsed := Timer.MonotonicMilliseconds()-start
+    if elapsed > 2000 || !ScratchEmpty(lib) || Scalar(lib,"SELECT count(*) FROM semantic_embeddings") != 0 { print("RAW cancellation: shutdown %ms, index rows %\n",elapsed,Scalar(lib,"SELECT count(*) FROM semantic_embeddings")); return false }
+    parsed: JSON.JsonDocument; defer { JSON.JsonReset(*parsed) }
+    if !JSON.JsonRead(*parsed,pid) { return false }
+    process,ok := JSON.JsonInteger(*parsed,parsed.root)
+    if !ok || Kill(cast(s32)process,0) == 0 { print("RAW cancellation: decoder process remained alive\n"); return false }
+    // The real C16 decoder is used on retry; the same original must remain
+    // byte-for-byte intact after cancellation and successful processing.
+    before: Vec(u8); after: Vec(u8)
+    if !Files.ReadFileInto("tests/fixtures/codec/still.heic",*before) || !Files.ReadFileInto(original_path,*after) || before.count != after.count { return false }
+    for at: 0..before.count-1 { if before[at] != after[at] { return false } }
+    if !S.Open(*service,lib) { print("RAW retry: service open failed\n"); return false }
+    retry_error := S.Enable(*service,lib,true)
+    if retry_error != "" || !Wait(*service) || !State(*service,lib,1,1,1,0) {
+        status := S.State(*service,lib); defer { Auth.ReleaseOwned(status,false) }
+        print("RAW retry: % %\n",retry_error,status); return false
+    }
+    VecClear(after)
+    if !Files.ReadFileInto(original_path,*after) || before.count != after.count { print("RAW retry: original length changed\n"); return false }
+    for at: 0..before.count-1 { if before[at] != after[at] { return false } }
+    if !ScratchEmpty(lib) { print("RAW retry: scratch files remained\n"); return false }
+    return true
+}
+#scope_export
+#program_export
+PrepareLifetime :: () -> s32 {
+    lifetime_root = Tree.CreateTemporaryDirectory("build/tests/tmp","semantic-service-life-")
+    if lifetime_root.count == 0 { return 1 }
+    error: string
+    lifetime_lib,error = Store.Open(lifetime_root)
+    Store.ReleaseResult(*error)
+    if lifetime_lib == null || !S.Open(*lifetime_service,lifetime_lib) || S.Prepare(*lifetime_service) != "" { return 2 }
+    return 42
+}
+#program_export
+StateLifetime :: () -> s32 {
+    defer { Store.ClearError(lifetime_lib) }
+    text := S.State(*lifetime_service,lifetime_lib); defer { Auth.ReleaseOwned(text,false) }
+    if text.count == 0 { return 0 }
+    // Compare without allocating inside the oracle: every injected fault
+    // belongs to the service operation rather than test JSON getters.
+    expected := "{\"semantic_enabled\":0,\"semantic_processing\":0,\"semantic_working\":0,\"semantic_total\":0,\"semantic_indexed\":0,\"semantic_failed\":0,\"semantic_status\":\"Enable semantic search to describe your photos\"}"
+    return ifx text == expected then 42 else 3
+}
+#program_export
+OpenLifetime :: () -> s32 {
+    service: S.Service; defer { S.Close(*service) }
+    if !S.Open(*service,lifetime_lib) { return 0 }
+    return ifx service.root == lifetime_lib.root && service.opened then 42 else 3
+}
+#program_export
+ModelLifetime :: () -> s32 {
+    service: S.Service; defer { S.Close(*service) }
+    if !S.Open(*service,lifetime_lib) || S.Prepare(*service) != "" { return 0 }
+    bytes: Vec(u8)
+    for repeat: 0..19 { if !S.TextTensor(*service.tokenizer,"a red photo ΟΣ cafe\xcc\x81 🙂",*bytes) || bytes.count != 616 { return 0 } }
+    return 42
+}
+#program_export
+WorkerLifetime :: () -> s32 {
+    if !Store.SetSetting(lifetime_lib,"semantic_enabled","true") || !Store.SetSetting(lifetime_lib,"semantic_processing","true") ||
+        S.Kick(*lifetime_service,lifetime_lib) != "" || !Wait(*lifetime_service) || !ScratchEmpty(lifetime_lib) { return 0 }
+    return 42
+}
+#program_export
+QueryBuilderLifetime :: () -> s32 {
+    identity: [65]u8
+    next := Index.Next(lifetime_lib.db,identity[:])
+    if next < 0 { return 0 }
+    result := Index.Mutate(lifetime_lib.db,"{\"operation\":\"failure\",\"photo_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"expected\":\"0000000000005940\"}",0.0)
+    if result < 0 { return 0 }
+    return ifx next == 0 && result == 0 && Scalar(lifetime_lib,"SELECT count(*) FROM photos") == 0 && Scalar(lifetime_lib,"SELECT count(*) FROM semantic_embeddings") == 0 then 42 else 3
+}
+#program_export
+FinishLifetime :: () {
+    S.Close(*lifetime_service); Store.Close(lifetime_lib); lifetime_lib = null
+    unused Tree.RemoveTree(lifetime_root); Auth.ReleaseOwned(lifetime_root,false); lifetime_root = ""
+}
+#program_export
+main :: () -> s32 {
+    root := Kit.TempDirectory("semantic-service"); if root.count == 0 { return 1 }
+    defer { unused Kit.Cleanup(root); Auth.ReleaseOwned(root,false) }
+    lib,error := Store.Open(root); Store.ReleaseResult(*error); if lib == null { return 2 }
+    defer { Store.Close(lib) }
+    if !Add(lib,First) || !Add(lib,Second) || !Add(lib,Hidden,true) || !Add(lib,Missing,false,false) { return 3 }
+    service: S.Service
+    if !S.Open(*service,lib) { return 4 }
+    defer { S.Close(*service) }
+    if !State(*service,lib,0,0,0,0,"Enable semantic search to describe your photos") || !IndexCases(lib) || !State(*service,lib,0,0,1,0) { return 5 }
+    if S.Prepare(*service) != "" || !Boundary(*service) { print("Semantic preparation/token boundary failed\n"); return 6 }
+    if !Store.SetSetting(lib,"semantic_enabled","true") || !Store.SetSetting(lib,"semantic_processing","false") || !SearchCases(*service,lib) { return 7 }
+    if !DatabaseFailure(*service,lib) { return 15 }
+    if !Exec(lib,"DELETE FROM semantic_embeddings; UPDATE photos SET dirty=0,updated=100; INSERT INTO semantic_embeddings VALUES('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','retired-model',zeroblob(2048),'')") ||
+        !State(*service,lib,1,0,0,0,"Indexing paused · 0 of 3 photos indexed locally") || S.Enable(*service,lib,true) != "" || !Wait(*service) ||
+        !State(*service,lib,1,1,2,1,"2 of 3 photos indexed locally · 1 unavailable; retry after restoring originals") { return 8 }
+    if Scalar(lib,"SELECT count(*) FROM semantic_embeddings WHERE model='retired-model'") != 0 ||
+        Scalar(lib,"SELECT count(*) FROM photos WHERE id='dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd' AND updated=100 AND dirty=0") != 1 ||
+        Scalar(lib,"SELECT count(*) FROM photos WHERE id='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND updated>100 AND dirty=1") != 1 { return 16 }
+    if Scalar(lib,"SELECT count(*) FROM semantic_embeddings WHERE photo_id='cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'") != 0 { return 9 }
+    if S.Enable(*service,lib,false) != "" || !State(*service,lib,1,0,2,1,"Indexing paused · 2 of 3 photos indexed locally") { return 10 }
+    // Closing and reopening uses a fresh owned tokenizer/cache and never
+    // changes a caller's connection ownership.
+    S.Close(*service)
+    if !S.Open(*service,lib) || !State(*service,lib,1,0,2,1) || Scalar(lib,"SELECT count(*) FROM photos") != 4 { return 11 }
+    S.Close(*service)
+    // Missing models remain an explicit optional-feature error. Ordinary
+    // local writes and gallery queries continue on the same open library.
+    options: S.Options; options.package_root = root
+    if !S.Open(*service,lib,options) || S.Enable(*service,lib,true) == "" || !Store.SetSetting(lib,"ordinary_local_write","42") || Scalar(lib,"SELECT count(*) FROM photos") != 4 { return 12 }
+    S.Close(*service)
+    if !DelayCases(lib) || !FailureCases(lib) { return 13 }
+    if !RAWCancel(lib) { return 14 }
+    print("Native semantic service: real CLIP text/image inference, C18 hydrated search/privacy, exact index round trip, text boundary, own-DB worker, offline writes, stale/hidden/paused/disabled/restored/Guest/write failure and helper cancellation passed\n")
+    return 0
+}

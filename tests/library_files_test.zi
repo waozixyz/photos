@@ -1,0 +1,334 @@
+LibraryFiles :: #import "library_files";
+Store :: #import "library_store";
+Images :: #import "image_edit";
+Kit :: #import "kit";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+SQL :: #import "sqlite/SQLite";
+JSON :: #import "std/json_document";
+Process :: #import "std/process_run_linux";
+Timer :: #import "std/timer_linux";
+#import "std/c_string"
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+pixbuf :: #system_library "gdk_pixbuf-2.0";
+objects :: #system_library "gobject-2.0";
+c :: #system_library "c";
+HeapInfo :: struct { arena: usize; blocks: usize; small: usize; mappings: usize; mapped: usize; unused_high: usize; free_fast: usize; used: usize; free: usize; releasable: usize }
+Heap :: () -> HeapInfo #foreign c "mallinfo2";
+ChangeDirectory :: (path: *u8) -> s32 #foreign c "chdir";
+WaitChild :: (pid: s32, status: *s32, options: s32) -> s32 #foreign c "waitpid";
+Errno :: () -> *s32 #foreign c "__errno_location";
+LoadJPEG :: (path: *u8, error: **void) -> *void #foreign pixbuf "gdk_pixbuf_new_from_file";
+ImageWidth :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_width";
+ImageHeight :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_height";
+ImageChannels :: (image: *void) -> s32 #foreign pixbuf "gdk_pixbuf_get_n_channels";
+ImagePixels :: (image: *void) -> *u8 #foreign pixbuf "gdk_pixbuf_get_pixels";
+Unref :: (image: *void) #foreign objects "g_object_unref";
+FixtureId :: "485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a";
+
+Read :: (path: string) -> string {
+    input := Files.OpenRead(path)
+    if !input.valid { return "" }
+    defer { unused Files.CloseFile(input) }
+    count := Files.FileSize(input)
+    if count < 0 || count > 10485760 { return "" }
+    result, valid := Files.ReadEntireFile(path)
+    return ifx valid then result else ""
+}
+
+FileCases :: (root: string) -> bool {
+    payload: Vec(u8)
+    index: s64 = 0
+    while index < 131073 { VecPush(payload, cast(u8)((index * 31) % 251)); index += 1 }
+    path := Kit.Join(root, "files/nested/data.bin")
+    if !LibraryFiles.Atomic(path, VecSlice(payload, 0, payload.count)) { return false }
+    digest, error := LibraryFiles.DigestFile(path)
+    // Independent hashlib oracle for 131073 bytes, spanning two full chunks.
+    if error != "" || digest != "4308daacc4b49534fa7cc4aab9e31e486b049b0da3529b7689dd04de6e5dbc67" { return false }
+    copied := Read(path)
+    if copied.count != payload.count { return false }
+    index = 0
+    while index < copied.count { if copied[index] != payload[index] { return false }; index += 1 }
+    permissions: [4]string = .["stat", "-c", "%a", path]
+    options: Process.ProcessOptions = .{arguments = permissions[:], capture_output = true}
+    run: Process.ProcessRun
+    if !Process.RunProcess(options, *run) || run.code != 0 || BuilderFinish(run.output) != "600\n" { return false }
+    empty: [0]u8
+    if !LibraryFiles.Atomic(path, empty[:]) { return false }
+    emptyDigest, emptyError := LibraryFiles.DigestFile(path)
+    if emptyError != "" || emptyDigest != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" { return false }
+    folder := Kit.Join(root, "files/nested/folder")
+    if !Files.CreatePrivateDirectory(folder) || LibraryFiles.Atomic(folder, VecSlice(payload, 0, payload.count)) { return false }
+    names: Vec(string)
+    if !Tree.ListDirectory(Tree.PathParent(path), *names) || names.count != 2 { return false }
+    missing, missingError := LibraryFiles.DigestFile(Kit.Join(root, "missing.bin"))
+    return missing == "" && missingError != "" &&
+        LibraryFiles.Packed("{\"z\":1,\"unicode\":\"旅行\",\"a\":[null,true]}") == "{\"a\":[null,true],\"unicode\":\"旅行\",\"z\":1}"
+}
+
+OpenFixture :: (root: string) -> *Store.Library {
+    if !Files.CreatePrivateDirectory(root) { return null }
+    db: *void
+    if SQL.SqliteOpenText(Kit.Join(root, "library.sqlite"), *db, SQL.SQLITE_OPEN_READWRITE | SQL.SQLITE_OPEN_CREATE) != SQL.SQLITE_OK { return null }
+    loaded := Kit.LoadSql(db, "tests/fixtures/golden/library-v0.1.59.sql")
+    unused SQL.SqliteClose(db)
+    if !loaded { return null }
+    lib, error := Store.Open(root)
+    unused error
+    return lib
+}
+
+JPEGSize :: (path: string, width: s32, height: s32) -> bool {
+    name: [4096]u8
+    if !CopyCString(path, name[:]) { return false }
+    image := LoadJPEG(*name[0], null)
+    if image == null { return false }
+    defer { Unref(image) }
+    pixels := ImagePixels(image)
+    return ImageWidth(image) == width && ImageHeight(image) == height && ImageChannels(image) == 3 && pixels != null && pixels[0] > pixels[1]
+}
+
+OrientedJPEG :: (path: string) -> bool {
+    if !Kit.Jpeg(path, 24, 12, 0xd03060) { return false }
+    original := Read(path)
+    if original.count < 2 { return false }
+    exif: [36]u8 = .[255,225,0,34,69,120,105,102,0,0,73,73,42,0,8,0,0,0,1,0,
+        18,1,3,0,1,0,0,0,6,0,0,0,0,0,0,0]
+    oriented: Vec(u8)
+    VecPush(oriented, original[0]); VecPush(oriented, original[1])
+    for byte: exif { VecPush(oriented, byte) }
+    index: s64 = 2
+    while index < original.count { VecPush(oriented, original[index]); index += 1 }
+    return LibraryFiles.Atomic(path, VecSlice(oriented, 0, oriented.count))
+}
+
+PhotoPreviewCases :: (root: string) -> bool {
+    lib := OpenFixture(root)
+    if lib == null { return false }
+    defer { Store.Close(lib) }
+    photo, error := LibraryFiles.Photo(lib, FixtureId)
+    if error != "" || photo.name != "Synthetic 'trip' 旅行.jpg" || photo.taken != -154641294.5 ||
+        photo.size != 128 || !photo.favorite || photo.hidden || !photo.archived || photo.trashed != 0 ||
+        photo.width != 17 || photo.height != 9 || !photo.dirty || photo.edits == "" { return false }
+    unknown, unknownError := LibraryFiles.Photo(lib, "unknown' OR 1=1 --")
+    if unknown.id != "" || unknownError != "Photo not found" { return false }
+    if SQL.SqliteExecText(lib.db, "UPDATE photos SET trashed=4294967296") != SQL.SQLITE_OK { return false }
+    trashed, trashError := LibraryFiles.Photo(lib, FixtureId)
+    if trashError != "" || trashed.trashed != 4294967296 { return false }
+    if SQL.SqliteExecText(lib.db, "UPDATE photos SET trashed=0") != SQL.SQLITE_OK { return false }
+    path := LibraryFiles.Original(lib, photo)
+    if path != Kit.Join(lib.root, "originals/48/485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a.jpg") ||
+        LibraryFiles.Thumbnail(lib, photo.id) != Kit.Join(lib.root, "previews/485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a.jpg") { return false }
+    if !Tree.CreateDirectories(Tree.PathParent(path), 448) || !Kit.Png(path, 1200, 600, 0xc04080) { return false }
+    before, beforeError := LibraryFiles.DigestFile(path)
+    if beforeError != "" { return false }
+    preview, previewError := LibraryFiles.Preview(lib, photo.id)
+    if previewError != "" || !JPEGSize(preview, 640, 320) { return false }
+    after, afterError := LibraryFiles.DigestFile(path)
+    if afterError != "" || before != after { return false }
+    previewHash, hashError := LibraryFiles.DigestFile(preview)
+    if hashError != "" { return false }
+    // A valid existing cache is reused even when the source later goes missing.
+    if !Files.RemoveFile(path) { return false }
+    cached, cachedError := LibraryFiles.Preview(lib, photo.id)
+    cachedHash, cachedHashError := LibraryFiles.DigestFile(cached)
+    if cachedError != "" || cachedHashError != "" || cachedHash != previewHash { return false }
+    if !Files.RemoveFile(preview) || !OrientedJPEG(path) { return false }
+    oriented, orientedError := LibraryFiles.Preview(lib, photo.id)
+    if orientedError != "" || !JPEGSize(oriented, 12, 24) { return false }
+    if !Files.RemoveFile(oriented) { return false }
+    invalid: [6]u8 = .[110,111,116,112,110,103]
+    if !LibraryFiles.Atomic(path, invalid[:]) { return false }
+    failed, failedError := LibraryFiles.Preview(lib, photo.id)
+    if failed != "" || failedError == "" || Files.PathExists(preview) { return false }
+    names: Vec(string)
+    return Tree.ListDirectory(Tree.PathParent(preview), *names) && names.count == 0 && Files.PathExists(path)
+}
+
+SidecarCases :: (root: string) -> bool {
+    options: LibraryFiles.FileOptions = .{application_root = Tree.WorkingDirectory()}
+    source := Kit.Join(root, "source/photo.jpg")
+    if !Tree.CreateDirectories(Tree.PathParent(source), 448) { return false }
+    empty, emptyError := LibraryFiles.Sidecar(source, options)
+    if emptyError != "" || empty.metadata != "{}" || empty.stamp != "" { return false }
+    path := Kit.Join(root, "source/metadata/photo.jpg.json")
+    json := "{\"description\":\"Synthetic 旅行\",\"unknown\":{\"large\":1152921504606846987},\"photoTakenTime\":{\"timestamp\":\"1600000000\"}}"
+    descriptor := cast(*TextDescriptor)*json
+    if !LibraryFiles.Atomic(path, BytesFromPointer(descriptor.data, cast(u64)json.count)) { return false }
+    value, error := LibraryFiles.Sidecar(source, options)
+    if error != "" || value.stamp == "" || value.capture_mode != 1 || value.capture_value != 1600000000.0 { return false }
+    document: JSON.JsonDocument
+    if !JSON.JsonRead(*document, value.metadata) ||
+        JSON.JsonString(*document, JSON.JsonMember(*document, document.root, "description")) != "Synthetic 旅行" { return false }
+    malformed: [1]u8 = .[123]
+    if !LibraryFiles.Atomic(path, malformed[:]) { return false }
+    rejected, rejectedError := LibraryFiles.Sidecar(source, options)
+    return rejected.metadata == "" && rejectedError == "Metadata sidecar must contain a valid JSON object"
+}
+
+Script :: (path: string, body: string) -> bool {
+    descriptor := cast(*TextDescriptor)*body
+    return LibraryFiles.Atomic(path, BytesFromPointer(descriptor.data, cast(u64)body.count)) && Tree.SetPathMode(path, 448)
+}
+
+FailureCases :: (root: string) -> bool {
+    lib := OpenFixture(Kit.Join(root, "helper-library"))
+    if lib == null { return false }
+    defer { Store.Close(lib) }
+    photo, error := LibraryFiles.Photo(lib, FixtureId)
+    if error != "" { return false }
+    helperRoot := Tree.ResolvePath(root)
+    helper := Kit.Join(helperRoot, "photo_decode")
+    source := Kit.Join(helperRoot, "synthetic-original.dng")
+    original: [7]u8 = .[0,255,13,10,80,72,79]
+    if !LibraryFiles.Atomic(source, original[:]) { return false }
+    before, beforeError := LibraryFiles.DigestFile(source)
+    if beforeError != "" { return false }
+    options: LibraryFiles.FileOptions = .{application_root = helperRoot, decode_timeout_ms = 50, preview_timeout_ms = 50}
+    photo.extension = ".dng"
+    failedScript := "#!/bin/sh\nexit 23\n"
+    if !Script(helper, failedScript) { return false }
+    failed, failedError := LibraryFiles.PreviewSource(lib, photo, source, options)
+    if failed != "" || failedError == "" { return false }
+    if !Script(helper, "#!/bin/sh\nexec sleep 5\n") { return false }
+    started := Timer.MonotonicMilliseconds()
+    slow, slowError := LibraryFiles.PreviewSource(lib, photo, source, options)
+    elapsed := Timer.MonotonicMilliseconds() - started
+    if slow != "" || slowError == "" || elapsed < 25 || elapsed > 3000 { return false }
+    if !Script(helper, "#!/bin/sh\nwhile :; do printf 'synthetic decoder diagnostic' >&2; done\n") { return false }
+    started = Timer.MonotonicMilliseconds()
+    stderrFlood, stderrError := LibraryFiles.PreviewSource(lib, photo, source, options)
+    elapsed = Timer.MonotonicMilliseconds() - started
+    if stderrFlood != "" || stderrError == "" || elapsed < 25 || elapsed > 3000 { return false }
+    if !Script(helper, "#!/bin/sh\nexec 2>/dev/null\nwhile :; do printf '0123456789abcdef0123456789abcdef'; done\n") { return false }
+    options.decode_timeout_ms = 2000
+    flooded, floodError := LibraryFiles.PreviewSource(lib, photo, source, options)
+    if flooded != "" || floodError == "" { return false }
+    png := Kit.Join(helperRoot, "decoder-output.png")
+    if !Kit.Png(png, 60, 30, 0xa03080) { return false }
+    success: Vec(u8)
+    BuilderPrint(*success, "#!/bin/sh\n[ -z \"${DISPLAY+x}${WAYLAND_DISPLAY+x}${XAUTHORITY+x}${DBUS_SESSION_BUS_ADDRESS+x}${SESSION_MANAGER+x}\" ] || exit 91\ncp -- \"%\" \"$3\"\nprintf '{\"width\":1200,\"height\":600}\\n'\n", png)
+    if !Script(helper, BuilderFinish(success)) { return false }
+    decoded, decodedError := LibraryFiles.PreviewSource(lib, photo, source, options)
+    if decodedError != "" || !JPEGSize(decoded, 60, 30) { return false }
+    updated, updateError := LibraryFiles.Photo(lib, photo.id)
+    if updateError != "" || updated.width != 1200 || updated.height != 600 || !updated.dirty { return false }
+    if !Files.RemoveFile(decoded) { return false }
+    options.video_program = helper
+    photo.kind = "video"
+    if !Script(helper, failedScript) { return false }
+    videoFailed, videoError := LibraryFiles.PreviewSource(lib, photo, source, options)
+    if videoFailed != "" || videoError == "" { return false }
+    if !Script(helper, "#!/bin/sh\nexec sleep 5\n") { return false }
+    started = Timer.MonotonicMilliseconds()
+    videoSlow, videoSlowError := LibraryFiles.PreviewSource(lib, photo, source, options)
+    elapsed = Timer.MonotonicMilliseconds() - started
+    if videoSlow != "" || videoSlowError == "" || elapsed < 25 || elapsed > 3000 { return false }
+    after, afterError := LibraryFiles.DigestFile(source)
+    names: Vec(string)
+    return afterError == "" && after == before &&
+        Tree.ListDirectory(Kit.Join(lib.root, "previews"), *names) && names.count == 0
+}
+
+TrustedRootCase :: (root: string) -> bool {
+    trusted := Tree.WorkingDirectory()
+    untrusted := Tree.ResolvePath(root)
+    helper := Kit.Join(untrusted, "read_metadata")
+    marker := Kit.Join(untrusted, "unexpected-helper")
+    script: Vec(u8)
+    BuilderPrint(*script, "#!/bin/sh\nprintf unsafe > \"%\"\n", marker)
+    if !Script(helper, BuilderFinish(script)) { return false }
+    saved: [4096]u8
+    changed: [4096]u8
+    if !CopyCString(trusted, saved[:]) || !CopyCString(untrusted, changed[:]) { return false }
+    if ChangeDirectory(*changed[0]) != 0 { return false }
+    rejected, error := LibraryFiles.Sidecar(Kit.Join(untrusted, "photo.jpg"))
+    restored := ChangeDirectory(*saved[0]) == 0
+    return restored && rejected.metadata == "" &&
+        error == "Build or install Photos metadata reading before importing photos" && !Files.PathExists(marker)
+}
+
+OriginalIntoCases :: () -> bool {
+    lib: Store.Library = .{root="/synthetic/library"}
+    output: Vec(u8)
+    if LibraryFiles.OriginalInto(null,*lib,FixtureId,".jpg") ||
+        LibraryFiles.OriginalInto(*output,null,FixtureId,".jpg") ||
+        !LibraryFiles.OriginalInto(*output,*lib,FixtureId,".jpg") { return false }
+    wanted := "/synthetic/library/originals/48/485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a.jpg"
+    if TextView(VecSlice(output,0,output.count)) != wanted ||
+        LibraryFiles.OriginalInto(*output,*lib,FixtureId,".jpg") ||
+        TextView(VecSlice(output,0,output.count)) != wanted { return false }
+    for at: 0..3999 {
+        VecClear(output)
+        if !LibraryFiles.OriginalInto(*output,*lib,FixtureId,".dng") { return false }
+    }
+    return TextView(VecSlice(output,0,output.count)) ==
+        "/synthetic/library/originals/48/485c40002d6ba2251492d696e1960179ab7cf0de9b856d88093573c2424c1d8a.dng"
+}
+
+HelperLifetimeCase :: () -> bool {
+    options: LibraryFiles.FileOptions = .{application_root=Tree.WorkingDirectory()}
+    output: Vec(u8)
+    for at: 0..31 {
+        VecClear(output)
+        if !LibraryFiles.HelperProgramInto(*output,options,"read_metadata","read-metadata") { return false }
+        VecClear(output)
+        if !LibraryFiles.HelperProgramInto(*output,.{},"library_files_test","unused") { return false }
+    }
+    before := Heap()
+    for at: 0..1999 {
+        VecClear(output)
+        if !LibraryFiles.HelperProgramInto(*output,options,"read_metadata","read-metadata") ||
+            !Tree.IsFile(TextView(VecSlice(output,0,output.count))) { return false }
+        VecClear(output)
+        if !LibraryFiles.HelperProgramInto(*output,.{},"library_files_test","unused") { return false }
+    }
+    after := Heap()
+    growth := ifx after.used > before.used then after.used-before.used else 0
+    print("Photos helper lookup: 4000 resolutions, heap growth % bytes\n",growth)
+    return growth <= 8192
+}
+
+HelperOutputCases :: () -> bool {
+    small: [4]string = .["head","-c","65537","/dev/zero"]
+    output: Vec(u8); code: s32; status: s32
+    if LibraryFiles.RunHelper(small[:],2000,*output,*code) || code != -1 || output.count > 65536 ||
+        WaitChild(-1,*status,1) != -1 || Errno().* != 10 { return false }
+    VecClear(output)
+    if !LibraryFiles.RunHelper(small[:],2000,*output,*code,1048576) || code != 0 || output.count != 65537 { return false }
+    maximum: [4]string = .["head","-c","1048576","/dev/zero"]
+    VecClear(output)
+    if !LibraryFiles.RunHelper(maximum[:],2000,*output,*code,1048576) || output.count != 1048576 { return false }
+    // The excess byte must cancel and reap this owned child before its sleep.
+    flood: [3]string = .["sh","-c","head -c 1048577 /dev/zero; exec sleep 60"]
+    VecClear(output)
+    started := Timer.MonotonicMilliseconds()
+    if LibraryFiles.RunHelper(flood[:],2000,*output,*code,1048576) || output.count > 1048576 ||
+        Timer.MonotonicMilliseconds()-started > 3000 || WaitChild(-1,*status,1) != -1 || Errno().* != 10 { return false }
+    VecClear(output)
+    code = 99
+    if LibraryFiles.RunHelper(small[:],2000,*output,*code,0) || code != -1 || output.count != 0 ||
+        LibraryFiles.RunHelper(small[:],2000,*output,*code,1048577) { return false }
+    return true
+}
+
+#program_export
+main :: () -> s32 {
+    root := Kit.TempDirectory("library-files")
+    if root == "" { return 1 }
+    defer { unused Kit.Cleanup(root) }
+    if !Kit.Expect(FileCases(root), "binary atomic writes, private permissions, streaming digest and JSON parity") { return 2 }
+    if !Kit.Expect(PhotoPreviewCases(Kit.Join(root, "library")), "photo rows/paths, bounded oriented RGB previews, cache and original preservation") { return 3 }
+    if !Kit.Expect(SidecarCases(root), "native sidecars preserve metadata/stamp/capture time and reject invalid input") { return 4 }
+    if !Kit.Expect(FailureCases(root), "failed/stalled/flooding native previews are bounded, cleanly cancelled and preserve originals") { return 5 }
+    if !Kit.Expect(TrustedRootCase(root), "helper lookup never executes a matching basename from an arbitrary working directory") { return 6 }
+    if !Kit.Expect(HelperLifetimeCase(),"helper resolver/candidate allocations stay bounded") { return 7 }
+    if !Kit.Expect(OriginalIntoCases(),"canonical original path uses checked reusable caller storage") { return 9 }
+    if !Kit.Expect(HelperOutputCases(),"helper default/explicit output caps reject overflow and reap owned children") { return 8 }
+    print("Photos library files: atomic/hash/path/row, oriented preview and sidecar cases passed\n")
+    return 0
+}

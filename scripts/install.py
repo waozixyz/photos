@@ -168,6 +168,9 @@ def main():
     decoder = repo/'build/photo-decoder/photo_decode'
     if not decoder.is_file():
         parser.error('Build the Photos HEIC/RAW decoder before installing')
+    tensor = repo/'build/clip-image-tensor/clip_image_tensor'
+    if not tensor.is_file():
+        parser.error('Build the Photos image tensor helper before installing')
     semantic = repo/'build/semantic-infer/semantic_infer'
     if not semantic.is_file():
         parser.error('Build the Photos semantic search engine before installing')
@@ -207,6 +210,9 @@ def main():
     shutil.copyfile(decoder,installed/'photo_decode.next')
     os.chmod(installed/'photo_decode.next',0o755)
     os.replace(installed/'photo_decode.next',installed/'photo_decode')
+    shutil.copyfile(tensor,installed/'clip_image_tensor.next')
+    os.chmod(installed/'clip_image_tensor.next',0o755)
+    os.replace(installed/'clip_image_tensor.next',installed/'clip_image_tensor')
     shutil.copyfile(semantic,installed/'semantic_infer.next')
     os.chmod(installed/'semantic_infer.next',0o755)
     os.replace(installed/'semantic_infer.next',installed/'semantic_infer')

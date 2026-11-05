@@ -4,7 +4,56 @@
 // emitted.
 Native :: #import "daochi_client/crypto_native";
 Entity :: #import "daochi_client/entity";
+Wire :: #import "sync_crypto";
 #import "std/byte_text_linux"
+using Vectors :: #import "std/vec";
+
+// A derived 32-byte entity record key seals the same nonce-prefixed payload as
+// Python's seal_record. The envelope's authenticated JSON remains caller-owned.
+EntitySeal :: (key: []u8, input: []u8, aad: []u8, out: *Vec(u8)) -> bool {
+    return Wire.SyncSeal(key, input, aad, false, out)
+}
+EntityOpen :: (key: []u8, input: []u8, aad: []u8, out: *Vec(u8)) -> bool {
+    return Wire.SyncOpen(key, input, aad, out)
+}
+EntitySeal :: (key: []u8, input: []u8, out: *Vec(u8)) -> bool {
+    return Wire.SyncCrypt(key, input, true, out)
+}
+EntityOpen :: (key: []u8, input: []u8, out: *Vec(u8)) -> bool {
+    return Wire.SyncCrypt(key, input, false, out)
+}
+
+EntityRecordKey :: (private: []u8, kind: string, out: *Vec(u8)) -> bool {
+    Wire.ClearOutput(out)
+    if private.count < 1 || private.count > 8192 || !Entity.EntityKindValid(kind) ||
+        !Wire.PrepareOutput(out, 32) { return false }
+    if !Entity.EntityRecordKey(private, kind, Wire.OutputBytes(out)) {
+        Wire.ClearOutput(out); return false
+    }
+    return true
+}
+
+EntitySealChunk :: (private: []u8, kind: string, hash: string, index: s64,
+    input: []u8, out: *Vec(u8)) -> bool {
+    Wire.ClearOutput(out)
+    if private.count < 1 || private.count > 8192 || input.count < 1 || input.count > Entity.ENTITY_CHUNK_BYTES ||
+        !Wire.PrepareOutput(out, input.count+16) { return false }
+    if Entity.SealEntityChunk(private, kind, hash, index, input, Wire.OutputBytes(out)) != input.count+16 {
+        Wire.ClearOutput(out); return false
+    }
+    return true
+}
+
+EntityOpenChunk :: (private: []u8, kind: string, hash: string, index: s64,
+    input: []u8, out: *Vec(u8)) -> bool {
+    Wire.ClearOutput(out)
+    if private.count < 1 || private.count > 8192 || input.count <= 16 || input.count > Entity.ENTITY_CHUNK_BYTES+16 ||
+        !Wire.PrepareOutput(out, input.count-16) { return false }
+    if Entity.OpenEntityChunk(private, kind, hash, index, input, Wire.OutputBytes(out)) != input.count-16 {
+        Wire.ClearOutput(out); return false
+    }
+    return true
+}
 c :: #system_library "c";
 Read :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign c "read";
 Write :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign c "write";

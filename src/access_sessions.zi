@@ -1,31 +1,12 @@
-// Private binary pipe. Tokens, deadlines, revocation and attempt windows belong
-// to this native process; no session state is written to disk or diagnostics.
-Clock :: #import "std/timer_linux";
+// Private binary pipe; the in-process API and helper share the same registry.
+Access :: #import "access_registry";
 #import "std/byte_text_linux"
 c :: #system_library "c";
 sodium :: #system_library "sodium";
-Init :: () -> s32 #foreign sodium "sodium_init";
-Random :: (bytes: *u8, count: usize) #foreign sodium "randombytes_buf";
 Wipe :: (bytes: *u8, count: usize) #foreign sodium "sodium_memzero";
-Equal :: (left: *u8, right: *u8, count: usize) -> s32 #foreign sodium "sodium_memcmp";
 Read :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign c "read";
 Write :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign c "write";
 Errno :: () -> *s32 #foreign c "__errno_location";
-Session :: struct { used: bool; kind: u8; root: [32]u8; token: [32]u8; stamp: [32]u8; until: s64 }
-Attempt :: struct { used: bool; kind: u8; root: [32]u8; since: s64; count: s32 }
-sessions: [256]Session;
-attempts: [128]Attempt;
-Clear :: (entry: *Session) {
-    Wipe(*entry.root[0],32); Wipe(*entry.token[0],32); Wipe(*entry.stamp[0],32)
-    entry.used = false; entry.kind = 0; entry.until = 0
-}
-ClearAttempt :: (entry: *Attempt) {
-    Wipe(*entry.root[0],32); entry.used = false; entry.kind = 0; entry.since = 0; entry.count = 0
-}
-ClearRegistry :: () {
-    for i: 0..255 { Clear(*sessions[i]) }
-    for i: 0..127 { ClearAttempt(*attempts[i]) }
-}
 Transfer :: (sending: bool, bytes: *u8, count: usize) -> bool {
     at: usize
     while at < count {
@@ -35,7 +16,6 @@ Transfer :: (sending: bool, bytes: *u8, count: usize) -> bool {
     }
     return true
 }
-Zero :: (bytes: []u8) -> bool { value: u8; for byte: bytes { value |= byte }; return value == 0 }
 Period :: (value: string, maximum: s64) -> s64 {
     result: s64
     if value.count < 1 || value.count > 6 { return 0 }
@@ -43,87 +23,19 @@ Period :: (value: string, maximum: s64) -> s64 {
     return ifx result >= 1 && result <= maximum then result else 0
 }
 main :: (argc: s32, argv: **u8) -> s32 {
-    // Tests may shorten the lifetime; callers can never exceed ten minutes.
     duration: s64 = 600000
     attempt_window: s64 = 60000
     if argc >= 2 { duration = Period(TextFromCString(argv[1]),600000) }
     if argc == 3 { attempt_window = Period(TextFromCString(argv[2]),60000) }
-    if argc < 1 || argc > 3 || duration == 0 || attempt_window == 0 || Init() < 0 { return 2 }
-    // The private stdin pipe closes with the owning process. Linux parent-death
-    // signals track the spawning thread, which may be a short-lived worker.
-    // EOF ends this registry even if the owner was killed without cleanup.
-    header: [100]u8; reply: [41]u8; last: s64
-    defer {
-        Wipe(*header[0],100); Wipe(*reply[0],41)
-        ClearRegistry()
-    }
+    registry: Access.Registry
+    if argc < 1 || argc > 3 || !Access.Initialize(*registry,duration,attempt_window) { return 2 }
+    defer { Access.Close(*registry) }
+    header: [100]u8; reply: [41]u8
+    defer { Wipe(*header[0],100); Wipe(*reply[0],41) }
     while true {
         Wipe(*header[0],100); Wipe(*reply[0],41)
         if !Transfer(false,*header[0],100) { return 0 }
-        op := header[1]; kind := header[2]
-        if header[0] != 1 || op < 1 || op > 8 || kind < 1 || kind > 2 || header[3] > 1 ||
-            (header[3] != 0 && op != 2) || Zero(header[4:36]) ||
-            (kind == 1 && !Zero(header[68:100])) || (kind == 2 && op <= 2 && Zero(header[68:100])) ||
-            ((op == 1 || op >= 4) && !Zero(header[36:68])) { return 2 }
-        now := Clock.MonotonicMilliseconds()
-        if now < 0 || now < last || now > 9223372036854175807 { return 2 }; last = now
-        slot: s32 = -1; free: s32 = -1
-        for i: 0..255 {
-            entry := *sessions[i]
-            if entry.used && entry.until <= now { Clear(entry) }
-            if !entry.used { if free < 0 { free = cast(s32)i }; continue }
-            if entry.kind != kind || Equal(*entry.root[0],*header[4],32) != 0 { continue }
-            if op == 4 { Clear(entry); continue }
-            if Equal(*entry.token[0],*header[36],32) == 0 { slot = cast(s32)i }
-        }
-        until: s64
-        if op == 1 {
-            if free < 0 { reply[0] = 2 }
-            else {
-                token: [32]u8; defer { Wipe(*token[0],32) }
-                unique: bool
-                for retry: 0..3 {
-                    Random(*token[0],32); unique = !Zero(token[:])
-                    for i: 0..255 { if sessions[i].used && Equal(*sessions[i].token[0],*token[0],32) == 0 { unique = false } }
-                    if unique { break }
-                }
-                if !unique { return 2 }
-                entry := *sessions[free]; entry.used = true; entry.kind = kind; until = now+duration; entry.until = until
-                for i: 0..31 { entry.root[i] = header[4+i]; entry.token[i] = token[i]; entry.stamp[i] = header[68+i]; reply[1+i] = token[i] }
-                reply[0] = 1
-            }
-        } else if op == 2 || op == 5 {
-            if slot >= 0 {
-                entry := *sessions[slot]
-                if Equal(*entry.stamp[0],*header[68],32) != 0 { Clear(entry) }
-                else {
-                    if header[3] == 1 { entry.until = now+duration }
-                    until = entry.until; reply[0] = 1
-                }
-            }
-        } else if op == 3 { if slot >= 0 { Clear(*sessions[slot]) }; reply[0] = 1 }
-        else if op == 4 { reply[0] = 1 }
-        else {
-            slot = -1; free = -1
-            for i: 0..127 {
-                entry := *attempts[i]
-                if entry.used && now-entry.since >= attempt_window { ClearAttempt(entry) }
-                if !entry.used { if free < 0 { free = cast(s32)i }; continue }
-                if entry.kind == kind && Equal(*entry.root[0],*header[4],32) == 0 { slot = cast(s32)i }
-            }
-            if op == 8 { if slot >= 0 { ClearAttempt(*attempts[slot]) }; reply[0] = 1 }
-            else if slot >= 0 && attempts[slot].count >= 5 { reply[0] = 3 }
-            else if op == 6 { reply[0] = ifx slot >= 0 || free >= 0 then 1 else 2 }
-            else if slot < 0 && free < 0 { reply[0] = 2 }
-            else {
-                if slot < 0 {
-                    slot = free; attempts[slot].used = true; attempts[slot].kind = kind; attempts[slot].since = now
-                    for i: 0..31 { attempts[slot].root[i] = header[4+i] }
-                }
-                attempts[slot].count += 1; reply[0] = 1
-            }
-        }
-        for i: 0..7 { reply[33+i] = cast(u8)((cast(u64)until >> cast(u32)((7-i)*8)) & 255) }
+        if !Access.Handle(*registry,header[:],reply[:]) { return 2 }
         if !Transfer(true,*reply[0],41) { return 0 }
     }
     return 0

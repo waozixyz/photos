@@ -1,0 +1,515 @@
+using Client :: #import "sync_client";
+Kit :: #import "kit";
+Store :: #import "library_store";
+Types :: #import "service_types";
+Wire :: #import "sync_crypto";
+Entity :: #import "entity_crypto";
+Owner :: #import "owner_account";
+Native :: #import "daochi_client/crypto_native";
+Keys :: #import "daochi_client/keys";
+Sign :: #import "account_sign";
+Test :: #import "sync_crypto_test";
+Tx :: #import "sync_transaction_test";
+SQL :: #import "sqlite/SQLite";
+Files :: #import "std/file";
+JSON :: #import "std/json_document";
+Socket :: #import "std/socket_linux";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+c :: #system_library "c";
+Address :: struct { family: u16; port: u16; address: u32; zero: [8]u8 }
+PollFd :: struct { fd: s32; events: s16; revents: s16 }
+SocketOpen :: (domain: s32,type: s32,protocol: s32) -> s32 #foreign c "socket";
+Close :: (fd: s32) -> s32 #foreign c "close";
+Bind :: (fd: s32,address: *Address,size: u32) -> s32 #foreign c "bind";
+Listen :: (fd: s32,count: s32) -> s32 #foreign c "listen";
+GetAddress :: (fd: s32,address: *Address,size: *u32) -> s32 #foreign c "getsockname";
+Poll :: (fds: *PollFd,count: u64,timeout: s32) -> s32 #foreign c "poll";
+Accept :: (fd: s32,address: *void,size: *u32) -> s32 #foreign c "accept";
+Fork :: () -> s32 #foreign c "fork";
+Wait :: (pid: s32,status: *s32,options: s32) -> s32 #foreign c "waitpid";
+Exit :: (code: s32) #foreign c "_exit";
+#scope_export
+BeforeReply :: #type (context: *void) -> bool;
+Step :: struct {
+    method: string
+    path: string
+    status: s32
+    body: string
+    signed: bool
+    token: string
+    body_hash: string
+    admin: string // synthetic operator token, checked without printing it
+    before_reply: BeforeReply
+    context: *void
+}
+Server :: struct { pid: s32; port: u16 }
+NodeJSON :: "{\"node_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"known_nodes\":[]}";
+Pin :: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+Nonce :: "abababababababababababababababababababababababababababababababab";
+Find :: (text: string, needle: string, start: s64 = 0) -> s64 {
+    at:=start
+    while at+needle.count<=text.count {
+        if text[at:at+needle.count]==needle { return at }; at+=1
+    }
+    return -1
+}
+Header :: (text: string, name: string) -> string {
+    start:=Find(text,name)
+    if start<0 { return "" }; start+=name.count
+    end:=Find(text,"\r\n",start)
+    if end<0 { return "" }; return text[start:end]
+}
+Hash :: (bytes: []u8) -> string {
+    digest: [32]u8
+    if !Native.Digest(bytes,digest[:]) { return "" }
+    return Tx.Hex(digest[:])
+}
+Build :: (first: string, second: string) -> string {
+    out: Vec(u8); BuilderPrint(*out,"%",first); BuilderPrint(*out,"%",second); return BuilderFinish(out)
+}
+VerifyTx :: (header: string, method: string, path: string, hash: string, public: []u8, seed: []u8) -> bool {
+    json: JSON.JsonDocument
+    if !JSON.JsonRead(*json,header) { return false }
+    if Tx.Field(*json,"account_id")!=Hash(public) || Tx.Field(*json,"method")!=method ||
+        Tx.Field(*json,"path")!=path || Tx.Field(*json,"body_sha256")!=hash ||
+        Tx.Field(*json,"app_id")!="photos" || Tx.Field(*json,"signature_context")!="daochi-tx-v1" { return false }
+    expires:=JSON.JsonMember(*json,json.root,"expires_at")
+    // Canonical transactions name this integer expires_at (retain exact JSON).
+    expiration:=JSON.JsonWrite(*json,expires,JSON.JsonCompactStyle(false,true))
+    message: Vec(u8)
+    BuilderPrint(*message,"daochi-tx-v1\n6\n%\n%\nphotos\n%\n%\n%\n%\n%\n%\n",Tx.Field(*json,"tx_id"),
+        Tx.Field(*json,"account_id"),Tx.Field(*json,"device_key_id"),method,path,hash,Tx.Field(*json,"nonce"),expiration)
+    proof: [2420]u8; device: [64]u8; expected: [64]u8
+    bytes:=Wire.OutputBytes(*message)
+    return Tx.Unhex(Tx.Field(*json,"signature"),proof[:]) && Sign.AccountVerify(public,bytes,proof[:]) &&
+        Tx.Unhex(Tx.Field(*json,"device_signature"),device[:]) && Native.SignDevice(seed,bytes,expected[:]) && Test.Equal(device[:],expected[:])
+}
+Start :: (steps: []Step, public: []u8, seed: []u8) -> Server {
+    server: Server; server.pid=-1
+    fd:=SocketOpen(2,524289,0)
+    if fd<0 { return server }
+    endpoint: Address; endpoint.family=2; endpoint.address=16777343; size: u32=16
+    if Bind(fd,*endpoint,16)!=0 || Listen(fd,8)!=0 || GetAddress(fd,*endpoint,*size)!=0 {
+        unused Close(fd); return server
+    }
+    server.port=cast(u16)((endpoint.port>>8)|((endpoint.port&255)<<8))
+    pid:=Fork()
+    if pid<0 { unused Close(fd); return server }
+    if pid==0 {
+        for step: steps {
+            poller: PollFd; poller.fd=fd; poller.events=1
+            if Poll(*poller,1,4000)<=0 { Exit(10) }
+            connection:=Accept(fd,null,null)
+            if connection<0 { Exit(11) }
+            socket: Socket.LinuxSocket; socket.fd=connection; socket.valid=true
+            request: [16384]u8; count: s64; end: s64=-1
+            while count<request.count && end<0 {
+                amount:=Socket.SocketReceive(socket,request[count:],1000)
+                if amount<=0 { Exit(12) }; count+=amount
+                end=Find(TextFromBytes(request[:count]),"\r\n\r\n")
+            }
+            if end<0 { Exit(13) }
+            text:=TextFromBytes(request[:end+4])
+            line: Vec(u8); BuilderPrint(*line,"% % HTTP/1.1\r\n",step.method,step.path)
+            expectedLine:=TextFromBytes(Wire.OutputBytes(*line))
+            if text.count<expectedLine.count || text[:expectedLine.count]!=expectedLine { Exit(14) }
+            contentLength:=Header(text,"\r\nContent-Length: "); length: s64
+            for byte: contentLength {
+                if byte<48 || byte>57 { Exit(15) }; length=length*10+cast(s64)byte-48
+                if length>Client.ChunkBytes()+16 { Exit(15) }
+            }
+            state: [256]u8
+            if !Native.DigestStart(state[:]) { Exit(16) }
+            received:=count-end-4
+            if received>length || !Native.DigestUpdate(state[:],request[end+4:count]) { Exit(16) }
+            buffer: [65536]u8
+            while received<length {
+                wanted:=length-received; if wanted>buffer.count { wanted=buffer.count }
+                amount:=Socket.SocketReceive(socket,buffer[:wanted],1000)
+                if amount<=0 || !Native.DigestUpdate(state[:],buffer[:amount]) { Exit(17) }; received+=amount
+            }
+            digest: [32]u8
+            if !Native.DigestFinish(state[:],digest[:]) { Exit(18) }
+            hash:=Tx.Hex(digest[:])
+            if step.body_hash!="" && step.body_hash!=hash { Exit(19) }
+            if step.token!="" && Header(text,"\r\nAuthorization: ")!=Build("Bearer ",step.token) { Exit(20) }
+            if step.admin!="" && Header(text,"\r\nX-Daochi-Admin: ")!=step.admin { Exit(24) }
+            if step.signed && !VerifyTx(Header(text,"\r\nX-Daochi-Tx: "),step.method,step.path,hash,public,seed) { Exit(21) }
+            if step.before_reply!=null && !step.before_reply(step.context) { Exit(23) }
+            response: Vec(u8)
+            BuilderPrint(*response,"HTTP/1.1 % Synthetic\r\nContent-Length: %\r\nConnection: close\r\n\r\n",step.status,step.body.count)
+            if Socket.SocketSendAll(socket,Wire.OutputBytes(*response),1000)!=response.count ||
+                Socket.SocketSendAll(socket,Tx.Bytes(step.body),1000)!=step.body.count { Exit(22) }
+            unused Socket.SocketClose(*socket)
+        }
+        unused Close(fd); Exit(0)
+    }
+    unused Close(fd); server.pid=pid; return server
+}
+Finish :: (server: Server) -> bool {
+    status: s32
+    if server.pid<0 || Wait(server.pid,*status,0)!=server.pid { return false }
+    if status!=0 { print("synthetic node failed: %\n",status>>8) }
+    return status==0
+}
+StepFor :: (method: string,path: string,status: s32 = 200,body: string = "",signed: bool = false,token: string = "") -> Step {
+    step: Step; step.method=method; step.path=path; step.status=status; step.body=body; step.signed=signed; step.token=token; return step
+}
+LoginSteps :: (steps: *Vec(Step), public: []u8, token: string) {
+    VecPush(<<steps,StepFor("GET","/api/v1/node",200,NodeJSON))
+    VecPush(<<steps,StepFor("GET",Build("/api/v1/sync/challenge?user_id=",Hash(public)),200,Build(Build("{\"nonce\":\"",Nonce),"\"}")))
+    VecPush(<<steps,StepFor("POST","/api/v1/sync/login",200,Build(Build("{\"auth_token\":\"",token),"\"}")))
+    VecPush(<<steps,StepFor("POST","/api/v1/account/devices",200,"{}",false,token))
+}
+Configure :: (config: *Types.Config, port: u16) {
+    origin: Vec(u8); BuilderPrint(*origin,"http://127.0.0.1:%",port)
+    config.node.origin=BuilderFinish(origin); config.node.id=Pin
+}
+UseServer :: (client: *Client.SyncClient, server: Server, legacy: bool = false) {
+    // Endpoints are fixed after open in production. Tests reuse an already
+    // validated identity against fresh ephemeral numeric-loopback fixtures.
+    client.nodes[ifx legacy then 1 else 0].port=server.port
+}
+PutSetting :: (db: *void, key: string, value: string) -> bool {
+    statement: *void
+    if SQL.SqlitePrepareText(db,"INSERT INTO settings VALUES('fixture',?,?,0)",-1,*statement,null)!=SQL.SQLITE_OK { return false }
+    defer { unused SQL.SqliteFinalize(statement) }
+    return SQL.SqliteBindTextString(statement,1,key,-1)==SQL.SQLITE_OK && SQL.SqliteBindTextString(statement,2,value,-1)==SQL.SQLITE_OK && SQL.SqliteStep(statement)==SQL.SQLITE_DONE
+}
+AccountDatabase :: (path: string, public: []u8, private: []u8) -> bool {
+    db: *void
+    if SQL.SqliteOpenText(path,*db,SQL.SQLITE_OPEN_READWRITE|SQL.SQLITE_OPEN_CREATE)!=SQL.SQLITE_OK { return false }
+    defer { unused SQL.SqliteClose(db) }
+    return SQL.SqliteExecText(db,"CREATE TABLE settings(user_id TEXT,key TEXT,value TEXT,updated_at INTEGER)")==SQL.SQLITE_OK &&
+        PutSetting(db,"sync_public_id",Hash(public)) && PutSetting(db,"sync_public_key",Tx.Hex(public)) && PutSetting(db,"sync_private_key",Tx.Hex(private))
+}
+Source :: struct { blocks: [3]string; count: s64; calls: s64; fail: s64; too_large: bool }
+ReadSource :: (context: *void,index: s64,buffer: []u8) -> s64 {
+    source:=cast(*Source)context; source.calls+=1
+    if buffer.count!=Client.ChunkBytes() { return -1 }
+    if source.too_large { return buffer.count+1 }
+    if source.fail==index+1 { return -1 }
+    if index>=source.count { return 0 }
+    block:=source.blocks[index]
+    for i: 0..block.count-1 { buffer[i]=block[i] }; return block.count
+}
+Sink :: struct { output: Vec(u8); calls: s64; fail: bool }
+WriteSink :: (context: *void,index: s64,plain: []u8) -> bool {
+    sink:=cast(*Sink)context
+    if sink.fail || index!=sink.calls { return false }
+    sink.calls+=1
+    for byte: plain { VecPush(sink.output,byte) }; return true
+}
+Run :: (root: string,public: []u8,private: []u8,seed: []u8) -> s32 {
+    libraryRoot:=Kit.Library(Kit.Join(root,"library"))
+    library,error:=Store.Open(libraryRoot)
+    if !Kit.Expect(error=="" && library!=null,"synthetic library") { return 1 }
+    defer { Store.Close(library) }
+    config: Types.Config; config.account_database=Kit.Join(root,"account.sqlite"); config.root=libraryRoot
+    if !AccountDatabase(config.account_database,public,private) { return 2 }
+    if SQL.SqliteExecText(library.db,"INSERT INTO photos(id,name,extension,kind,size,taken,metadata,albums,updated) VALUES('local','Keep this','.jpg','photo',0,0,'{}','[]',1)")!=SQL.SQLITE_OK { return 2 }
+    identityPath:=Kit.Join(libraryRoot,"private/identity.json"); devicePath:=Kit.Join(libraryRoot,"private/device.json")
+    identity:=Build(Build("{\"extra\":42,\"content_key\":\"",Tx.Hex(seed)),"\"}")
+    device:=Build(Build("{\"client\":\"photos-existing-device\",\"extra\":true,\"key\":\"",Tx.Hex(seed)),"\"}")
+    if !Files.WriteEntireFile(identityPath,identity) || !Files.WriteEntireFile(devicePath,device) { return 3 }
+    accountBefore,read:=Files.ReadEntireFile(config.account_database)
+    if !read { return 4 }
+    Configure(*config,1)
+    client,openError:=Client.ClientOpen(library,*config)
+    if !Kit.Expect(openError=="" && client!=null,"offline open reads selected identity without contacting port 1") { return 5 }
+    defer { Client.ClientClose(client) }
+    if !Kit.Expect(Test.Equal(client.owner.private_key[:],private) && Test.Equal(client.owner.public_key[:],public) &&
+        Test.Equal(client.key[:],seed) && Test.Equal(client.device_key[:],seed) &&
+        TextFromBytes(client.client_id[:client.client_count])=="photos-existing-device","existing key/device/account bytes preserved") { return 6 }
+    key: Vec(u8); expected: Vec(u8); encoded: Vec(u8)
+    binary: [2]u8=.{255,0}
+    defer { Wire.ClearOutput(*key); Wire.ClearOutput(*expected); Wire.ClearOutput(*encoded) }
+    if !Kit.Expect(Client.ClientRecordKey(client,"photos",*key) && Entity.EntityRecordKey(private,"photos",*expected) &&
+        Test.Equal(Wire.OutputBytes(*key),Wire.OutputBytes(*expected)) && Client.Encode(binary[:],*encoded) &&
+        TextFromBytes(Wire.OutputBytes(*encoded))=="_wA" && Client.TextValid("café",5) && !Client.TextValid("café",4),"canonical record key/base64url/UTF-8 byte bound") { return 7 }
+
+    // Pin and policy failure stop before challenge or account headers.
+    for mode: 0..2 {
+        policy:=ifx mode==0 then "{}" else ifx mode==1 then "{\"node_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"known_nodes\":[]}" else "{\"node_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"known_nodes\":[{\"sync\":{\"direction\":\"push\",\"apps\":[\"entity\"]}}]}"
+        steps: [1]Step; steps[0]=StepFor("GET","/api/v1/node",200,policy)
+        server:=Start(steps[:],public,seed); UseServer(client,server)
+        loginError:=Client.ClientLogin(client)
+        if !Kit.Expect(loginError!="" && Finish(server) && client.tokens[0].count==0,"bad pin/malformed/outward policy blocks login") { return 8 }
+    }
+    route:="/api/v1/sync"; steps: Vec(Step)
+    LoginSteps(*steps,public,"first")
+    VecPush(steps,StepFor("POST",route,401,"expired",true,"first"))
+    LoginSteps(*steps,public,"second")
+    VecPush(steps,StepFor("POST",route,200,"{\"ok\":true}",true,"second"))
+    server:=Start(VecSlice(steps,0,steps.count),public,seed); UseServer(client,server)
+    response,requestError:=Client.ClientRequest(client,route,2,Tx.Bytes("{\"synthetic\":1}"))
+    valid:=requestError=="" && response.status==200 && TextFromBytes(response.body)=="{\"ok\":true}"
+    TransportClear(*response)
+    if !Kit.Expect(valid && Finish(server),"native signed request reauthenticates exactly once after 401") { return 9 }
+    // A second 401 is returned with status/body and a single allocation to clear.
+    unused VecResize(steps,0)
+    VecPush(steps,StepFor("POST",route,401,"expired",true,"second")); LoginSteps(*steps,public,"third")
+    VecPush(steps,StepFor("POST",route,401,"still expired",true,"third"))
+    server=Start(VecSlice(steps,0,steps.count),public,seed); UseServer(client,server)
+    response,requestError=Client.ClientRequest(client,route,2)
+    valid=requestError!="" && response.status==401 && TextFromBytes(response.body)=="still expired" && response.storage!=null
+    TransportClear(*response)
+    if !Kit.Expect(valid && Finish(server) && response.storage==null,"second 401 retains error body and terminates retry") { return 10 }
+    for status: 0..2 {
+        single: [1]Step; single[0]=StepFor("POST",route,ifx status==0 then 302 else ifx status==1 then 403 else 500,"error body",true,"third")
+        server=Start(single[:],public,seed); UseServer(client,server)
+        response,requestError=Client.ClientRequest(client,route,2)
+        valid=requestError!="" && response.status==single[0].status && TextFromBytes(response.body)=="error body"
+        TransportClear(*response)
+        if !Kit.Expect(valid && Finish(server),"redirect/forbidden/server error returned without auth retry") { return 21 }
+    }
+
+    // Stream irregular blocks, then retry via HEAD without another PUT.
+    source: Source; source.count=2; source.blocks[0]="first\0photo"; source.blocks[1]="second photo"
+    whole:=Build(source.blocks[0],source.blocks[1]); digest:=Hash(Tx.Bytes(whole))
+    sealed: [2]Vec(u8); metadata: [2]Client.Blob
+    defer { Wire.ClearOutput(*sealed[0]); Wire.ClearOutput(*sealed[1]) }
+    unused VecResize(steps,0)
+    for i: 0..1 {
+        if !Entity.EntitySealChunk(private,"photos",digest,i,Tx.Bytes(source.blocks[i]),*sealed[i]) { return 11 }
+        hash:=Hash(Wire.OutputBytes(*sealed[i]));
+        for j: 0..63 { metadata[i].address[j]=hash[j] }; metadata[i].size=sealed[i].count
+        path:=Build("/api/v1/blobs/entity/",hash)
+        VecPush(steps,StepFor("HEAD",path,404,"",true,"third"))
+        upload:=StepFor("PUT",path,201,"",true,"third"); upload.body_hash=hash; VecPush(steps,upload)
+    }
+    server=Start(VecSlice(steps,0,steps.count),public,seed); UseServer(client,server)
+    input: Client.ChunkSource; input.context=cast(*void)*source; input.read=ReadSource
+    blobs: Client.BlobList
+    {
+        nullView:=Client.BlobSlice(null); emptyView:=Client.BlobSlice(*blobs)
+        if !Kit.Expect(nullView.count==0 && emptyView.count==0,"null/empty metadata borrows") { return 26 }
+    }
+    size,putError:=Client.PutContent(client,digest,input,*blobs)
+    if !Kit.Expect(putError=="" && size==whole.count && blobs.items.count==2 && source.calls==3 && Finish(server),"streamed chunk upload with bounded source and exact encrypted hashes") { return 12 }
+    {
+        view:=Client.BlobSlice(*blobs); first:=Client.BlobAt(*blobs,0); outside:=Client.BlobAt(*blobs,2)
+        if !Kit.Expect(view.count==2 && view[0].size==sealed[0].count && TextUntilNul(first.address[:])==TextUntilNul(view[0].address[:]) && outside.size==0,"nonempty borrowed metadata and bounded access") { return 27 }
+    }
+    unused VecResize(steps,0)
+    for i: 0..1 { VecPush(steps,StepFor("HEAD",Build("/api/v1/blobs/entity/",TextUntilNul(blobs.items[i].address[:])),200,"",true,"third")) }
+    server=Start(VecSlice(steps,0,steps.count),public,seed); UseServer(client,server)
+    size,putError=Client.PutContent(client,digest,input,*blobs)
+    if !Kit.Expect(putError=="" && size==whole.count && Finish(server),"deterministic resumed upload skips existing chunks") { return 13 }
+    // Upload failures leave the previous manifest; the next call retries by
+    // HEAD, so a successful first chunk is reusable after a later failure.
+    unused VecResize(steps,0)
+    VecPush(steps,StepFor("HEAD",Build("/api/v1/blobs/entity/",TextUntilNul(blobs.items[0].address[:])),200,"",true,"third"))
+    VecPush(steps,StepFor("HEAD",Build("/api/v1/blobs/entity/",TextUntilNul(blobs.items[1].address[:])),404,"",true,"third"))
+    VecPush(steps,StepFor("PUT",Build("/api/v1/blobs/entity/",TextUntilNul(blobs.items[1].address[:])),500,"write failed",true,"third"))
+    server=Start(VecSlice(steps,0,steps.count),public,seed); UseServer(client,server)
+    size,putError=Client.PutContent(client,digest,input,*blobs)
+    if !Kit.Expect(putError!="" && blobs.items.count==2 && Finish(server),"partial upload failure preserves original manifest") { return 22 }
+    unused VecResize(steps,0)
+    for i: 0..1 { VecPush(steps,StepFor("GET",Build("/api/v1/blobs/entity/",TextUntilNul(blobs.items[i].address[:])),200,TextFromBytes(Wire.OutputBytes(*sealed[i])),true,"third")) }
+    server=Start(VecSlice(steps,0,steps.count),public,seed); UseServer(client,server)
+    sink: Sink; output: Client.ChunkSink; output.context=cast(*void)*sink; output.write=WriteSink
+    getSize,getError:=Client.GetContent(client,digest,Client.BlobSlice(*blobs),output)
+    if !Kit.Expect(getError=="" && getSize==whole.count && TextFromBytes(Wire.OutputBytes(*sink.output))==whole && Finish(server),"streamed authenticated download") { return 14 }
+    // Hash mismatch, valid hash with a bad AEAD tag, response size, and sink error.
+    for mode: 0..3 {
+        corrupted: Vec(u8); unused VecResize(corrupted,sealed[0].count)
+        for i: 0..corrupted.count-1 { corrupted[i]=sealed[0][i] }
+        changed:=blobs.items[0]
+        if mode==0 || mode==1 { corrupted[corrupted.count-1]^=1 }
+        if mode==1 {
+            hash:=Hash(Wire.OutputBytes(*corrupted)); for i: 0..63 { changed.address[i]=hash[i] }
+        }
+        body:=TextFromBytes(Wire.OutputBytes(*corrupted))
+        if mode==2 { body=TextFromBytes(Wire.OutputBytes(*corrupted)[:corrupted.count-1]) }
+        single: [1]Step; single[0]=StepFor("GET",Build("/api/v1/blobs/entity/",TextUntilNul(changed.address[:])),200,body,true,"third")
+        server=Start(single[:],public,seed); UseServer(client,server)
+        singleBlob: [1]Client.Blob; singleBlob[0]=changed; failureSink: Sink; failureSink.fail=mode==3
+        failedOutput: Client.ChunkSink; failedOutput.context=cast(*void)*failureSink; failedOutput.write=WriteSink
+        size,getError=Client.GetContent(client,digest,singleBlob[:],failedOutput)
+        if !Kit.Expect(getError!="" && size==0 && failureSink.calls==0 && Finish(server),"hash/tag/size/write failures do not expose invalid plaintext") { return 15 }
+    }
+    // Authenticated chunks may still name the wrong whole content. Seal them
+    // for that name to prove the final digest is checked after AEAD succeeds.
+    wrong:=Pin; wrongSealed: Vec(u8)
+    if !Entity.EntitySealChunk(private,"photos",wrong,0,Tx.Bytes(source.blocks[0]),*wrongSealed) { return 23 }
+    wrongBlob: Client.Blob; wrongHash:=Hash(Wire.OutputBytes(*wrongSealed))
+    for i: 0..63 { wrongBlob.address[i]=wrongHash[i] }; wrongBlob.size=wrongSealed.count
+    wrongStep: [1]Step; wrongStep[0]=StepFor("GET",Build("/api/v1/blobs/entity/",wrongHash),200,TextFromBytes(Wire.OutputBytes(*wrongSealed)),true,"third")
+    server=Start(wrongStep[:],public,seed); UseServer(client,server)
+    wrongList: [1]Client.Blob; wrongList[0]=wrongBlob
+    size,getError=Client.GetContent(client,wrong,wrongList[:])
+    Wire.ClearOutput(*wrongSealed)
+    if !Kit.Expect(size==0 && getError=="Original download failed integrity verification" && Finish(server),"final hash required after valid chunk authentication") { return 24 }
+    saved:=blobs.items[0]
+    source.fail=1
+    size,putError=Client.PutContent(client,digest,input,*blobs)
+    source.fail=0; source.too_large=true
+    size,putError=Client.PutContent(client,digest,input,*blobs)
+    if !Kit.Expect(putError!="" && blobs.items.count==2 && TextUntilNul(blobs.items[0].address[:])==TextUntilNul(saved.address[:]),"source failure/oversize preserves caller metadata") { return 16 }
+    source.too_large=false
+    // Wrong whole hash is rejected even after valid per-chunk authentication.
+    source.count=0
+    size,putError=Client.PutContent(client,digest,input,*blobs)
+    if !Kit.Expect(putError!="" && blobs.items.count==2,"changed local original never replaces manifest") { return 17 }
+    empty: []Client.Blob
+    size,getError=Client.GetContent(client,digest,empty)
+    if !Kit.Expect(getError!="","whole download digest checked for empty manifest") { return 18 }
+    emptyDigest:=Hash(Tx.Bytes(""))
+    size,putError=Client.PutContent(client,emptyDigest,input,*blobs)
+    size,getError=Client.GetContent(client,emptyDigest,empty)
+    if !Kit.Expect(putError=="" && getError=="" && size==0 && blobs.items.count==0,"empty original compatibility") { return 19 }
+    identityAfter,identityRead:=Files.ReadEntireFile(identityPath); deviceAfter,deviceRead:=Files.ReadEntireFile(devicePath)
+    accountAfter,accountRead:=Files.ReadEntireFile(config.account_database)
+    statement: *void
+    if SQL.SqlitePrepareText(library.db,"SELECT name,dirty FROM photos WHERE id='local'",-1,*statement,null)!=SQL.SQLITE_OK { return 25 }
+    unchanged:=SQL.SqliteStep(statement)==SQL.SQLITE_ROW && TextFromCString(SQL.SqliteColumnText(statement,0))=="Keep this" && SQL.SqliteColumnInt64(statement,1)==1
+    unused SQL.SqliteFinalize(statement)
+    if !Kit.Expect(identityRead && deviceRead && accountRead && identityAfter==identity && deviceAfter==device && accountBefore==accountAfter &&
+        unchanged && Store.SetSetting(library,"offline-test","true"),"network failures preserve persisted keys/config/account/local records and offline operations") { return 20 }
+    return 0
+}
+Opening :: (root: string,public: []u8,private: []u8,seed: []u8) -> s32 {
+    libraryRoot:=Kit.Library(Kit.Join(root,"opening"))
+    lib,error:=Store.Open(libraryRoot)
+    if lib==null || error!="" { return 40 }; defer { Store.Close(lib) }
+    config: Types.Config; config.account_database=Kit.Join(root,"opening-account.sqlite")
+    if !AccountDatabase(config.account_database,public,private) { return 41 }
+    Configure(*config,1)
+    identityPath:=Kit.Join(libraryRoot,"private/identity.json"); devicePath:=Kit.Join(libraryRoot,"private/device.json")
+    for mode: 0..5 {
+        original:=config.node.origin; originalPin:=config.node.id
+        config.node.origin=ifx mode==0 then "https://127.0.0.1:1" else ifx mode==1 then "http://example.invalid:1" else ifx mode==2 then "http://127.0.0.1:65536" else ifx mode==3 then "http://127.0.0.1:1/" else original
+        if mode==4 { config.node.id="bad" }
+        if mode==5 { config.legacy_node.origin="http://example.invalid:1"; config.legacy_node.id=Pin }
+        client,openError:=Client.ClientOpen(lib,*config)
+        config.node.origin=original; config.node.id=originalPin; config.legacy_node.origin=""
+        if !Kit.Expect(client==null && openError!="" && !Files.PathExists(identityPath) && !Files.PathExists(devicePath),"invalid selected node fails before keys are created") { return 42 }
+    }
+    accountPath:=config.account_database; config.account_database=Kit.Join(root,"missing-account.sqlite")
+    client,openError:=Client.ClientOpen(lib,*config)
+    if !Kit.Expect(client==null && openError!="" && !Files.PathExists(config.account_database) && !Files.PathExists(identityPath),"missing account is read-only and creates no Photos identity") { return 43 }
+    config.account_database=accountPath
+    // Creation uses released JSON and opening the same files again preserves
+    // every byte, including random content key, client ID and device seed.
+    client,openError=Client.ClientOpen(lib,*config)
+    if !Kit.Expect(client!=null && openError=="","missing Photos identity/device created offline") { return 44 }
+    Client.ClientClose(client)
+    identity,identityRead:=Files.ReadEntireFile(identityPath); device,deviceRead:=Files.ReadEntireFile(devicePath)
+    client,openError=Client.ClientOpen(lib,*config)
+    if !Kit.Expect(client!=null && openError=="","created identity can be reopened") { return 45 }
+    Client.ClientClose(client)
+    after,read:=Files.ReadEntireFile(identityPath); deviceAfter,deviceAfterRead:=Files.ReadEntireFile(devicePath)
+    if !Kit.Expect(identityRead && deviceRead && read && deviceAfterRead && identity==after && device==deviceAfter,"reopen never rotates keys or device") { return 46 }
+    for mode: 0..5 {
+        bad:=ifx mode==0 then "{" else ifx mode==1 then "{\"content_key\":\"00\"}" else ifx mode==2 then "{\"content_key\":\"00\",\"content_key\":\"00\"}" else ifx mode==3 then Build(Build("{\"public\":\"00\",\"content_key\":\"",Tx.Hex(seed)),"\"}") else identity
+        badDevice:=ifx mode==4 then "{\"client\":\"photos\",\"key\":\"00\"}" else ifx mode==5 then Build(Build("{\"key\":\"",Tx.Hex(seed)),"\",\"client\":\"bad\\nclient\"}") else device
+        if !Files.WriteEntireFile(identityPath,bad) || !Files.WriteEntireFile(devicePath,badDevice) { return 47 }
+        client,openError=Client.ClientOpen(lib,*config)
+        preserved,ok:=Files.ReadEntireFile(identityPath); preservedDevice,deviceOk:=Files.ReadEntireFile(devicePath)
+        if !Kit.Expect(client==null && openError!="" && ok && deviceOk && preserved==bad && preservedDevice==badDevice,"malformed keys/device/legacy identity fail without replacing files") { return 48 }
+    }
+    return 0
+}
+Authentication :: (root: string,public: []u8,private: []u8,seed: []u8) -> s32 {
+    libraryRoot:=Kit.Library(Kit.Join(root,"authentication")); lib,error:=Store.Open(libraryRoot)
+    if lib==null || error!="" { return 60 }; defer { Store.Close(lib) }
+    config: Types.Config; config.account_database=Kit.Join(root,"auth-account.sqlite")
+    if !AccountDatabase(config.account_database,public,private) { return 61 }
+    Configure(*config,1)
+    client,openError:=Client.ClientOpen(lib,*config)
+    if client==null || openError!="" { return 62 }; defer { Client.ClientClose(client) }
+    for mode: 0..5 {
+        steps: Vec(Step)
+        VecPush(steps,StepFor("GET","/api/v1/node",200,NodeJSON))
+        challenge:=ifx mode==0 then "{}" else Build(Build("{\"nonce\":\"",Nonce),"\"}")
+        VecPush(steps,StepFor("GET",Build("/api/v1/sync/challenge?user_id=",Hash(public)),200,challenge))
+        if mode!=0 && mode!=5 {
+            body:=ifx mode==1 then "{\"auth_token\":[]}" else ifx mode==2 then "{\"auth_token\":\"one\",\"auth_token\":\"two\"}" else ifx mode==4 then "{" else "{\"auth_token\":\"valid\"}"
+            VecPush(steps,StepFor("POST","/api/v1/sync/login",200,body))
+            if mode==3 { VecPush(steps,StepFor("POST","/api/v1/account/devices",403,"registration denied",false,"valid")) }
+        }
+        if mode==5 { client.owner.private_key[0]^=1 }
+        server:=Start(VecSlice(steps,0,steps.count),public,seed); UseServer(client,server)
+        loginError:=Client.ClientLogin(client)
+        if mode==5 { client.owner.private_key[0]^=1 }
+        if !Kit.Expect(loginError!="" && client.tokens[0].count==0 && Finish(server),"malformed challenge/token/registration/signature fails without retained token") { return 63 }
+    }
+    // A failed registration or mismatched signing identity leaves the handle
+    // reusable after the exact existing private bytes are restored.
+    steps: Vec(Step); LoginSteps(*steps,public,"recovered")
+    server:=Start(VecSlice(steps,0,steps.count),public,seed); UseServer(client,server)
+    if !Kit.Expect(Client.ClientLogin(client)=="" && client.tokens[0].count>0 && Finish(server),"login retry recovers after authentication failures") { return 64 }
+    return 0
+}
+Legacy :: (root: string,public: []u8,private: []u8,seed: []u8) -> s32 {
+    keys: Keys.AccountKeys
+    defer { Keys.SecureWipe(cast(*u8)*keys,size_of(Keys.AccountKeys)) }
+    if Keys.CreateAccountKeys(*keys)==0 { return 50 }
+    pk: [1312]u8; sk: [2560]u8
+    defer { Native.Clear(sk[:]) }
+    if !Tx.Unhex(TextUntilNul(keys.public_key_hex[:]),pk[:]) || !Tx.Unhex(TextUntilNul(keys.private_key_hex[:]),sk[:]) { return 51 }
+    libraryRoot:=Kit.Library(Kit.Join(root,"legacy")); lib,error:=Store.Open(libraryRoot)
+    if lib==null || error!="" { return 52 }; defer { Store.Close(lib) }
+    config: Types.Config; config.account_database=Kit.Join(root,"legacy-owner.sqlite")
+    if !AccountDatabase(config.account_database,public,private) { return 53 }
+    Configure(*config,1)
+    identity: Vec(u8); device: Vec(u8)
+    defer { Wire.ClearOutput(*identity); Wire.ClearOutput(*device) }
+    BuilderPrint(*identity,"{\"content_key\":\"%\",\"public\":\"%\",\"private\":\"%\"}",Tx.Hex(seed),TextUntilNul(keys.public_key_hex[:]),TextUntilNul(keys.private_key_hex[:]))
+    BuilderPrint(*device,"{\"key\":\"%\",\"client\":\"photos-existing-device\"}",Tx.Hex(seed))
+    if !Files.WriteEntireFile(Kit.Join(libraryRoot,"private/identity.json"),TextFromBytes(Wire.OutputBytes(*identity))) ||
+        !Files.WriteEntireFile(Kit.Join(libraryRoot,"private/device.json"),TextFromBytes(Wire.OutputBytes(*device))) { return 54 }
+    photo:="photo-\"café"; part:="chunk:\"0\ncafé"; plain:="legacy\0original"
+    aad: Vec(u8)
+    BuilderPrint(*aad,"{\"account_id\":\"%\",\"app_id\":\"photos\",\"id\":",Hash(pk[:]))
+    if !JSON.JsonQuoteInto(*aad,photo,false) || !BuilderAppend(aad,",\"part\":") || !JSON.JsonQuoteInto(*aad,part,false) || !BuilderAppend(aad,",\"schema\":\"photos.media.v1\"}") { return 60 }
+    sealed: Vec(u8); output: Vec(u8)
+    defer { Wire.ClearOutput(*sealed); Wire.ClearOutput(*output) }
+    if !Wire.SyncSeal(seed,Tx.Bytes(plain),Wire.OutputBytes(*aad),true,*sealed) { return 55 }
+    digest:=Hash(Wire.OutputBytes(*sealed)); path:=Build("/api/v1/blobs/photos/",digest)
+    steps: Vec(Step); LoginSteps(*steps,pk[:],"legacy")
+    VecPush(steps,StepFor("GET",path,200,TextFromBytes(Wire.OutputBytes(*sealed)),true,"legacy"))
+    server:=Start(VecSlice(steps,0,steps.count),pk[:],seed)
+    legacyOrigin: Vec(u8); BuilderPrint(*legacyOrigin,"http://127.0.0.1:%",server.port)
+    config.legacy_node.origin=TextFromBytes(Wire.OutputBytes(*legacyOrigin)); config.legacy_node.id=Pin
+    client,openError:=Client.ClientOpen(lib,*config)
+    if !Kit.Expect(client!=null && openError=="" && client.legacy.valid && Test.Equal(client.legacy.private_key[:],sk[:]),"existing legacy keys validated and retained separately") { return 56 }
+    defer { Client.ClientClose(client) }
+    fetchError:=Client.FetchBlob(client,digest,photo,part,*output)
+    if !Kit.Expect(fetchError=="" && TextFromBytes(Wire.OutputBytes(*output))==plain && Finish(server) && client.tokens[0].count==0 && client.tokens[1].count>0,"legacy fetch selects legacy node/account and canonical AAD") { return 57 }
+    for mode: 0..1 {
+        single: [1]Step; single[0]=StepFor("GET",path,200,TextFromBytes(Wire.OutputBytes(*sealed)),true,"legacy")
+        if mode==0 { sealed[sealed.count-1]^=1; single[0].body=TextFromBytes(Wire.OutputBytes(*sealed)) }
+        server=Start(single[:],pk[:],seed); UseServer(client,server,true)
+        fetchError=Client.FetchBlob(client,digest,photo,ifx mode==1 then "chunk:1" else part,*output)
+        if mode==0 { sealed[sealed.count-1]^=1 }
+        if !Kit.Expect(fetchError!="" && Test.Wiped(*output) && Finish(server),"legacy hash/AAD failure clears plaintext output") { return 58 }
+    }
+    if !Kit.Expect(Client.FetchBlob(client,"bad",photo,part,*output)!="" && Test.Wiped(*output),"invalid legacy reference rejected offline") { return 59 }
+    invalidUTF8: [1]u8=.{255}
+    if !Kit.Expect(Client.FetchBlob(client,digest,photo,TextFromBytes(invalidUTF8[:]),*output)!="" && Test.Wiped(*output),"invalid UTF-8 authentication data is rejected offline and clears output") { return 61 }
+    return 0
+}
+Transport :: #import "sync_http";
+Frames :: #import "sync_frame";
+TransportClear :: (response: *Frames.SyncResponse) { Transport.ClearResponse(response) }
+
+#program_export
+main :: () -> s32 {
+    root:=Kit.TempDirectory("sync-client")
+    if root=="" { return 100 }; defer { unused Kit.Cleanup(root) }
+    public: Vec(u8); private: Vec(u8); seed: Vec(u8)
+    defer { Wire.ClearOutput(*private); Wire.ClearOutput(*seed) }
+    if !Test.Fixture("account-public.bin",*public) || !Test.Fixture("account-secret.bin",*private) || !Test.Fixture("key.bin",*seed) { return 101 }
+    code:=Run(root,Wire.OutputBytes(*public),Wire.OutputBytes(*private),Wire.OutputBytes(*seed))
+    if code==0 { code=Opening(root,Wire.OutputBytes(*public),Wire.OutputBytes(*private),Wire.OutputBytes(*seed)) }
+    if code==0 { code=Authentication(root,Wire.OutputBytes(*public),Wire.OutputBytes(*private),Wire.OutputBytes(*seed)) }
+    if code==0 { code=Legacy(root,Wire.OutputBytes(*public),Wire.OutputBytes(*private),Wire.OutputBytes(*seed)) }
+    if code==0 { print("sync_client: local tests passed\n") }
+    return code
+}

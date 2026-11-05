@@ -4,6 +4,7 @@
 // exposes the granted device media and decoded private previews.
 using UI :: #import "kryon/Widgets";
 using Media :: #import "mobile_media";
+Headings :: #import "day_heading";
 Input :: #import "kryon/tree_input";
 ScrollDevice :: #import "kryon/ScrollDevice";
 ScrollLayout :: #import "kryon/scroll";
@@ -46,8 +47,9 @@ gesture: Gesture.State;
 password: [1025]u8; password_cursor: s32; password_anchor: s32; password_focused: bool;
 // Grid geometry for the loaded items, rebuilt every frame in content units.
 tile_x: [480]float32; tile_y: [480]float32; header: [480]bool; header_y: [480]float32;
-day_label: [480][32]u8;
+day_label: [480][128]u8;
 labels_generation: s64 = -1; labels_count: s32 = -1;
+labels_today: [16]u8; labels_locale: [32]u8;
 ClearPassword :: () {
     for i: 0..1024 { password[i]=0 }
     password_cursor=0; password_anchor=0; password_focused=false
@@ -114,22 +116,6 @@ Picture :: (session: Session, key: u64, path: *u8, alt: *u8, bounds: Rectangle) 
     props: ImageProps; props.key=key; props.asset_path=TextFromCString(path); props.alt_text=TextFromCString(alt); props.bounds=bounds
     props.fit=ImageFit.ImageFitCover; Image(session,props)
 }
-// "Today", "Yesterday", "Sat, 10 Oct" this year, or "10 Oct 2025".
-Days :: (year: s64, month: s64, day: s64) -> s64 {
-    y := year - (ifx month <= 2 then 1 else 0)
-    era := (ifx y >= 0 then y else y - 399) / 400
-    yoe := y - era * 400
-    doy := (153 * ((month + 9) % 12) + 2) / 5 + day - 1
-    return era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468
-}
-Digits :: (text: string, at: s32, count: s32) -> s64 {
-    value: s64
-    for i: 0..count-1 {
-        byte := text[at+i]; if byte < 48 || byte > 57 { return -1 }
-        value = value * 10 + cast(s64)(byte - 48)
-    }
-    return value
-}
 Put :: (out: []u8, at: *s32, text: string) {
     for byte: text { if at.* < cast(s32)out.count - 1 { out[at.*] = byte; at.* += 1 } }
     out[at.*] = 0
@@ -141,23 +127,9 @@ PutNumber :: (out: []u8, at: *s32, value: s64) {
     out[at.*] = 0
 }
 DayLabel :: (date: string, out: []u8) {
-    at: s32; out[0] = 0
-    today := TextFromCString(*Media.today[0]); yesterday := TextFromCString(*Media.yesterday[0])
-    if date.count == 0 { Put(out, *at, "Earlier"); return }
-    if date == today { Put(out, *at, "Today"); return }
-    if date == yesterday { Put(out, *at, "Yesterday"); return }
-    if date.count != 10 { Put(out, *at, date); return }
-    year := Digits(date, 0, 4); month := Digits(date, 5, 2); day := Digits(date, 8, 2)
-    if year < 0 || month < 1 || month > 12 || day < 1 || day > 31 { Put(out, *at, date); return }
-    months: [12]string = .{"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"}
-    weekdays: [7]string = .{"Sun","Mon","Tue","Wed","Thu","Fri","Sat"}
-    current := ifx today.count == 10 then Digits(today, 0, 4) else -1
-    if year == current {
-        weekday := ((Days(year, month, day) % 7) + 7 + 4) % 7
-        Put(out, *at, weekdays[weekday]); Put(out, *at, ", "); PutNumber(out, *at, day); Put(out, *at, " "); Put(out, *at, months[month-1])
-    } else {
-        PutNumber(out, *at, day); Put(out, *at, " "); Put(out, *at, months[month-1]); Put(out, *at, " "); PutNumber(out, *at, year)
-    }
+    heading := Headings.DayHeading(Headings.DayNumber(date), Headings.DayNumber(TextFromCString(*Media.today[0])), TextFromCString(*Media.locale[0]))
+    Copy(out, heading)
+    Headings.Release(heading)
 }
 Same :: (a: *u8, b: *u8) -> bool { return TextFromCString(a) == TextFromCString(b) }
 Copy :: (out: []u8, text: string) { at: s32; Put(out, *at, text) }
@@ -280,9 +252,11 @@ GridFrame :: (session: Session, body: Rectangle) -> s32 {
     width:=body.width-cast(float32)Slim().scrollbar_width
     columns: s32 = 4; if width>=600.0 { columns=cast(s32)(width/150.0) }
     cell:=(width-cast(float32)(columns-1)*Gap)/cast(float32)columns
-    if Media.generation!=labels_generation || Media.count!=labels_count {
+    if Media.generation!=labels_generation || Media.count!=labels_count ||
+        !Same(*labels_today[0],*Media.today[0]) || !Same(*labels_locale[0],*Media.locale[0]) {
         for i: 0..Media.count-1 { DayLabel(TextFromCString(*Media.photos[i].date[0]),day_label[i][:]) }
         labels_generation=Media.generation; labels_count=Media.count
+        Copy(labels_today[:],TextFromCString(*Media.today[0])); Copy(labels_locale[:],TextFromCString(*Media.locale[0]))
     }
     y: float32 = 0.0; column: s32
     for i: 0..Media.count-1 {
@@ -424,7 +398,7 @@ ViewerFrame :: (session: Session, viewport: Rectangle) -> s32 {
     Viewer.Draw(session,40,TextFromCString(*photo.image[0]),TextFromCString(*photo.name[0]),image_bounds)
     if IconButton(session,30,BackIcon.Shape,"Back",.{viewport.x+4.0,viewport.y+8.0,40.0,40.0}) { Media.Request("back") }
     Label(session,41,TextFromCString(*photo.name[0]),.{viewport.x+52.0,viewport.y+8.0,viewport.width-112.0,22.0},15)
-    day: [32]u8; DayLabel(TextFromCString(*photo.date[0]),day[:])
+    day: [128]u8; DayLabel(TextFromCString(*photo.date[0]),day[:])
     Label(session,42,TextFromCString(*day[0]),.{viewport.x+52.0,viewport.y+30.0,viewport.width-112.0,18.0},12)
     if photo.video {
         if IconButton(session,31,PlayIcon.Shape,"Play video",.{viewport.x+viewport.width-48.0,viewport.y+8.0,40.0,40.0}) { Media.Request("play") }

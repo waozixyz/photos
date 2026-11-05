@@ -1,0 +1,130 @@
+App :: #import "app_lock";
+Vault :: #import "vault";
+Auth :: #import "vault_auth";
+Access :: #import "access_registry";
+Store :: #import "library_store";
+Kit :: #import "kit";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+Clock :: #import "std/timer_linux";
+JSON :: #import "std/json_document";
+#import "std/byte_text_linux"
+#import "std/c_string"
+using Vectors :: #import "std/vec";
+
+c :: #system_library "c";
+Link :: (target: *u8, path: *u8) -> s32 #foreign c "symlink";
+Fifo :: (path: *u8, mode: u32) -> s32 #foreign c "mkfifo";
+Bytes :: (text: string) -> []u8 { descriptor := cast(*TextDescriptor)*text; return BytesFromPointer(descriptor.data,cast(u64)text.count) }
+Text :: (document: *JSON.JsonDocument, key: string) -> string { return JSON.JsonString(document,JSON.JsonMember(document,document.root,key)) }
+Number :: (document: *JSON.JsonDocument, key: string) -> s64 { value,valid := JSON.JsonInteger(document,JSON.JsonMember(document,document.root,key)); return ifx valid then value else -1 }
+Route :: (lib: *Store.Library, registry: *Access.Registry, action: string, value: string, token: string, result: *JSON.JsonDocument) -> bool {
+    request: Vec(u8); BuilderPrint(*request,"{\"action\":%,\"value\":%,\"app_lock_token\":%}",JSON.JsonQuote(action),JSON.JsonQuote(value),JSON.JsonQuote(token))
+    response,handled := App.AppLockRoute(lib,BuilderFinish(request),registry)
+    return handled && JSON.JsonRead(result,response)
+}
+main :: () -> s32 {
+    root := Kit.TempDirectory("app-lock")
+    if root.count == 0 { return 1 }
+    defer { unused Kit.Cleanup(root) }
+    path := Kit.Library(Tree.JoinPath(root,"library"))
+    lib,error := Store.Open(path)
+    if lib == null || error.count > 0 { return 2 }
+    defer { Store.Close(lib) }
+    registry: Access.Registry
+    if !Access.Initialize(*registry) { return 3 }
+    defer { Access.Close(*registry) }
+    response,handled := App.AppLockRoute(lib,"{}",*registry)
+    if handled || App.Enabled(lib) { return 4 }
+    password := "correct synthetic password"
+    hidden,hidden_error := Vault.VaultAuthenticate(lib,Bytes(password),true,*registry)
+    if hidden_error.count > 0 { return 5 }
+    result: JSON.JsonDocument
+    if !Route(lib,*registry,"app_lock_enable",password,"",*result) || Number(*result,"app_lock_changed") != 1 || Vault.Unlocked(lib,hidden,*registry) { return 6 }
+    if !Route(lib,*registry,"query","","",*result) || Number(*result,"app_locked") != 1 || JSON.JsonCount(*result,JSON.JsonMember(*result,result.root,"photos")) != 0 { return 7 }
+    if !Route(lib,*registry,"app_lock_unlock",password,"",*result) || Number(*result,"app_lock_authorized") != 1 { return 8 }
+    app := Text(*result,"app_lock_token")
+    if !App.Unlocked(lib,app,false,*registry) || Vault.Unlocked(lib,app,*registry) { return 9 }
+    // App authentication temporarily grants and locks a Hidden token; no grant
+    // remains in the actual registry after it returns.
+    session_at: s32
+    while session_at < 256 { if registry.sessions[session_at].used && registry.sessions[session_at].kind == Access.HIDDEN { return 10 }; session_at += 1 }
+    // Golden fingerprint from Python hashlib.sha256(packed(config)+raw_marker).
+    // This native unit has no Python process or environment dependency.
+    saved_marker,saved_marker_ok := Files.ReadEntireFile(Vault.Path(lib))
+    if !saved_marker_ok || !Files.WriteEntireFile(Vault.Path(lib),"{\"verifier\":\"synthetic verifier bytes\"}") { return 11 }
+    expected_stamp := "f6212ae5baca8781c6e2d0b60bc3d2ab7056fb1b5fd9f74fe128eaa7a60ca8d8"
+    stamp_matches := App.Fingerprint(lib) == expected_stamp
+    if !Files.WriteEntireFile(Vault.Path(lib),saved_marker) || !stamp_matches { return 11 }
+    hidden_change,hidden_change_error := Vault.VaultAuthenticate(lib,Bytes(password),false,*registry)
+    if hidden_change_error.count > 0 || Vault.ChangePassword(lib,hidden_change,Bytes("changed Hidden password"),*registry).count > 0 ||
+        App.Unlocked(lib,app,false,*registry) { return 39 }
+    password = "changed Hidden password"
+    if !Route(lib,*registry,"app_lock_unlock",password,"",*result) || Number(*result,"app_lock_authorized") != 1 { return 40 }
+    app = Text(*result,"app_lock_token")
+    if !Route(lib,*registry,"app_lock_delay","300",app,*result) || Number(*result,"app_lock_checked") != 1 || App.Unlocked(lib,app,false,*registry) { return 12 }
+    app = Text(*result,"app_lock_token")
+    if !App.Unlocked(lib,app,false,*registry) || Number(*result,"app_lock_delay") != 300 { return 13 }
+    if !Route(lib,*registry,"app_lock_delay","301",app,*result) || Text(*result,"error") != "Choose Immediately, 5 seconds, 15 seconds, 1 minute, 5 minutes or 30 minutes" { return 14 }
+    if !Route(lib,*registry,"app_lock_pin","0042",app,*result) || Number(*result,"app_lock_changed") != 1 || App.Unlocked(lib,app,false,*registry) { return 15 }
+    config := App.Settings(lib)
+    if config.method != "pin" || config.auto_lock != 300 || Auth.NativeVerify(Bytes("0042"),config.verifier,true) != 0 { return 16 }
+    if !Route(lib,*registry,"app_lock_unlock","42","",*result) || Text(*result,"error") != "Use an app PIN of 4 through 12 digits" { return 17 }
+    if !Route(lib,*registry,"app_lock_unlock","9999","",*result) || Text(*result,"error") != "Incorrect PIN" { return 18 }
+    if !Route(lib,*registry,"app_lock_unlock","0042","",*result) { return 19 }
+    app = Text(*result,"app_lock_token")
+    if !Route(lib,*registry,"app_lock_password","another synthetic password",app,*result) || Number(*result,"app_lock_changed") != 1 { return 20 }
+    if !Route(lib,*registry,"app_lock_unlock","another synthetic password","",*result) { return 21 }
+    app = Text(*result,"app_lock_token")
+    if !Route(lib,*registry,"app_lock_disable","another synthetic password",app,*result) || Number(*result,"app_lock_changed") != 1 || App.Enabled(lib) { return 22 }
+    if !Route(lib,*registry,"app_lock_delay","5","",*result) || Text(*result,"error") != "Enable App lock before choosing its background delay" { return 23 }
+    // Existing v1/v2 settings and malformed markers use baseline normalization.
+    if !Files.WriteEntireFile(App.Path(lib),"{\"version\":1,\"enabled\":true}") { return 24 }
+    config = App.Settings(lib)
+    if !config.enabled || config.version != 0 || config.method != "hidden" { return 25 }
+    bad: [8]string = .["{}","[]","{\"version\":true,\"enabled\":false}","{\"version\":1,\"enabled\":0}","{\"version\":1,\"enabled\":false,\"extra\":0}","{\"version\":3,\"enabled\":false,\"method\":\"hidden\",\"verifier\":\"\",\"auto_lock\":true}","{\"version\":3,\"enabled\":false,\"method\":\"hidden\",\"verifier\":\"\",\"auto_lock\":10}","broken"]
+    for marker: bad {
+        if !Files.WriteEntireFile(App.Path(lib),marker) { return 26 }
+        config = App.Settings(lib)
+        if !config.enabled || config.method != "hidden" || config.auto_lock != 0 { return 27 }
+    }
+    unused Files.RemoveFile(App.Path(lib))
+    destination := Tree.JoinPath(root,"target")
+    if !Files.WriteEntireFile(destination,"{\"version\":1,\"enabled\":false}") { return 28 }
+    target: [4096]u8; marker: [4096]u8
+    if !CopyCString(destination,target[:]) || !CopyCString(App.Path(lib),marker[:]) || Link(*target[0],*marker[0]) != 0 { return 29 }
+    if !App.Enabled(lib) { return 30 }
+    unused Files.RemoveFile(App.Path(lib))
+    oversized: Vec(u8); VecResize(oversized,1025)
+    for i: 0..1024 { oversized[i] = 32 }
+    if !Files.WriteEntireFile(App.Path(lib),BuilderFinish(oversized)) || !App.Enabled(lib) { return 42 }
+    unused Files.RemoveFile(App.Path(lib))
+    if !CopyCString(App.Path(lib),marker[:]) || Fifo(*marker[0],384) != 0 || !App.Enabled(lib) { return 43 }
+    unused Files.RemoveFile(App.Path(lib))
+    lock_path := Tree.JoinPath(lib.root,"private/.app-lock.lock")
+    unused Files.RemoveFile(lock_path)
+    other_hidden,other_hidden_error := Vault.VaultAuthenticate(lib,Bytes(password),false,*registry)
+    if other_hidden_error.count > 0 || !Route(lib,*registry,"app_lock_lock","","",*result) || Vault.Unlocked(lib,other_hidden,*registry) { return 41 }
+    if !CopyCString(lock_path,marker[:]) || Link(*target[0],*marker[0]) != 0 { return 31 }
+    if !Route(lib,*registry,"app_lock_pin","0042","",*result) || Text(*result,"error") != "Local password settings cannot be replaced safely" { return 32 }
+    unused Files.RemoveFile(lock_path)
+    // Hashing after a short real token expires cannot replace the marker.
+    if !Route(lib,*registry,"app_lock_pin","0042","",*result) { return 33 }
+    Access.Close(*registry)
+    if !Access.Initialize(*registry,30,100) { return 34 }
+    if !Route(lib,*registry,"app_lock_unlock","0042","",*result) { return 35 }
+    short := Text(*result,"app_lock_token")
+    before,before_ok := Files.ReadEntireFile(App.Path(lib))
+    if !Route(lib,*registry,"app_lock_password","replacement synthetic password",short,*result) { return 36 }
+    expired_error := Text(*result,"error")
+    // Under load the 30 ms lease can end before the request starts hashing.
+    // Both denial points must stay locked and preserve the verifier below.
+    if expired_error != "App access ended; unlock before changing its settings" &&
+        !(expired_error.count == 0 && Number(*result,"app_locked") == 1) { return 36 }
+    after,after_ok := Files.ReadEntireFile(App.Path(lib))
+    if !before_ok || !after_ok || before != after || App.Unlocked(lib,short,true,*registry) { return 37 }
+    Access.Close(*registry)
+    if !Access.Initialize(*registry) || App.Unlocked(lib,short,false,*registry) { return 38 }
+    print("Photos app lock: separate access, exact fingerprints, PIN/password methods, delay, revocation, fail-closed markers, safe locks and expiry passed\n")
+    return 0
+}

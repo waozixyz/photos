@@ -1,0 +1,932 @@
+// Read-only source orchestration. One supervised metadata reader belongs to a
+// batch; originals and metadata writers retain their native verified protocols.
+Store :: #import "library_store";
+LibraryFiles :: #import "library_files";
+Motion :: #import "live_motion";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+Channel :: #import "std/process_channel_linux";
+Timer :: #import "std/timer_linux";
+JSON :: #import "std/json_document";
+Float :: #import "std/float_text";
+SQL :: #import "sqlite/SQLite";
+Environment :: #import "std/environment_linux";
+Unicode :: #import "std/unicode";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_export
+ImportCounters :: struct { added: s64; merged: s64; unchanged: s64; skipped: s64; warning: s64; errors: s64 }
+ImportFailure :: struct { path: Vec(u8); error: Vec(u8) }
+ImportResult :: struct {
+    counters: ImportCounters
+    failures: Vec(ImportFailure)
+    error: Vec(u8)
+    complete: bool
+}
+// Transfer every nested buffer to a local owner before clearing the outer
+// vector. Result reset does not depend on nested removal cleanup semantics.
+ClearImportResult :: (result: *ImportResult) {
+    if result == null { return }
+    for at: 0..result.failures.count-1 {
+        path: Vec(u8); error: Vec(u8)
+        VecSwap(path,result.failures[at].path)
+        VecSwap(error,result.failures[at].error)
+    }
+    VecClear(result.failures)
+    VecClear(result.error)
+    result.counters = .{}
+    result.complete = false
+}
+
+// Append caller-owned diagnostic bytes; false propagates allocation failure.
+AddImportFailure :: (result: *ImportResult, path: string, error: string) -> bool {
+    if result == null { return false }
+    at := result.failures.count
+    if !VecResize(result.failures,at+1) { return false }
+    return BuilderAppend(result.failures[at].path,path) && BuilderAppend(result.failures[at].error,error)
+}
+
+// A service reply owns its bytes independently of result reset. Output must
+// be empty/reusable storage and must not alias any result buffer.
+ImportResultInto :: (output: *Vec(u8), result: *ImportResult) -> bool {
+    if output == null || result == null || output.count != 0 || output == *result.error { return false }
+    document: JSON.JsonDocument
+    defer { JSON.JsonReset(*document) }
+    object := JSON.JsonNewObject(*document)
+    names: [6]string = .["added","merged","unchanged","skipped","warning","errors"]
+    counts: [6]s64 = .[result.counters.added,result.counters.merged,result.counters.unchanged,
+        result.counters.skipped,result.counters.warning,result.counters.errors]
+    for at: 0..5 {
+        if !JSON.JsonSet(*document,object,names[at],JSON.JsonNewInteger(*document,counts[at])) { return false }
+    }
+    failures := JSON.JsonNewArray(*document)
+    for at: 0..result.failures.count-1 {
+        if output == *result.failures[at].path || output == *result.failures[at].error { return false }
+        path: Vec(u8); error: Vec(u8)
+        VecSwap(path,result.failures[at].path)
+        VecSwap(error,result.failures[at].error)
+        defer { VecSwap(path,result.failures[at].path); VecSwap(error,result.failures[at].error) }
+        item := JSON.JsonNewObject(*document)
+        if !JSON.JsonSet(*document,item,"path",JSON.JsonNewStringCopy(*document,TextView(VecSlice(path,0,path.count)))) ||
+            !JSON.JsonSet(*document,item,"error",JSON.JsonNewStringCopy(*document,TextView(VecSlice(error,0,error.count)))) ||
+            !JSON.JsonAppend(*document,failures,item) { return false }
+    }
+    error: Vec(u8)
+    VecSwap(error,result.error)
+    defer { VecSwap(error,result.error) }
+    if !JSON.JsonSet(*document,object,"failures",failures) ||
+        !JSON.JsonSet(*document,object,"complete",JSON.JsonNewBool(*document,result.complete)) { return false }
+    if error.count > 0 && !JSON.JsonSet(*document,object,"error",JSON.JsonNewStringCopy(*document,TextView(VecSlice(error,0,error.count)))) { return false }
+    return JSON.JsonWriteInto(output,*document,object,JSON.JsonCompactStyle(false))
+}
+
+FinishImport :: #type (context: *void, lib: *Store.Library) -> bool;
+MotionForImport :: #type (context: *void, lib: *Store.Library, id: string, unchanged: bool) -> bool;
+ImportOptions :: struct {
+    files: LibraryFiles.FileOptions
+    // Actual C25 provider, supplied by the service. A false result is a soft
+    // file warning after a successful merge, matching the existing importer.
+    motion: MotionForImport
+    motion_context: *void
+    finish: FinishImport
+    finish_context: *void
+    copy_timeout_ms: s32
+    merge_timeout_ms: s32
+    discovery_timeout_ms: s32
+}
+Reader :: struct {
+    child: Channel.ProcessChannel
+    options: LibraryFiles.FileOptions
+    error: Vec(u8)
+    allocation_failed: bool
+    starts: s64
+}
+
+MtimeNanoseconds :: (info: Tree.PathInfo, output: *s64) -> bool {
+    if output == null || info.modified_nanoseconds >= 1000000000 { return false }
+    seconds := info.modified
+    fraction := cast(s64)info.modified_nanoseconds
+    if seconds == -9223372037 {
+        if fraction < 145224192 { return false }
+        output.* = (-9223372036854775807-1)+(fraction-145224192)
+        return true
+    }
+    if seconds < -9223372036 || seconds > 9223372036 { return false }
+    whole := seconds*1000000000
+    if seconds >= 0 && fraction > 9223372036854775807-whole { return false }
+    output.* = whole+fraction
+    return true
+}
+
+ReaderErrorInto :: (output: *Vec(u8), reader: *Reader) -> bool {
+    if output == null || reader == null || output.count != 0 || output == *reader.error { return false }
+    text: Vec(u8)
+    VecSwap(text,reader.error)
+    defer { VecSwap(text,reader.error) }
+    return BuilderAppend(<<output,TextView(VecSlice(text,0,text.count)))
+}
+
+CloseReader :: (reader: *Reader) {
+    if reader != null && reader.child.pid > 0 { unused Channel.CloseChannel(*reader.child, 0) }
+}
+
+#scope_file
+ReaderError :: (reader: *Reader, message: string, allocation: bool = false) -> bool {
+    VecClear(reader.error)
+    reader.allocation_failed = allocation
+    if !BuilderAppend(reader.error,message) { reader.allocation_failed = true }
+    return false
+}
+Bytes :: (text: string) -> []u8 {
+    descriptor := cast(*TextDescriptor)*text
+    return BytesFromPointer(descriptor.data,cast(u64)text.count)
+}
+
+#scope_export
+StartReader :: (reader: *Reader, options: LibraryFiles.FileOptions = .{}) -> bool {
+    if reader == null { return false }
+    CloseReader(reader)
+    reader.options = options
+    helperBytes: Vec(u8)
+    if !LibraryFiles.HelperProgramInto(*helperBytes,options,"read_metadata","read-metadata") { return ReaderError(reader,"Build or install Photos metadata reading before importing photos") }
+    helper := TextView(VecSlice(helperBytes,0,helperBytes.count))
+    arguments: [16]string = .["env","-u","DISPLAY","-u","WAYLAND_DISPLAY","-u","XAUTHORITY",
+        "-u","DBUS_SESSION_BUS_ADDRESS","-u","SESSION_MANAGER","OMP_NUM_THREADS=2",
+        "prlimit","--as=536870912","--",helper]
+    reader.child = Channel.StartChannel(arguments[:],false,true)
+    if reader.child.pid <= 0 { return ReaderError(reader,"Metadata reading could not start; retry the import") }
+    reader.starts += 1
+    VecClear(reader.error)
+    reader.allocation_failed = false
+    return true
+}
+
+// RESPONSE owns its bytes and must outlive DOCUMENT. Reset the document before
+// reusing response storage. Reads may restart a stopped helper on a later
+// request; a failed request itself is never replayed.
+ReadMetadata :: (reader: *Reader, response: *Vec(u8), document: *JSON.JsonDocument,
+    operation: string, path: string, fallback: float64 = 0.0,
+    capture_mode: s32 = -1, capture_value: float64 = 0.0) -> bool {
+    if reader == null || response == null || document == null { return false }
+    JSON.JsonReset(document)
+    VecClear(<<response)
+    VecClear(reader.error)
+    reader.allocation_failed = false
+    if reader.child.pid <= 0 || Channel.WaitChannel(*reader.child,0) {
+        if !StartReader(reader,reader.options) { return false }
+    }
+    request: Vec(u8)
+    if !BuilderAppend(request,"{\"operation\":") || !JSON.JsonQuoteInto(*request,operation,false) ||
+        !BuilderAppend(request,",\"path\":") || !JSON.JsonQuoteInto(*request,path,false) { return ReaderError(reader,"Cannot allocate metadata request",true) }
+    if operation == "camera" {
+        if !BuilderAppend(request,",\"fallback\":") || !Float.Float64ReprInto(fallback,*request) { return ReaderError(reader,"Cannot allocate metadata request",true) }
+        if capture_mode >= 0 {
+            if !BuilderAppend(request,",\"capture_mode\":") || !VecPush(request,cast(u8)(48+capture_mode)) ||
+                !BuilderAppend(request,",\"capture_value\":") || !Float.Float64ReprInto(capture_value,*request) { return ReaderError(reader,"Cannot allocate metadata request",true) }
+        }
+    }
+    if !BuilderAppend(request,"}\n") { return ReaderError(reader,"Cannot allocate metadata request",true) }
+    if request.count > 32768 { return ReaderError(reader,"Metadata request exceeds its limit") }
+    timeout := LibraryFiles.HelperTimeout(reader.options.metadata_timeout_ms,20000)
+    deadline := Timer.MonotonicMilliseconds()+timeout
+    if Channel.ChannelSend(reader.child,VecSlice(request,0,request.count),timeout) != request.count {
+        CloseReader(reader)
+        return ReaderError(reader,"Metadata reading could not finish; retry the import")
+    }
+    chunk: [65536]u8
+    complete := false
+    while !complete {
+        remaining := deadline-Timer.MonotonicMilliseconds()
+        if remaining <= 0 { CloseReader(reader); return ReaderError(reader,"Metadata reading timed out; retry the import") }
+        count := Channel.ChannelReceive(reader.child,chunk[:],cast(s32)remaining)
+        if count <= 0 { CloseReader(reader); return ReaderError(reader,ifx count < 0 then "Metadata reading timed out; retry the import" else "Metadata reader stopped; retry the import") }
+        if response.count > 16777216-count { CloseReader(reader); return ReaderError(reader,"Metadata response exceeds its limit") }
+        if !VecReserve(<<response,response.count+count) { CloseReader(reader); return ReaderError(reader,"Cannot allocate metadata response",true) }
+        for at: 0..count-1 {
+            if chunk[at] == 10 {
+                if complete || at != count-1 { CloseReader(reader); return ReaderError(reader,"Metadata reader returned an invalid response") }
+                complete = true
+            }
+            if !VecPush(<<response,chunk[at]) { CloseReader(reader); return ReaderError(reader,"Cannot allocate metadata response",true) }
+        }
+    }
+    // A temporary local owner permits a checked view without exposing Vec's
+    // representation or returning a view of a pointer parameter.
+    owned: Vec(u8)
+    VecSwap(owned,<<response)
+    defer { VecSwap(owned,<<response) }
+    if !JSON.JsonRead(document,TextView(VecSlice(owned,0,owned.count))) ||
+        JSON.JsonKindOf(document,document.root) != JSON.JsonKind.Object {
+        return ReaderError(reader,"Metadata reader returned an invalid response",document.error == "out of memory reading JSON")
+    }
+    error_node := JSON.JsonMember(document,document.root,"error")
+    if JSON.JsonKindOf(document,error_node) == JSON.JsonKind.String && !JSON.JsonIs(document,error_node,"") {
+        if !JSON.JsonStringInto(document,error_node,*reader.error) { return ReaderError(reader,"Cannot allocate metadata error",true) }
+        return false
+    }
+    return true
+}
+
+
+#scope_file
+libc :: #system_library "libc";
+ReleaseOwned :: (memory: *void) #foreign libc "free";
+DropOwnedText :: (text: string) {
+    if text.count != 0 { descriptor := cast(*TextDescriptor)*text; ReleaseOwned(cast(*void)descriptor.data) }
+}
+JoinInto :: (output: *Vec(u8), parent: string, name: string) -> bool {
+    return output != null && output.count == 0 && BuilderAppend(<<output,parent) &&
+        (parent == "/" || BuilderAppend(<<output,"/")) && BuilderAppend(<<output,name)
+}
+IntegerInto :: (output: *Vec(u8), value: s64) -> bool {
+    document: JSON.JsonDocument
+    defer { JSON.JsonReset(*document) }
+    node := JSON.JsonNewInteger(*document,value)
+    return node >= 0 && JSON.JsonWriteInto(output,*document,node,JSON.JsonCompactStyle(false))
+}
+Within :: (path: string, root: string) -> bool {
+    return path == root || root == "/" || path.count > root.count && path[:root.count] == root && path[root.count] == 47
+}
+Identity :: (text: string) -> bool {
+    if text.count != 64 { return false }
+    for byte: text { if !((byte >= 48 && byte <= 57) || (byte >= 97 && byte <= 102)) { return false } }
+    return true
+}
+SourceKind :: (extension: string) -> string {
+    images: [10]string = .[".jpg",".jpeg",".jpe",".png",".webp",".gif",".tif",".tiff",".bmp",".hif"]
+    for candidate: images { if candidate == extension { return "photo" } }
+    if LibraryFiles.SpecialCodec(extension) != "" { return "photo" }
+    videos: [12]string = .[".mp4",".mov",".m4v",".3gp",".avi",".webm",".mpg",".mpeg",".mod",".flv",".mkv",".wmv"]
+    for candidate: videos { if candidate == extension { return "video" } }
+    return ""
+}
+LowerExtensionInto :: (output: *Vec(u8), path: string) -> bool {
+    suffix := Tree.PathSuffix(path)
+    for byte: suffix {
+        value := ifx byte >= 65 && byte <= 90 then byte+32 else byte
+        if !VecPush(<<output,value) { return false }
+    }
+    return true
+}
+ColumnInto :: (statement: *void, index: s32, output: *Vec(u8)) -> bool {
+    pointer := SQL.SqliteColumnText(statement,index)
+    if pointer == null { return true }
+    return BuilderAppend(<<output,TextFromBytes(BytesFromPointer(pointer,cast(u64)SQL.SqliteColumnBytes(statement,index))))
+}
+Bind :: (statement: *void, index: s32, text: string) -> bool {
+    return SQL.SqliteBindTextString(statement,index,text,cast(s32)text.count) == SQL.SQLITE_OK
+}
+Number :: (document: *JSON.JsonDocument, node: s32, output: *float64) -> bool {
+    bytes: Vec(u8)
+    if !JSON.JsonNumberTextInto(document,node,*bytes) { return false }
+    value, valid := Float.ParseFloat64(TextView(VecSlice(bytes,0,bytes.count)))
+    if !valid || value != value || value-value != 0.0 { return false }
+    output.* = value
+    return true
+}
+// One owned request, at most 64 KiB of reply, and one absolute deadline.
+// A writer outcome that cannot be confirmed is never replayed here.
+NativeJSON :: (reader: *Reader, arguments: []string, timeout: s32,
+    response: *Vec(u8), document: *JSON.JsonDocument, input: string = "") -> bool {
+    JSON.JsonReset(document)
+    VecClear(<<response)
+    command: Vec(string)
+    environment: [12]string = .["env","-u","DISPLAY","-u","WAYLAND_DISPLAY","-u","XAUTHORITY",
+        "-u","DBUS_SESSION_BUS_ADDRESS","-u","SESSION_MANAGER","OMP_NUM_THREADS=2"]
+    for value: environment { if !VecPush(command,value) { return ReaderError(reader,"Cannot allocate import command",true) } }
+    for value: arguments { if !VecPush(command,value) { return ReaderError(reader,"Cannot allocate import command",true) } }
+    child := Channel.StartChannel(VecSlice(command,0,command.count),false,true)
+    if child.pid <= 0 { return ReaderError(reader,"Import helper could not start; rescan before retrying") }
+    defer { unused Channel.CloseChannel(*child,0) }
+    started := Timer.MonotonicMilliseconds()
+    if started < 0 { return ReaderError(reader,"Cannot read the import deadline") }
+    deadline := started+timeout
+    if input.count != 0 && Channel.ChannelSend(child,Bytes(input),timeout) != input.count {
+        return ReaderError(reader,"Import outcome could not be confirmed; rescan before retrying")
+    }
+    if !Channel.CloseChannelInput(child) { return ReaderError(reader,"Import outcome could not be confirmed; rescan before retrying") }
+    chunk: [4096]u8
+    while true {
+        remaining := deadline-Timer.MonotonicMilliseconds()
+        if remaining <= 0 { return ReaderError(reader,"Import outcome could not be confirmed; rescan before retrying") }
+        count := Channel.ChannelReceive(child,chunk[:],cast(s32)remaining)
+        if count < 0 { return ReaderError(reader,"Import outcome could not be confirmed; rescan before retrying") }
+        if count == 0 { break }
+        if response.count > 65536-count { return ReaderError(reader,"Import helper returned an oversized response") }
+        if !VecReserve(<<response,response.count+count) { return ReaderError(reader,"Cannot allocate import response",true) }
+        for at: 0..count-1 { if !VecPush(<<response,chunk[at]) { return ReaderError(reader,"Cannot allocate import response",true) } }
+    }
+    remaining := deadline-Timer.MonotonicMilliseconds()
+    if remaining < 0 || !Channel.WaitChannel(*child,cast(s32)remaining) { return ReaderError(reader,"Import outcome could not be confirmed; rescan before retrying") }
+    owned: Vec(u8)
+    VecSwap(owned,<<response)
+    defer { VecSwap(owned,<<response) }
+    if !JSON.JsonRead(document,TextView(VecSlice(owned,0,owned.count))) || JSON.JsonKindOf(document,document.root) != JSON.JsonKind.Object {
+        return ReaderError(reader,"Import returned an invalid response",document.error == "out of memory reading JSON")
+    }
+    node := JSON.JsonMember(document,document.root,"error")
+    if JSON.JsonKindOf(document,node) == JSON.JsonKind.String && !JSON.JsonIs(document,node,"") {
+        VecClear(reader.error)
+        if !JSON.JsonStringInto(document,node,*reader.error) { return ReaderError(reader,"Cannot allocate import error",true) }
+        return false
+    }
+    if child.code != 0 { return ReaderError(reader,"Import outcome could not be confirmed; rescan before retrying") }
+    return true
+}
+DigestInto :: (reader: *Reader, path: string, size: s64, output: *Vec(u8), timeout: s32) -> bool {
+    helper: Vec(u8); size_bytes: Vec(u8)
+    if !LibraryFiles.HelperProgramInto(*helper,reader.options,"import_original","import-original") { return ReaderError(reader,"Build or install the Photos importer before importing originals") }
+    if !IntegerInto(*size_bytes,size) { return ReaderError(reader,"Cannot allocate original size",true) }
+    arguments: [7]string = .["prlimit","--as=268435456","--",TextView(VecSlice(helper,0,helper.count)),
+        "--digest",path,TextView(VecSlice(size_bytes,0,size_bytes.count))]
+    response: Vec(u8); document: JSON.JsonDocument
+    defer { JSON.JsonReset(*document) }
+    if !NativeJSON(reader,arguments[:],timeout,*response,*document) { return false }
+    if !JSON.JsonStringInto(*document,JSON.JsonMember(*document,document.root,"id"),output) { return ReaderError(reader,"Cannot read the original identity",true) }
+    owned: Vec(u8)
+    VecSwap(owned,<<output)
+    defer { VecSwap(owned,<<output) }
+    if !Identity(TextView(VecSlice(owned,0,owned.count))) { return ReaderError(reader,"Original importer returned an invalid identity") }
+    return true
+}
+CopyOriginal :: (reader: *Reader, source: string, destination: string, id: string, size: s64, timeout: s32) -> bool {
+    if !Tree.CreateDirectories(Tree.PathParent(destination),448) { return ReaderError(reader,"Cannot create the original directory") }
+    prefix: Vec(u8)
+    if !BuilderAppend(prefix,Tree.PathName(destination)) || !BuilderAppend(prefix,".import-") { return ReaderError(reader,"Cannot allocate original temporary path",true) }
+    staging := Tree.CreateTemporaryDirectory(Tree.PathParent(destination),TextView(VecSlice(prefix,0,prefix.count)))
+    if staging == "" { return ReaderError(reader,"Cannot create the private original copy") }
+    defer { unused Tree.RemoveTree(staging); DropOwnedText(staging) }
+    temporary: Vec(u8); helper: Vec(u8); size_bytes: Vec(u8)
+    if !JoinInto(*temporary,staging,"original") || !IntegerInto(*size_bytes,size) { return ReaderError(reader,"Cannot allocate original paths",true) }
+    name := TextView(VecSlice(temporary,0,temporary.count))
+    file := Files.OpenExclusivePrivate(name)
+    if !file.valid { return ReaderError(reader,"Cannot create the private original copy") }
+    if !Files.CloseFile(file) { return ReaderError(reader,"Cannot close the private original copy") }
+    if !LibraryFiles.HelperProgramInto(*helper,reader.options,"import_original","import-original") { return ReaderError(reader,"Build or install the Photos importer before importing originals") }
+    arguments: [9]string = .["prlimit","--as=268435456","--",TextView(VecSlice(helper,0,helper.count)),
+        source,destination,id,name,TextView(VecSlice(size_bytes,0,size_bytes.count))]
+    response: Vec(u8); document: JSON.JsonDocument
+    defer { JSON.JsonReset(*document) }
+    if !NativeJSON(reader,arguments[:],timeout,*response,*document) { return false }
+    stored, valid := JSON.JsonInteger(*document,JSON.JsonMember(*document,document.root,"stored"))
+    return valid && stored == 1 || ReaderError(reader,"Original import could not finish")
+}
+Merge :: (reader: *Reader, lib: *Store.Library, request: *JSON.JsonDocument, timeout: s32,
+    response: *Vec(u8), document: *JSON.JsonDocument) -> bool {
+    if !SQL.SqliteGetAutocommit(lib.db) { return ReaderError(reader,"Finish the current library operation before importing metadata") }
+    data: Vec(u8); helper: Vec(u8); database: Vec(u8)
+    if !JSON.JsonWriteInto(*data,request,request.root,JSON.JsonCompactStyle(false,true)) || !VecPush(data,cast(u8)10) ||
+        !JoinInto(*database,lib.root,"library.sqlite") { return ReaderError(reader,"Cannot allocate import metadata",true) }
+    if data.count > 16777216 { return ReaderError(reader,"Import metadata exceeds its limit") }
+    if !LibraryFiles.HelperProgramInto(*helper,reader.options,"import_metadata","import-metadata") { return ReaderError(reader,"Build or install the Photos metadata importer before importing photos") }
+    arguments: [6]string = .["prlimit","--as=536870912","--cpu=30","--",TextView(VecSlice(helper,0,helper.count)),TextView(VecSlice(database,0,database.count))]
+    if !NativeJSON(reader,arguments[:],timeout,response,document,TextView(VecSlice(data,0,data.count))) { return false }
+    saved, valid := JSON.JsonInteger(document,JSON.JsonMember(document,document.root,"saved"))
+    return valid && saved == 1 || ReaderError(reader,"Import outcome could not be confirmed; rescan before retrying")
+}
+
+// 1 hit, 0 miss, -1 SQLite failure, -2 allocation failure.
+Cached :: (lib: *Store.Library, path: string, size: s64, mtime: s64, stamp: string,
+    id: *Vec(u8), extension: *Vec(u8), kind: *Vec(u8)) -> s32 {
+    statement: *void
+    query := "SELECT p.id,p.extension,p.kind FROM sources s JOIN photos p ON p.id=s.photo_id WHERE s.path=? AND s.size=? AND s.mtime=? AND s.meta_stamp=?"
+    if SQL.SqlitePrepareText(lib.db,query,-1,*statement,null) != SQL.SQLITE_OK { return -1 }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if !Bind(statement,1,path) || SQL.SqliteBindInt64(statement,2,size) != SQL.SQLITE_OK ||
+        SQL.SqliteBindInt64(statement,3,mtime) != SQL.SQLITE_OK || !Bind(statement,4,stamp) { return -1 }
+    code := SQL.SqliteStep(statement)
+    if code == SQL.SQLITE_DONE { return 0 }
+    if code != SQL.SQLITE_ROW { return -1 }
+    if !ColumnInto(statement,0,id) || !ColumnInto(statement,1,extension) || !ColumnInto(statement,2,kind) { return -2 }
+    return 1
+}
+Exists :: (lib: *Store.Library, id: string) -> s32 {
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,"SELECT 1 FROM photos WHERE id=?",-1,*statement,null) != SQL.SQLITE_OK { return -1 }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if !Bind(statement,1,id) { return -1 }
+    code := SQL.SqliteStep(statement)
+    if code == SQL.SQLITE_ROW { return 1 }
+    return ifx code == SQL.SQLITE_DONE then 0 else -1
+}
+SetText :: (document: *JSON.JsonDocument, object: s32, name: string, text: string) -> bool {
+    return JSON.JsonSet(document,object,name,JSON.JsonNewStringCopy(document,text))
+}
+Truthy :: (document: *JSON.JsonDocument, node: s32) -> bool {
+    kind := JSON.JsonKindOf(document,node)
+    if kind == JSON.JsonKind.Missing || kind == JSON.JsonKind.Null || kind == JSON.JsonKind.False { return false }
+    if kind == JSON.JsonKind.String { return !JSON.JsonIs(document,node,"") }
+    if kind == JSON.JsonKind.Array || kind == JSON.JsonKind.Object { return JSON.JsonCount(document,node) > 0 }
+    if kind == JSON.JsonKind.Number { value: float64; return Number(document,node,*value) && value != 0.0 }
+    return true
+}
+// Provider rules are normalized before the existing native transaction. A bad
+// rule is a soft warning; allocation failure is a hard failure.
+Automatic :: (document: *JSON.JsonDocument, source: s32, valid: *bool) -> s32 {
+    valid.* = false
+    object := JSON.JsonNewObject(document)
+    if object < 0 { return -1 }
+    if source < 0 { valid.* = true; return object }
+    if JSON.JsonKindOf(document,source) != JSON.JsonKind.Object || JSON.JsonCount(document,source) > 128 { return object }
+    node := JSON.JsonFirst(document,source)
+    while node >= 0 {
+        key: Vec(u8)
+        if !JSON.JsonKeyInto(document,node,*key) { return -1 }
+        name := Store.AlbumName(TextView(VecSlice(key,0,key.count)))
+        if name == "" || JSON.JsonKindOf(document,node) != JSON.JsonKind.Array || JSON.JsonCount(document,node) > 64 { return object }
+        member := JSON.JsonFirst(document,node)
+        while member >= 0 {
+            identity: Vec(u8)
+            if JSON.JsonKindOf(document,member) != JSON.JsonKind.String { return object }
+            if !JSON.JsonStringInto(document,member,*identity) { return -1 }
+            if !Identity(TextView(VecSlice(identity,0,identity.count))) { return object }
+            member = JSON.JsonNext(document,member)
+        }
+        copied := JSON.JsonCopy(document,document,node)
+        if copied < 0 || !JSON.JsonSetCopy(document,object,name,copied) { return -1 }
+        node = JSON.JsonNext(document,node)
+    }
+    valid.* = true
+    return object
+}
+DescriptionInto :: (document: *JSON.JsonDocument, node: s32, output: *Vec(u8), nested: bool = false, depth: s32 = 0) -> bool {
+    if depth > 512 { return false }
+    kind := JSON.JsonKindOf(document,node)
+    if kind == JSON.JsonKind.Missing { return true }
+    if kind == JSON.JsonKind.String {
+        text: Vec(u8)
+        if !JSON.JsonStringInto(document,node,*text) { return false }
+        if !nested { return BuilderAppend(<<output,TextView(VecSlice(text,0,text.count))) }
+        // Python's string coercion is retained for legacy non-string captions.
+        quote: u8 = 39; single: bool; has_double: bool
+        for byte: VecSlice(text,0,text.count) { if byte == 39 { single = true }; if byte == 34 { has_double = true } }
+        if single && !has_double { quote = 34 }
+        if !VecPush(<<output,quote) { return false }
+        for byte: VecSlice(text,0,text.count) {
+            if byte == quote || byte == 92 { if !VecPush(<<output,cast(u8)92) || !VecPush(<<output,byte) { return false } }
+            else if byte == 10 { if !BuilderAppend(<<output,"\\n") { return false } }
+            else if byte == 13 { if !BuilderAppend(<<output,"\\r") { return false } }
+            else if byte == 9 { if !BuilderAppend(<<output,"\\t") { return false } }
+            else if byte < 32 || byte == 127 {
+                hex := "0123456789abcdef"
+                if !BuilderAppend(<<output,"\\x") || !VecPush(<<output,hex[cast(s32)byte/16]) || !VecPush(<<output,hex[cast(s32)byte%16]) { return false }
+            } else if !VecPush(<<output,byte) { return false }
+        }
+        return VecPush(<<output,quote)
+    }
+    if kind == JSON.JsonKind.Null { return BuilderAppend(<<output,"None") }
+    if kind == JSON.JsonKind.True { return BuilderAppend(<<output,"True") }
+    if kind == JSON.JsonKind.False { return BuilderAppend(<<output,"False") }
+    if kind == JSON.JsonKind.Number { return JSON.JsonWriteInto(output,document,node,JSON.JsonPythonStyle(-1,false,false,true)) }
+    object := kind == JSON.JsonKind.Object
+    if !VecPush(<<output,cast(u8)(ifx object then 123 else 91)) { return false }
+    at := JSON.JsonFirst(document,node); first := true
+    while at >= 0 {
+        if !first && !BuilderAppend(<<output,", ") { return false }
+        if object {
+            key: Vec(u8)
+            if !JSON.JsonKeyInto(document,at,*key) { return false }
+            temporary: JSON.JsonDocument
+            defer { JSON.JsonReset(*temporary) }
+            name := JSON.JsonNewStringCopy(*temporary,TextView(VecSlice(key,0,key.count)))
+            if name < 0 || !DescriptionInto(*temporary,name,output,true,depth+1) || !BuilderAppend(<<output,": ") { return false }
+        }
+        if !DescriptionInto(document,at,output,true,depth+1) { return false }
+        first = false; at = JSON.JsonNext(document,at)
+    }
+    return VecPush(<<output,cast(u8)(ifx object then 125 else 93))
+}
+Preview :: (lib: *Store.Library, id: string, extension: string, kind: string, options: LibraryFiles.FileOptions) {
+    original: Vec(u8)
+    if !LibraryFiles.OriginalInto(*original,lib,id,extension) { return }
+    photo: Store.PhotoRow = .{id=id,extension=extension,kind=kind}
+    path, error := LibraryFiles.PreviewSource(lib,photo,TextView(VecSlice(original,0,original.count)),options)
+    unused error // Retaining originals does not depend on successful codecs.
+    DropOwnedText(path)
+}
+MotionScan :: (options: *ImportOptions, lib: *Store.Library, id: string, unchanged: bool) -> bool {
+    if options.motion != null { return options.motion(options.motion_context,lib,id,unchanged) }
+    return Motion.MotionDetect(lib,id,unchanged,options.files) == ""
+}
+// 1 added, 2 merged, 3 unchanged, 4 skipped, 5 warning; -1 failed and
+// -2 allocation failure. The borrowed classification is stored separately.
+ProcessFile :: (lib: *Store.Library, path: string, root: string, aliases: *JSON.JsonDocument,
+    reader: *Reader, options: *ImportOptions) -> s32,string {
+    info := Tree.FileSnapshot(path)
+    if info.kind != Tree.PathKind.File { return 4,"" }
+    if !info.identity_valid { return -1,"OSError" }
+    extension_bytes: Vec(u8)
+    if !LowerExtensionInto(*extension_bytes,path) { return -2,"" }
+    extension := TextView(VecSlice(extension_bytes,0,extension_bytes.count))
+    kind := SourceKind(extension)
+    if kind == "" { return 4,"" }
+    mtime: s64
+    if !MtimeNanoseconds(info,*mtime) { return -1,"LibraryError" }
+    warning: bool
+    request: JSON.JsonDocument; sidecar: JSON.JsonDocument
+    defer { JSON.JsonReset(*request); JSON.JsonReset(*sidecar) }
+    request.root = JSON.JsonNewObject(*request)
+    metadata := JSON.JsonNewObject(*request)
+    stamp: Vec(u8); response: Vec(u8)
+    capture_mode: s32 = -1; capture_value: float64
+    if ReadMetadata(reader,*response,*sidecar,"sidecar",path) {
+        node := JSON.JsonMember(*sidecar,sidecar.root,"metadata")
+        stamp_node := JSON.JsonMember(*sidecar,sidecar.root,"stamp")
+        mode, mode_valid := JSON.JsonInteger(*sidecar,JSON.JsonMember(*sidecar,sidecar.root,"capture_mode"))
+        value: float64
+        valid := JSON.JsonKindOf(*sidecar,node) == JSON.JsonKind.Object && JSON.JsonKindOf(*sidecar,stamp_node) == JSON.JsonKind.String &&
+            mode_valid && mode >= 0 && mode <= 2 && Number(*sidecar,JSON.JsonMember(*sidecar,sidecar.root,"capture_value"),*value)
+        if valid {
+            metadata = JSON.JsonCopy(*request,*sidecar,node)
+            if metadata < 0 || !JSON.JsonStringInto(*sidecar,stamp_node,*stamp) { return -2,"" }
+            capture_mode = cast(s32)mode; capture_value = value
+        } else { warning = true }
+    } else { if reader.allocation_failed { return -2,"" }; warning = true }
+    if warning && !BuilderAppend(stamp,"invalid") { return -2,"" }
+    cached_id: Vec(u8); cached_extension: Vec(u8); cached_kind: Vec(u8)
+    cached := Cached(lib,path,info.size,mtime,TextView(VecSlice(stamp,0,stamp.count)),*cached_id,*cached_extension,*cached_kind)
+    if cached < 0 { return cached,"OperationalError" }
+    if cached == 1 {
+        id := TextView(VecSlice(cached_id,0,cached_id.count))
+        cached_ext := TextView(VecSlice(cached_extension,0,cached_extension.count))
+        if LibraryFiles.SpecialCodec(cached_ext) != "" { Preview(lib,id,cached_ext,TextView(VecSlice(cached_kind,0,cached_kind.count)),options.files) }
+        if !MotionScan(options,lib,id,true) { warning = true }
+        return ifx warning then 5 else 3,""
+    }
+    id_bytes: Vec(u8)
+    if !DigestInto(reader,path,info.size,*id_bytes,LibraryFiles.HelperTimeout(options.copy_timeout_ms,600000)) {
+        return ifx reader.allocation_failed then -2 else -1,"LibraryError"
+    }
+    id := TextView(VecSlice(id_bytes,0,id_bytes.count))
+    existing := Exists(lib,id)
+    if existing < 0 { return -1,"OperationalError" }
+    fallback := cast(float64)info.modified+cast(float64)info.modified_nanoseconds/1000000000.0
+    taken := fallback; width: s64; height: s64
+    camera: JSON.JsonDocument
+    defer { JSON.JsonReset(*camera) }
+    JSON.JsonReset(*sidecar)
+    if ReadMetadata(reader,*response,*camera,"camera",path,fallback,capture_mode,capture_value) {
+        camera_width, width_valid := JSON.JsonInteger(*camera,JSON.JsonMember(*camera,camera.root,"width"))
+        camera_height, height_valid := JSON.JsonInteger(*camera,JSON.JsonMember(*camera,camera.root,"height"))
+        time: float64
+        gps := JSON.JsonMember(*camera,camera.root,"gps")
+        valid := width_valid && height_valid && camera_width >= 0 && camera_height >= 0 &&
+            camera_width <= 2147483647 && camera_height <= 2147483647 && Number(*camera,JSON.JsonMember(*camera,camera.root,"taken"),*time)
+        if JSON.JsonKindOf(*camera,gps) != JSON.JsonKind.Null {
+            latitude: float64; longitude: float64
+            valid = valid && JSON.JsonKindOf(*camera,gps) == JSON.JsonKind.Object &&
+                Number(*camera,JSON.JsonMember(*camera,gps,"latitude"),*latitude) &&
+                Number(*camera,JSON.JsonMember(*camera,gps,"longitude"),*longitude) &&
+                latitude >= -90.0 && latitude <= 90.0 && longitude >= -180.0 && longitude <= 180.0
+        }
+        if valid {
+            taken = time
+            if kind == "photo" {
+                width = camera_width; height = camera_height
+                if JSON.JsonKindOf(*camera,gps) == JSON.JsonKind.Object && JSON.JsonKindOf(*request,JSON.JsonMember(*request,metadata,"geoDataExif")) == JSON.JsonKind.Missing {
+                    if !JSON.JsonSet(*request,metadata,"geoDataExif",JSON.JsonCopy(*request,*camera,gps)) { return -2,"" }
+                }
+            }
+        } else { warning = true }
+    } else { if reader.allocation_failed { return -2,"" }; warning = true }
+    parent := Tree.PathParent(path)
+    album_bytes: Vec(u8)
+    alias := JSON.JsonMember(aliases,aliases.root,parent)
+    if alias >= 0 {
+        if !JSON.JsonStringInto(aliases,alias,*album_bytes) { return -2,"" }
+    } else {
+        album := ifx parent == root then Tree.PathName(root) else parent[root.count+1:]
+        if !BuilderAppend(album_bytes,album) { return -2,"" }
+    }
+    album := TextView(VecSlice(album_bytes,0,album_bytes.count))
+    if existing == 0 {
+        destination: Vec(u8)
+        if !LibraryFiles.OriginalInto(*destination,lib,id,extension) { return -2,"" }
+        if !CopyOriginal(reader,path,TextView(VecSlice(destination,0,destination.count)),id,info.size,LibraryFiles.HelperTimeout(options.copy_timeout_ms,600000)) {
+            return ifx reader.allocation_failed then -2 else -1,"LibraryError"
+        }
+    }
+    people := JSON.JsonMember(*request,metadata,"photosPeople")
+    people_copy := ifx people < 0 then JSON.JsonNewNull(*request) else JSON.JsonCopy(*request,*request,people)
+    auto_valid: bool
+    automatic := Automatic(*request,JSON.JsonMember(*request,metadata,"photosAutoAlbums"),*auto_valid)
+    if people_copy < 0 || automatic < 0 { return -2,"" }
+    if !auto_valid { automatic = JSON.JsonNewObject(*request); warning = true }
+    unused JSON.JsonRemove(*request,metadata,"photosPeople")
+    unused JSON.JsonRemove(*request,metadata,"photosAutoAlbums")
+    albums := JSON.JsonNewArray(*request)
+    if !JSON.JsonAppend(*request,albums,JSON.JsonNewStringCopy(*request,album)) { return -2,"" }
+    exported := JSON.JsonMember(*request,metadata,"albums")
+    if JSON.JsonKindOf(*request,exported) == JSON.JsonKind.Array {
+        item := JSON.JsonFirst(*request,exported)
+        while item >= 0 {
+            if JSON.JsonKindOf(*request,item) == JSON.JsonKind.String {
+                name: Vec(u8)
+                if !JSON.JsonStringInto(*request,item,*name) { return -2,"" }
+                text := TextView(VecSlice(name,0,name.count))
+                if text.count <= 512 && Store.AlbumName(text) != "" && !JSON.JsonAppend(*request,albums,JSON.JsonNewStringCopy(*request,text)) { return -2,"" }
+            }
+            item = JSON.JsonNext(*request,item)
+        }
+    }
+    caption: Vec(u8); tags: Vec(u8); taken_bytes: Vec(u8)
+    if !DescriptionInto(*request,JSON.JsonMember(*request,metadata,"description"),*caption) ||
+        !Float.Float64ReprInto(taken,*taken_bytes) { return -2,"" }
+    tags_node := JSON.JsonMember(*request,metadata,"tags")
+    if JSON.JsonKindOf(*request,tags_node) == JSON.JsonKind.String && !JSON.JsonStringInto(*request,tags_node,*tags) { return -2,"" }
+    folded := Unicode.CaseFold(album)
+    defer { DropOwnedText(folded) }
+    favorite := folded == "favorites" || folded == "favourites" || JSON.JsonKindOf(*request,JSON.JsonMember(*request,metadata,"favorite")) == JSON.JsonKind.True
+    object := request.root
+    if !SetText(*request,object,"id",id) || !SetText(*request,object,"name",Tree.PathName(path)) ||
+        !SetText(*request,object,"extension",extension) || !SetText(*request,object,"kind",kind) ||
+        !SetText(*request,object,"path",path) || !SetText(*request,object,"stamp",TextView(VecSlice(stamp,0,stamp.count))) ||
+        !SetText(*request,object,"caption",TextView(VecSlice(caption,0,caption.count))) ||
+        !SetText(*request,object,"tags",TextView(VecSlice(tags,0,tags.count))) ||
+        !JSON.JsonSet(*request,object,"size",JSON.JsonNewInteger(*request,info.size)) ||
+        !JSON.JsonSet(*request,object,"mtime",JSON.JsonNewInteger(*request,mtime)) ||
+        !JSON.JsonSet(*request,object,"width",JSON.JsonNewInteger(*request,width)) ||
+        !JSON.JsonSet(*request,object,"height",JSON.JsonNewInteger(*request,height)) ||
+        !JSON.JsonSet(*request,object,"taken",JSON.JsonNewNumber(*request,TextView(VecSlice(taken_bytes,0,taken_bytes.count)))) ||
+        !JSON.JsonSet(*request,object,"favorite",JSON.JsonNewBool(*request,favorite)) ||
+        !JSON.JsonSet(*request,object,"archived",JSON.JsonNewBool(*request,JSON.JsonKindOf(*request,JSON.JsonMember(*request,metadata,"archived")) == JSON.JsonKind.True)) ||
+        !JSON.JsonSet(*request,object,"correct_date",JSON.JsonNewBool(*request,Truthy(*request,JSON.JsonMember(*request,metadata,"photoTakenTime")))) ||
+        !JSON.JsonSet(*request,object,"metadata",metadata) || !JSON.JsonSet(*request,object,"albums",albums) ||
+        !JSON.JsonSet(*request,object,"auto_memberships",automatic) || !JSON.JsonSet(*request,object,"people_index",people_copy) { return -2,"" }
+    merged: JSON.JsonDocument
+    defer { JSON.JsonReset(*merged) }
+    JSON.JsonReset(*camera)
+    if !Merge(reader,lib,*request,LibraryFiles.HelperTimeout(options.merge_timeout_ms,40000),*response,*merged) {
+        return ifx reader.allocation_failed then -2 else -1,"LibraryError"
+    }
+    added, added_valid := JSON.JsonInteger(*merged,JSON.JsonMember(*merged,merged.root,"added"))
+    merge_warning, warning_valid := JSON.JsonInteger(*merged,JSON.JsonMember(*merged,merged.root,"warning"))
+    if !added_valid || added < 0 || added > 1 || !warning_valid || merge_warning < 0 || merge_warning > 1 { return -1,"LibraryError" }
+    warning = warning || merge_warning == 1
+    if added == 1 { Preview(lib,id,extension,kind,options.files) }
+    if !MotionScan(options,lib,id,false) { warning = true }
+    return ifx warning then 5 else ifx added == 1 then 1 else 2,""
+}
+
+Fatal :: (result: *ImportResult, message: string) -> bool {
+    VecClear(result.error)
+    unused BuilderAppend(result.error,message)
+    result.complete = false
+    return false
+}
+ExpandedInto :: (output: *Vec(u8), path: string) -> bool {
+    if path.count == 0 || path.count >= 4096 { return false }
+    for byte: path { if byte == 0 { return false } }
+    if path == "~" || path.count > 1 && path[0:2] == "~/" {
+        home := Environment.EnvironmentText("HOME")
+        if home == "" || !BuilderAppend(<<output,home) { return false }
+        return path.count == 1 || BuilderAppend(<<output,path[1:])
+    }
+    return BuilderAppend(<<output,path)
+}
+ResolveInto :: (output: *Vec(u8), path: string, parent_only: bool = false) -> bool {
+    expanded: Vec(u8)
+    if !ExpandedInto(*expanded,path) { return false }
+    view := TextView(VecSlice(expanded,0,expanded.count))
+    resolved := Tree.ResolvePath(ifx parent_only then Tree.PathParent(view) else view)
+    if resolved == "" { return false }
+    defer { DropOwnedText(resolved) }
+    if parent_only { return JoinInto(output,resolved,Tree.PathName(view)) }
+    return BuilderAppend(<<output,resolved)
+}
+CountResult :: (result: *ImportResult, outcome: s32, path: string, classification: string) -> bool {
+    if outcome == -2 { return Fatal(result,"Could not allocate the import result") }
+    if outcome < 0 {
+        result.counters.errors += 1
+        if !AddImportFailure(result,path,classification) { return Fatal(result,"Could not allocate the import failures") }
+    } else if outcome == 1 { result.counters.added += 1 }
+    else if outcome == 2 { result.counters.merged += 1 }
+    else if outcome == 3 { result.counters.unchanged += 1 }
+    else if outcome == 4 { result.counters.skipped += 1 }
+    else if outcome == 5 { result.counters.warning += 1 }
+    else { return Fatal(result,"Import returned an invalid result") }
+    return true
+}
+Persist :: (lib: *Store.Library, result: *ImportResult) -> bool {
+    reply: Vec(u8); counters: Vec(u8); failures: Vec(u8)
+    if !ImportResultInto(*reply,result) { return false }
+    document: JSON.JsonDocument
+    defer { JSON.JsonReset(*document) }
+    if !JSON.JsonRead(*document,TextView(VecSlice(reply,0,reply.count))) { return false }
+    list := JSON.JsonMember(*document,document.root,"failures")
+    if !JSON.JsonWriteInto(*failures,*document,list,JSON.JsonCompactStyle(false,true)) { return false }
+    unused JSON.JsonRemove(*document,document.root,"failures")
+    unused JSON.JsonRemove(*document,document.root,"complete")
+    unused JSON.JsonRemove(*document,document.root,"error")
+    if !JSON.JsonWriteInto(*counters,*document,document.root,JSON.JsonCompactStyle(false,true)) { return false }
+    if !SQL.SqliteGetAutocommit(lib.db) || SQL.SqliteExecText(lib.db,"BEGIN IMMEDIATE") != SQL.SQLITE_OK { return false }
+    committed := false
+    defer { if !committed { unused SQL.SqliteExecText(lib.db,"ROLLBACK") } }
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,"INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",-1,*statement,null) != SQL.SQLITE_OK { return false }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if !Bind(statement,1,"import") || !Bind(statement,2,TextView(VecSlice(counters,0,counters.count))) || SQL.SqliteStep(statement) != SQL.SQLITE_DONE {
+        return false
+    }
+    unused SQL.SqliteReset(statement); unused SQL.SqliteClearBindings(statement)
+    if !Bind(statement,1,"import_failures") || !Bind(statement,2,TextView(VecSlice(failures,0,failures.count))) || SQL.SqliteStep(statement) != SQL.SQLITE_DONE {
+        return false
+    }
+    if SQL.SqliteExecText(lib.db,"COMMIT") != SQL.SQLITE_OK { return false }
+    committed = true
+    return true
+}
+OptionalText :: (source: *JSON.JsonDocument, object: s32, name: string, output: *Vec(u8)) -> s32 {
+    node := JSON.JsonMember(source,object,name)
+    if node < 0 { return 1 }
+    if JSON.JsonKindOf(source,node) != JSON.JsonKind.String { return -1 }
+    return ifx JSON.JsonStringInto(source,node,output) then 1 else -2
+}
+State :: (document: *JSON.JsonDocument, object: s32, name: string) -> s32 {
+    node := JSON.JsonMember(document,object,name)
+    kind := JSON.JsonKindOf(document,node)
+    if kind == JSON.JsonKind.Missing || kind == JSON.JsonKind.False { return 0 }
+    if kind == JSON.JsonKind.True { return 1 }
+    value, valid := JSON.JsonInteger(document,node)
+    return ifx valid && (value == 0 || value == 1) then cast(s32)value else -1
+}
+// 0 no definition, 1 imported, -1 invalid/warning, -2 allocation failure.
+Directory :: (lib: *Store.Library, path: string, aliases: *JSON.JsonDocument, reader: *Reader, options: *ImportOptions) -> s32 {
+    name: Vec(u8); response: Vec(u8)
+    if !JoinInto(*name,path,".photos-album.json") { return -2 }
+    document: JSON.JsonDocument; request: JSON.JsonDocument; merged: JSON.JsonDocument
+    defer { JSON.JsonReset(*document); JSON.JsonReset(*request); JSON.JsonReset(*merged) }
+    if !ReadMetadata(reader,*response,*document,"album",TextView(VecSlice(name,0,name.count))) {
+        return ifx reader.allocation_failed then -2 else -1
+    }
+    stamp := JSON.JsonMember(*document,document.root,"stamp")
+    info := JSON.JsonMember(*document,document.root,"metadata")
+    if JSON.JsonKindOf(*document,stamp) != JSON.JsonKind.String || JSON.JsonKindOf(*document,info) != JSON.JsonKind.Object { return -1 }
+    if JSON.JsonIs(*document,stamp,"") { return 0 }
+    album: Vec(u8); description: Vec(u8); cover: Vec(u8); filter: Vec(u8)
+    a := OptionalText(*document,info,"name",*album)
+    b := OptionalText(*document,info,"description",*description)
+    c := OptionalText(*document,info,"cover",*cover)
+    d := OptionalText(*document,info,"filter",*filter)
+    if a == -2 || b == -2 || c == -2 || d == -2 { return -2 }
+    if a < 0 || b < 0 || c < 0 || d < 0 { return -1 }
+    normalized := Store.AlbumName(TextView(VecSlice(album,0,album.count)))
+    cover_text := TextView(VecSlice(cover,0,cover.count))
+    pinned := State(*document,info,"pinned"); archived := State(*document,info,"archived")
+    if normalized == "" || description.count > 8192 || cover_text != "" && !Identity(cover_text) || pinned < 0 || archived < 0 { return -1 }
+    request.root = JSON.JsonNewObject(*request)
+    people := JSON.JsonMember(*document,info,"auto_people")
+    selected := ifx people < 0 then JSON.JsonNewArray(*request) else JSON.JsonCopy(*request,*document,people)
+    if selected < 0 || !SetText(*request,request.root,"operation","album") || !SetText(*request,request.root,"name",normalized) ||
+        !SetText(*request,request.root,"description",TextView(VecSlice(description,0,description.count))) ||
+        !SetText(*request,request.root,"cover",cover_text) || !SetText(*request,request.root,"filter",TextView(VecSlice(filter,0,filter.count))) ||
+        !JSON.JsonSet(*request,request.root,"auto_people",selected) ||
+        !JSON.JsonSet(*request,request.root,"pinned",JSON.JsonNewBool(*request,pinned == 1)) ||
+        !JSON.JsonSet(*request,request.root,"archived",JSON.JsonNewBool(*request,archived == 1)) { return -2 }
+    JSON.JsonReset(*document)
+    if !Merge(reader,lib,*request,LibraryFiles.HelperTimeout(options.merge_timeout_ms,40000),*response,*merged) {
+        return ifx reader.allocation_failed then -2 else -1
+    }
+    if !JSON.JsonSetCopy(aliases,aliases.root,path,JSON.JsonNewStringCopy(aliases,normalized)) { return -2 }
+    return 1
+}
+CleanEntryPath :: (path: string, root: string) -> bool {
+    if path.count == 0 || path.count >= 4096 || path[0] != 47 || !Within(path,root) { return false }
+    at: s64 = 1
+    while at <= path.count {
+        end := at
+        while end < path.count && path[end] != 47 { if path[end] == 0 { return false }; end += 1 }
+        part := path[at:end]
+        if part == "." || part == ".." { return false }
+        at = end+1
+    }
+    return true
+}
+Entry :: (lib: *Store.Library, line: string, root: string, aliases: *JSON.JsonDocument,
+    reader: *Reader, options: *ImportOptions, result: *ImportResult, complete: *bool) -> bool {
+    document: JSON.JsonDocument
+    defer { JSON.JsonReset(*document) }
+    if complete.* || !JSON.JsonRead(*document,line) || JSON.JsonKindOf(*document,document.root) != JSON.JsonKind.Object || JSON.JsonCount(*document,document.root) != 2 {
+        return Fatal(result,"Folder discovery returned an invalid entry")
+    }
+    kind := JSON.JsonMember(*document,document.root,"kind")
+    path: Vec(u8)
+    if !JSON.JsonStringInto(*document,JSON.JsonMember(*document,document.root,"path"),*path) { return Fatal(result,"Folder discovery returned an invalid path") }
+    text := TextView(VecSlice(path,0,path.count))
+    if JSON.JsonIs(*document,kind,"complete") {
+        if text != "" { return Fatal(result,"Folder discovery returned an invalid completion") }
+        complete.* = true
+        return true
+    }
+    if !CleanEntryPath(text,root) { return Fatal(result,"Folder discovery returned a path outside the source") }
+    if JSON.JsonIs(*document,kind,"directory") {
+        status := Directory(lib,text,aliases,reader,options)
+        if status == -2 { return Fatal(result,"Could not allocate the import metadata") }
+        if status == -1 { result.counters.warning += 1 }
+    } else if JSON.JsonIs(*document,kind,"error") {
+        if !CountResult(result,-1,text,"FolderDiscoveryError") { return false }
+    } else if JSON.JsonIs(*document,kind,"file") {
+        outcome, classification := ProcessFile(lib,text,root,aliases,reader,options)
+        if !CountResult(result,outcome,text,classification) { return false }
+    } else { return Fatal(result,"Folder discovery returned an invalid entry") }
+    total := result.counters.added+result.counters.merged+result.counters.unchanged+result.counters.skipped+result.counters.warning+result.counters.errors
+    if total > 0 && total % 100 == 0 && !Persist(lib,result) { return Fatal(result,"Could not save the import progress") }
+    return true
+}
+Walk :: (lib: *Store.Library, root: string, aliases: *JSON.JsonDocument, reader: *Reader,
+    options: *ImportOptions, result: *ImportResult) -> bool {
+    helper: Vec(u8)
+    if !LibraryFiles.HelperProgramInto(*helper,reader.options,"import_folders","import-folders") { return Fatal(result,"Build or install Photos folder discovery before importing photos") }
+    arguments: [17]string = .["env","-u","DISPLAY","-u","WAYLAND_DISPLAY","-u","XAUTHORITY","-u","DBUS_SESSION_BUS_ADDRESS",
+        "-u","SESSION_MANAGER","OMP_NUM_THREADS=2","prlimit","--as=268435456","--",TextView(VecSlice(helper,0,helper.count)),root]
+    child := Channel.StartChannel(arguments[:],false,true)
+    if child.pid <= 0 { return Fatal(result,"Folder discovery could not start; rescan the source") }
+    defer { unused Channel.CloseChannel(*child,0) }
+    if !Channel.CloseChannelInput(child) { return Fatal(result,"Folder discovery could not finish; rescan the source") }
+    timeout := LibraryFiles.HelperTimeout(options.discovery_timeout_ms,5000)
+    line: Vec(u8); chunk: [4096]u8; complete: bool
+    while true {
+        count := Channel.ChannelReceive(child,chunk[:],timeout)
+        if count < 0 { return Fatal(result,"Folder discovery could not finish; rescan the source") }
+        if count == 0 { break }
+        for at: 0..count-1 {
+            if line.count >= 65536 { return Fatal(result,"Folder discovery returned an oversized entry") }
+            if !VecPush(line,chunk[at]) { return Fatal(result,"Could not allocate folder discovery entries") }
+            if chunk[at] == 10 {
+                if !Entry(lib,TextView(VecSlice(line,0,line.count)),root,aliases,reader,options,result,*complete) { return false }
+                VecClear(line)
+            }
+        }
+    }
+    if line.count != 0 || !complete || !Channel.WaitChannel(*child,5000) || child.code != 0 {
+        return Fatal(result,"Folder discovery could not finish; rescan the source")
+    }
+    return true
+}
+Ready :: (lib: *Store.Library, result: *ImportResult) -> bool {
+    if result == null { return false }
+    ClearImportResult(result)
+    if lib == null || lib.db == null { return Fatal(result,"Photo library is not open") }
+    if !SQL.SqliteGetAutocommit(lib.db) { return Fatal(result,"Finish the current library operation before importing metadata") }
+    Store.ClearError(lib)
+    return true
+}
+
+#scope_export
+// A synchronous result owns all returned diagnostics until ClearImportResult.
+// True means processing finished: inspect errors/warning counters for outcomes.
+// False leaves complete=false for a global/allocation/incomplete-batch failure.
+// Sources remain read-only; callers may supply actual provider hooks/context.
+ImportFile :: (lib: *Store.Library, path: string, source_root: string, result: *ImportResult, options: ImportOptions = .{}) -> bool {
+    if !Ready(lib,result) { return false }
+    root: Vec(u8); source: Vec(u8)
+    if !ResolveInto(*root,source_root) || !ResolveInto(*source,path,true) { return Fatal(result,"Choose an existing source folder outside the Photos library") }
+    root_text := TextView(VecSlice(root,0,root.count)); source_text := TextView(VecSlice(source,0,source.count))
+    if !Tree.IsDirectory(root_text) || Within(root_text,lib.root) || Within(lib.root,root_text) || !Within(source_text,root_text) {
+        return Fatal(result,"Choose an existing source folder outside the Photos library")
+    }
+    reader: Reader
+    defer { CloseReader(*reader) }
+    if !StartReader(*reader,options.files) { return Fatal(result,"Metadata reading could not start; retry the import") }
+    aliases: JSON.JsonDocument
+    defer { JSON.JsonReset(*aliases) }
+    aliases.root = JSON.JsonNewObject(*aliases)
+    if aliases.root < 0 { return Fatal(result,"Could not allocate import album aliases") }
+    outcome, classification := ProcessFile(lib,source_text,root_text,*aliases,*reader,*options)
+    if !CountResult(result,outcome,source_text,classification) { return false }
+    result.complete = true
+    Store.ClearError(lib)
+    return true
+}
+
+ImportFolders :: (lib: *Store.Library, folders: []string, result: *ImportResult, options: ImportOptions = .{}) -> bool {
+    if !Ready(lib,result) { return false }
+    reader: Reader
+    defer { CloseReader(*reader) }
+    if !StartReader(*reader,options.files) { return Fatal(result,"Metadata reading could not start; retry the import") }
+    aliases: JSON.JsonDocument
+    defer { JSON.JsonReset(*aliases) }
+    aliases.root = JSON.JsonNewObject(*aliases)
+    if aliases.root < 0 { return Fatal(result,"Could not allocate import album aliases") }
+    for folder: folders {
+        root: Vec(u8)
+        if !ResolveInto(*root,folder) { return Fatal(result,"Choose an existing source folder outside the Photos library") }
+        text := TextView(VecSlice(root,0,root.count))
+        if !Tree.IsDirectory(text) || Within(text,lib.root) || Within(lib.root,text) { return Fatal(result,"Choose an existing source folder outside the Photos library") }
+        if !Walk(lib,text,*aliases,*reader,*options,result) { return false }
+    }
+    if !Persist(lib,result) { return Fatal(result,"Could not save the import progress") }
+    if options.finish != null {
+        if !options.finish(options.finish_context,lib) { return Fatal(result,"Live Photo pairing could not finish; retry pairing") }
+    } else {
+        motion_options: Motion.Options = .{files=options.files}
+        paired, error := Motion.LiveDetect(lib,motion_options)
+        unused paired
+        if error != "" { return Fatal(result,error) }
+    }
+    result.complete = true
+    Store.ClearError(lib)
+    return true
+}

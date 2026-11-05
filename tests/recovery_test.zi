@@ -1,0 +1,286 @@
+Recovery :: #import "recovery";
+Store :: #import "library_store";
+Types :: #import "service_types";
+LibraryFiles :: #import "library_files";
+Vault :: #import "vault";
+App :: #import "app_lock";
+Access :: #import "access_registry";
+Wire :: #import "sync_crypto";
+Auth :: #import "vault_auth";
+Native :: #import "daochi_client/crypto_native";
+Kit :: #import "kit";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+SQL :: #import "sqlite/SQLite";
+JSON :: #import "std/json_document";
+Clock :: #import "std/timer_linux";
+Threads :: #import "std/thread_linux";
+#import "std/byte_text_linux"
+#import "std/c_string"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+c :: #system_library "c";
+Link :: (source: *u8, destination: *u8) -> s32 #foreign c "symlink";
+Fifo :: (path: *u8, mode: u32) -> s32 #foreign c "mkfifo";
+PIN :: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+PASSWORD :: "private recovery fixture password";
+Bytes :: (text: string) -> []u8 { descriptor := cast(*TextDescriptor)*text; return BytesFromPointer(descriptor.data,cast(u64)text.count) }
+Same :: (left: *Vec(u8), right: *Vec(u8)) -> bool {
+    if left.count != right.count { return false }
+    for i: 0..left.count-1 { if (<<left)[i] != (<<right)[i] { return false } }
+    return true
+}
+Fail :: (number: s32, error: string = "") -> s32 { print("Recovery fixture step %: %\n",number,error); return number }
+Path :: (lib: *Store.Library, part: string) -> string { return Tree.JoinPath(lib.root,part) }
+Route :: (lib: *Store.Library, config: *Types.Config, registry: *Access.Registry,
+    kind: string, source: string, password: string, replacement: string, result: *JSON.JsonDocument) -> bool {
+    values: Vec(u8); BuilderPrint(*values,"[%,%,%]",JSON.JsonQuote(source),JSON.JsonQuote(password),JSON.JsonQuote(replacement))
+    request: Vec(u8); BuilderPrint(*request,"{\"action\":%,\"value\":%}",JSON.JsonQuote(kind),JSON.JsonQuote(BuilderFinish(values)))
+    response,handled := Recovery.RecoveryRoute(lib,BuilderFinish(request),config,registry)
+    return handled && JSON.JsonRead(result,response)
+}
+Number :: (document: *JSON.JsonDocument, key: string) -> s64 {
+    value,ok := JSON.JsonInteger(document,JSON.JsonMember(document,document.root,key)); return ifx ok then value else -1
+}
+Text :: (document: *JSON.JsonDocument, key: string) -> string { return JSON.JsonString(document,JSON.JsonMember(document,document.root,key)) }
+Race :: struct { path: string; delay: s64; value: string; changed: bool; exclusive: bool; await_lock: string; config: *Types.Config }
+ChangeDuringKdf :: (raw: *void) {
+    race := cast(*Race)raw
+    if race.await_lock.count > 0 {
+        deadline := Clock.MonotonicMilliseconds()+5000
+        observed: bool
+        while Clock.MonotonicMilliseconds() < deadline {
+            fd := Vault.LockCredential(race.await_lock,false)
+            if fd < 0 { observed = true; break }
+            Vault.UnlockCredential(fd); unused Clock.SleepMilliseconds(1)
+        }
+        if !observed { return }
+    }
+    unused Clock.SleepMilliseconds(race.delay)
+    if race.config != null { race.config.node.id = race.value; race.changed = true; return }
+    if race.exclusive {
+        file := Files.OpenExclusivePrivate(race.path)
+        if !file.valid { return }
+        race.changed = Files.WriteAt(file,Bytes(race.value),0) == race.value.count
+        unused Files.CloseFile(file)
+    } else { race.changed = LibraryFiles.Atomic(race.path,Bytes(race.value)) }
+}
+
+main :: (argc: s32, argv: **u8) -> s32 {
+    root := Kit.TempDirectory("recovery")
+    if root.count == 0 { return 1 }
+    defer { unused Kit.Cleanup(root) }
+    path := Kit.Library(Tree.JoinPath(root,"source"))
+    lib,error := Store.Open(path)
+    if lib == null { return Fail(2,error) }
+    defer { Store.Close(lib) }
+    config: Types.Config; config.root = lib.root; config.node.id = PIN; config.node.origin = "http://127.0.0.1:18080"
+    registry: Access.Registry
+    if !Access.Initialize(*registry) { return 3 }
+    defer { Access.Close(*registry) }
+    fixture: Vec(u8); read: Vec(u8); before: Vec(u8); after: Vec(u8); plain: Vec(u8)
+    defer { Wire.ClearOutput(*fixture); Wire.ClearOutput(*read); Wire.ClearOutput(*before); Wire.ClearOutput(*after); Wire.ClearOutput(*plain) }
+    legacy := Tree.JoinPath(Tree.WorkingDirectory(),"tests/fixtures/golden/recovery-legacy.photos-recovery")
+    identity_fixture := "tests/fixtures/golden/recovery-legacy-identity.json"
+    if !Recovery.ReadFile(identity_fixture,65536,*fixture) || !LibraryFiles.Atomic(Path(lib,"private/identity.json"),Wire.OutputBytes(*fixture)) { return 4 }
+    if !LibraryFiles.Atomic(Path(lib,"private/device.json"),Bytes("source device retained")) ||
+        !Store.SetSetting(lib,"recovery_fixture_setting","\"owner setting retained\"") { return 5 }
+    source_marker := Path(lib,"private/identity.json"); device := Path(lib,"private/device.json")
+    if !Recovery.ReadFile(source_marker,65536,*before) { return 6 }
+    error = Recovery.Read(lib,*config,legacy,Bytes(PASSWORD),*read)
+    if error.count > 0 || !Same(*fixture,*read) { return Fail(7,error) }
+    wrong_account := Tree.JoinPath(Tree.WorkingDirectory(),"tests/fixtures/golden/recovery-wrong-account.photos-recovery")
+    wrong_private := Tree.JoinPath(Tree.WorkingDirectory(),"tests/fixtures/golden/recovery-wrong-private.photos-recovery")
+    if Recovery.Read(lib,*config,wrong_account,Bytes(PASSWORD),*read) != "Recovery identity or ThinkPad pin is invalid; existing keys were preserved" || read.count != 0 { return 64 }
+    if Recovery.Read(lib,*config,wrong_private,Bytes(PASSWORD),*read) != "Invalid backup identity; existing keys were preserved" || read.count != 0 { return 65 }
+    if Recovery.PasswordError(Bytes("éééééé")).count == 0 || Recovery.PasswordError(Bytes("日本語の回復秘密の文章です")).count > 0 { return 8 }
+    if Recovery.Read(lib,*config,legacy,Bytes("wrong recovery password"),*read) != "Incorrect recovery password or altered recovery file" || read.count != 0 { return 9 }
+    config.node.id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    if Recovery.Read(lib,*config,legacy,Bytes(PASSWORD),*read) != "Recovery identity or ThinkPad pin is invalid; existing keys were preserved" { return 10 }
+    config.node.id = PIN
+    pin_race: Race; pin_thread: Threads.Thread; pin_procedure: Threads.ThreadProcedure = ChangeDuringKdf
+    pin_race.config = *config; pin_race.delay = 20
+    pin_race.value = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    if !Threads.ThreadStart(*pin_thread,pin_procedure,cast(*void)*pin_race) { return 66 }
+    error = Recovery.Read(lib,*config,legacy,Bytes(PASSWORD),*read)
+    Threads.ThreadWait(*pin_thread); config.node.id = PIN
+    if !pin_race.changed || error != "Recovery identity or ThinkPad pin is invalid; existing keys were preserved" || read.count != 0 { return Fail(67,error) }
+    target := Tree.JoinPath(Tree.ResolvePath(root),"native.photos-recovery")
+    saved,save_error := Recovery.Save(lib,*config,target,Bytes(PASSWORD),"","",*registry)
+    if save_error.count > 0 || saved != target || (Tree.PathStatus(target).mode & 511) != 384 { return Fail(11,save_error) }
+    error = Recovery.Read(lib,*config,target,Bytes(PASSWORD),*read)
+    if error.count > 0 || !Same(*fixture,*read) { return Fail(12,error) }
+    duplicate,duplicate_error := Recovery.Save(lib,*config,target,Bytes(PASSWORD),"","",*registry)
+    if duplicate_error != "Choose a new recovery file in an existing folder" { return 13 }
+    // A real competing writer creates the destination while native Argon runs.
+    race: Race; thread: Threads.Thread; procedure: Threads.ThreadProcedure = ChangeDuringKdf
+    race.path = Tree.JoinPath(Tree.ResolvePath(root),"raced.photos-recovery"); race.delay = 20
+    race.value = "concurrent owner file"; race.exclusive = true
+    if !Threads.ThreadStart(*thread,procedure,cast(*void)*race) { return 58 }
+    raced,raced_error := Recovery.Save(lib,*config,race.path,Bytes(PASSWORD),"","",*registry)
+    Threads.ThreadWait(*thread)
+    raced_text,raced_ok := Files.ReadEntireFile(race.path)
+    if !race.changed || raced_error.count == 0 || !raced_ok || raced_text != race.value { return Fail(59,raced_error) }
+    malformed: Vec(u8); defer { Wire.ClearOutput(*malformed) }
+    if !Recovery.ReadFile(target,65608,*malformed) { return 14 }
+    malformed[malformed.count-1] ^= 1
+    altered := Tree.JoinPath(Tree.ResolvePath(root),"altered.photos-recovery")
+    if !LibraryFiles.Atomic(altered,Wire.OutputBytes(*malformed)) ||
+        Recovery.Read(lib,*config,altered,Bytes(PASSWORD),*read) != "Incorrect recovery password or altered recovery file" || read.count != 0 { return 15 }
+    // Exact Python-made whole-file recovery into a genuinely empty native store.
+    empty_path := Kit.Library(Tree.JoinPath(root,"empty"))
+    empty,empty_error := Store.Open(empty_path)
+    if empty == null { return 16 }
+    defer { Store.Close(empty) }
+    empty_config: Types.Config; empty_config.root = empty.root; empty_config.node.id = PIN
+    worker := Vault.LockCredential(Path(empty,".worker.lock"),false)
+    if worker < 0 { return 17 }
+    error = Recovery.Restore(empty,*empty_config,legacy,Bytes(PASSWORD),"","",*registry)
+    Vault.UnlockCredential(worker)
+    if error != "Stop background backup before restoring keys into an empty library" || Files.PathExists(Path(empty,"private/identity.json")) { return Fail(18,error) }
+    error = Recovery.Restore(empty,*empty_config,legacy,Bytes(PASSWORD),"","",*registry)
+    if error.count > 0 || !Recovery.ReadFile(Path(empty,"private/identity.json"),65536,*read) || !Same(*fixture,*read) ||
+        Files.PathExists(Path(empty,"private/device.json")) { return Fail(19,error) }
+    if Recovery.Restore(empty,*empty_config,legacy,Bytes(PASSWORD),"","",*registry) != "Restore into a new empty library; existing photos and keys were preserved" { return 20 }
+    // Content-only identities retain only the content key and create no device.
+    content_path := Kit.Library(Tree.JoinPath(root,"content"))
+    content,content_error := Store.Open(content_path)
+    if content == null { return 21 }
+    defer { Store.Close(content) }
+    content_config: Types.Config; content_config.node.id = PIN
+    content_file := Tree.JoinPath(Tree.WorkingDirectory(),"tests/fixtures/golden/recovery-content.photos-recovery")
+    if Recovery.Restore(content,*content_config,content_file,Bytes(PASSWORD),"","",*registry).count > 0 ||
+        !Recovery.ReadFile("tests/fixtures/golden/recovery-content-identity.json",65536,*plain) ||
+        !Recovery.ReadFile(Path(content,"private/identity.json"),65536,*read) || !Same(*plain,*read) { return 22 }
+    if Recovery.Reset(content,*content_config,content_file,Bytes(PASSWORD),Bytes("replacement local password"),"app",*registry) != "The selected local lock is not configured" { return 68 }
+    if Recovery.Reset(content,*content_config,content_file,Bytes(PASSWORD),Bytes("replacement Hidden password"),"hidden",*registry) != "The selected local lock is not configured" { return 69 }
+    // Existing progress/device state is never considered an empty setup.
+    guarded_path := Kit.Library(Tree.JoinPath(root,"guarded"))
+    guarded,guarded_error := Store.Open(guarded_path)
+    if guarded == null { return 23 }
+    defer { Store.Close(guarded) }
+    guarded_config: Types.Config; guarded_config.node.id = PIN
+    if !Store.SetSetting(guarded,"record_cursor","\"owner cursor\"") { return 24 }
+    error = Recovery.Restore(guarded,*guarded_config,legacy,Bytes(PASSWORD),"","",*registry)
+    if error != "Restore into a new empty library; existing photos and keys were preserved" || Files.PathExists(Path(guarded,"private/identity.json")) { return 25 }
+    // Hidden expiry during real derivation prevents publishing the recovery file.
+    Access.Close(*registry)
+    if !Access.Initialize(*registry,30,60000) { return 26 }
+    hidden,hidden_error := Vault.VaultAuthenticate(lib,Bytes("old Hidden fixture password"),true,*registry)
+    expiring := Tree.JoinPath(Tree.ResolvePath(root),"expired.photos-recovery")
+    missed,missed_error := Recovery.Save(lib,*config,expiring,Bytes(PASSWORD),"",hidden,*registry)
+    if hidden_error.count > 0 || missed_error != "Unlock Hidden before saving recovery keys" || Files.PathExists(expiring) { return Fail(27,missed_error) }
+    Access.Close(*registry)
+    if !Access.Initialize(*registry) { return 28 }
+    hidden,hidden_error = Vault.VaultAuthenticate(lib,Bytes("old Hidden fixture password"),false,*registry)
+    if hidden_error.count > 0 { return 29 }
+    app_response,app_handled := App.AppLockRoute(lib,"{\"action\":\"app_lock_password\",\"value\":\"old local fixture password\"}",*registry)
+    if !app_handled { return 30 }
+    unlock,unlock_handled := App.AppLockRoute(lib,"{\"action\":\"app_lock_unlock\",\"value\":\"old local fixture password\"}",*registry)
+    document: JSON.JsonDocument
+    if !unlock_handled || !JSON.JsonRead(*document,unlock) { return 31 }
+    app := Text(*document,"app_lock_token")
+    hidden,hidden_error = Vault.VaultAuthenticate(lib,Bytes("old Hidden fixture password"),false,*registry)
+    if hidden_error.count > 0 || !Recovery.ReadFile(Vault.Path(lib),1024,*plain) { return 32 }
+    result: JSON.JsonDocument
+    if !Route(lib,*config,*registry,"recovery_reset_app",legacy,PASSWORD,"new local fixture password",*result) ||
+        Number(*result,"recovery_reset") != 1 || Number(*result,"app_locked") != 1 ||
+        JSON.JsonCount(*result,JSON.JsonMember(*result,result.root,"photos")) != 0 || JSON.JsonMember(*result,result.root,"app_lock_token") >= 0 ||
+        App.Unlocked(lib,app,false,*registry) || Vault.Unlocked(lib,hidden,*registry) { return Fail(33,Text(*result,"error")) }
+    if !Recovery.ReadFile(Vault.Path(lib),1024,*read) || !Same(*plain,*read) || App.Authenticate(lib,Bytes("new local fixture password"),*registry).count > 0 { return 34 }
+    if !Recovery.ReadFile(App.Path(lib),1024,*plain) { return 35 }
+    if !Route(lib,*config,*registry,"recovery_reset_hidden",legacy,PASSWORD,"new Hidden fixture password",*result) ||
+        Number(*result,"recovery_reset") != 1 || !Recovery.ReadFile(App.Path(lib),1024,*read) || !Same(*plain,*read) { return Fail(36,Text(*result,"error")) }
+    hidden,hidden_error = Vault.VaultAuthenticate(lib,Bytes("new Hidden fixture password"),false,*registry)
+    if hidden_error.count > 0 || !Vault.Unlocked(lib,hidden,*registry) { return 37 }
+    if !Recovery.ReadFile(App.Path(lib),1024,*plain) { return 60 }
+    // Observe the actual credential flock before changing its file, so the
+    // snapshot exists before the competing write during the real new hash.
+    credential_race: Race
+    credential_race.path = App.Path(lib); credential_race.await_lock = Path(lib,"private/.app-lock.lock")
+    credential_race.delay = 0; credential_race.value = "concurrent owner credential"
+    if !Threads.ThreadStart(*thread,procedure,cast(*void)*credential_race) { return 61 }
+    error = Recovery.Reset(lib,*config,legacy,Bytes(PASSWORD),Bytes("replacement local password"),"app",*registry)
+    Threads.ThreadWait(*thread)
+    changed_credential,changed_ok := Files.ReadEntireFile(App.Path(lib))
+    if !credential_race.changed || (error != "Credentials or backup identity changed; try recovery again" && error != "App lock is not enabled") ||
+        !changed_ok || changed_credential != credential_race.value { return Fail(62,error) }
+    if !LibraryFiles.Atomic(App.Path(lib),Wire.OutputBytes(*plain)) { return 63 }
+    unused Access.ClearAttempts(lib.root,Access.APP,*registry)
+    // Wrong proofs share the actual app attempt window. Short replacement rules
+    // are checked before any proof or target write.
+    if !Recovery.ReadFile(App.Path(lib),1024,*plain) { return 38 }
+    for i: 0..4 {
+        error = Recovery.Reset(lib,*config,legacy,Bytes("wrong recovery password"),Bytes("replacement local password"),"app",*registry)
+        if error != "Incorrect recovery password or altered recovery file" { return Fail(39,error) }
+    }
+    error = Recovery.Reset(lib,*config,legacy,Bytes(PASSWORD),Bytes("replacement local password"),"app",*registry)
+    if error != "Too many attempts; wait one minute before trying again" { return 40 }
+    unused Access.ClearAttempts(lib.root,Access.APP,*registry)
+    if Recovery.Reset(lib,*config,legacy,Bytes(PASSWORD),Bytes("1234"),"app",*registry) != "Use at least 8 characters and a password under 1024 bytes" { return 41 }
+    if !Recovery.ReadFile(App.Path(lib),1024,*read) || !Same(*plain,*read) { return 42 }
+    // Different content bytes invalidate proof even when the account is equal.
+    if !Recovery.ReadFile("tests/fixtures/golden/recovery-content-identity.json",65536,*read) ||
+        !LibraryFiles.Atomic(source_marker,Wire.OutputBytes(*read)) { return 43 }
+    error = Recovery.Reset(lib,*config,legacy,Bytes(PASSWORD),Bytes("replacement local password"),"app",*registry)
+    if error != "Recovery file belongs to different backup keys; existing keys were preserved" { return Fail(44,error) }
+    unused Access.ClearAttempts(lib.root,Access.APP,*registry)
+    if !LibraryFiles.Atomic(source_marker,Wire.OutputBytes(*before)) { return 45 }
+    // Linked credential/lock paths and nonregular recovery inputs fail closed.
+    external := Tree.JoinPath(Tree.ResolvePath(root),"external-credential")
+    if !LibraryFiles.Atomic(external,Wire.OutputBytes(*plain)) { return 46 }
+    unused Files.RemoveFile(App.Path(lib))
+    source_name: [4096]u8; target_name: [4096]u8
+    if !CopyCString(external,source_name[:]) || !CopyCString(App.Path(lib),target_name[:]) || Link(*source_name[0],*target_name[0]) != 0 { return 47 }
+    error = Recovery.Reset(lib,*config,legacy,Bytes(PASSWORD),Bytes("replacement local password"),"app",*registry)
+    if error != "Local password settings cannot be replaced safely" { return Fail(48,error) }
+    unused Files.RemoveFile(App.Path(lib)); if !LibraryFiles.Atomic(App.Path(lib),Wire.OutputBytes(*plain)) { return 49 }
+    lock_path := Path(lib,"private/.app-lock.lock")
+    unused Files.RemoveFile(lock_path)
+    if !CopyCString(lock_path,target_name[:]) || Link(*source_name[0],*target_name[0]) != 0 { return 50 }
+    error = Recovery.Reset(lib,*config,legacy,Bytes(PASSWORD),Bytes("replacement local password"),"app",*registry)
+    if error != "Local password settings cannot be replaced safely" { return 51 }
+    unused Files.RemoveFile(lock_path); unused Access.ClearAttempts(lib.root,Access.APP,*registry)
+    fifo := Tree.JoinPath(Tree.ResolvePath(root),"fifo")
+    if !CopyCString(fifo,target_name[:]) || Fifo(*target_name[0],384) != 0 ||
+        Recovery.Read(lib,*config,fifo,Bytes(PASSWORD),*read) != "Choose a valid Photos recovery file" { return 52 }
+    // A current Guest marker blocks recovery without a token or file change.
+    if !LibraryFiles.Atomic(Path(lib,"private/guest-view.json"),Bytes("{\"kind\":\"invalid\"}")) ||
+        Recovery.Reset(lib,*config,legacy,Bytes(PASSWORD),Bytes("replacement local password"),"app",*registry) != "Leave Guest view before recovering local credentials" { return 53 }
+    unused Files.RemoveFile(Path(lib,"private/guest-view.json"))
+    // The baseline shared-Hidden method retains its method/delay/settings when
+    // only Hidden is reset, and every old APP/HIDDEN lease ends.
+    shared := "{\"version\":3,\"enabled\":true,\"method\":\"hidden\",\"verifier\":\"\",\"auto_lock\":300}"
+    if !LibraryFiles.Atomic(App.Path(lib),Bytes(shared)) { return 70 }
+    shared_token,shared_error := App.Grant(lib,*registry)
+    hidden,hidden_error = Vault.VaultAuthenticate(lib,Bytes("new Hidden fixture password"),false,*registry)
+    if shared_error.count > 0 || hidden_error.count > 0 { return 71 }
+    error = Recovery.Reset(lib,*config,legacy,Bytes(PASSWORD),Bytes("newest Hidden fixture password"),"hidden",*registry)
+    shared_after,shared_ok := Files.ReadEntireFile(App.Path(lib))
+    if error.count > 0 || !shared_ok || shared_after != shared || App.Unlocked(lib,shared_token,false,*registry) ||
+        Vault.Unlocked(lib,hidden,*registry) || App.Authenticate(lib,Bytes("newest Hidden fixture password"),*registry).count > 0 { return Fail(72,error) }
+    // App recovery deliberately switches only the local lock to its own
+    // password, preserving the existing delay and Hidden verifier.
+    if !Recovery.ReadFile(Vault.Path(lib),1024,*plain) { return 73 }
+    error = Recovery.Reset(lib,*config,legacy,Bytes(PASSWORD),Bytes("final local fixture password"),"app",*registry)
+    settings := App.Settings(lib)
+    defer { App.ClearConfig(*settings) }
+    if error.count > 0 || settings.method != "password" || settings.auto_lock != 300 ||
+        !Recovery.ReadFile(Vault.Path(lib),1024,*read) || !Same(*plain,*read) { return Fail(74,error) }
+    if !Recovery.ReadFile(source_marker,65536,*after) || !Same(*before,*after) { return 54 }
+    device_text,device_ok := Files.ReadEntireFile(device)
+    setting,setting_found := Store.LookupSetting(lib,"recovery_fixture_setting")
+    if !device_ok || device_text != "source device retained" || !setting_found || setting != "\"owner setting retained\"" { return 55 }
+    // Optional independent Python verification consumes only the encrypted file.
+    if argc == 3 && TextFromCString(argv[1]) == "--native-output" {
+        // Native saving still requires the real current app and Hidden leases.
+        app_token,app_error := App.Grant(lib,*registry)
+        vault_token,vault_error := Vault.VaultAuthenticate(lib,Bytes("newest Hidden fixture password"),false,*registry)
+        if app_error.count > 0 || vault_error.count > 0 { return 56 }
+        out,out_error := Recovery.Save(lib,*config,TextFromCString(argv[2]),Bytes(PASSWORD),app_token,vault_token,*registry)
+        if out_error.count > 0 { return Fail(57,out_error) }
+    }
+    print("Photos recovery: whole-file compatibility, empty restore/worker exclusion, expiry, both credential resets, proof/rate limits and preservation passed\n")
+    return 0
+}

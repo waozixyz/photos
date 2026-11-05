@@ -1,0 +1,183 @@
+// Civil YYYYMMDD headings shared by the standalone desktop and Android app.
+// Catalog values below match assets/locales/*.json and Breeze's shipped locales.
+Date :: #import "std/date_parse";
+#import "std/text"
+using Vectors :: #import "std/vec";
+
+CalendarLocale :: struct {
+    today: string
+    yesterday: string
+    template: string
+    months: [12]string
+}
+
+// Accept language tags and POSIX locale names, including regional variants.
+LocaleCode :: (locale: string) -> string {
+    if locale.count < 2 { return "en" }
+    if locale.count > 2 && locale[2] != #char "-" && locale[2] != #char "_" &&
+        locale[2] != #char "." && locale[2] != #char "@" { return "en" }
+    a := LowerASCII(locale[0]); b := LowerASCII(locale[1])
+    codes: [12]string = .["en", "es", "cs", "de", "fr", "id", "it", "pt", "ru", "ja", "ko", "zh"]
+    for code: codes { if code[0] == a && code[1] == b { return code } }
+    return "en"
+}
+
+LocaleData :: (locale: string) -> CalendarLocale {
+    code := LocaleCode(locale)
+    if code == "en" {
+        data: CalendarLocale
+        data.today = "Today"; data.yesterday = "Yesterday"; data.template = "{M} {d}, {y}"
+        months: [12]string = .["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+        data.months = months
+        return data
+    }
+    if code == "es" {
+        data: CalendarLocale
+        data.today = "Hoy"; data.yesterday = "Ayer"; data.template = "{d} de {M} de {y}"
+        months: [12]string = .["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+        data.months = months
+        return data
+    }
+    if code == "cs" {
+        data: CalendarLocale
+        data.today = "Dnes"; data.yesterday = "Včera"; data.template = "{d}. {m}. {y}"
+        months: [12]string = .["leden", "únor", "březen", "duben", "květen", "červen", "červenec", "srpen", "září", "říjen", "listopad", "prosinec"]
+        data.months = months
+        return data
+    }
+    if code == "de" {
+        data: CalendarLocale
+        data.today = "Heute"; data.yesterday = "Gestern"; data.template = "{d}. {M} {y}"
+        months: [12]string = .["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"]
+        data.months = months
+        return data
+    }
+    if code == "fr" {
+        data: CalendarLocale
+        data.today = "Aujourd’hui"; data.yesterday = "Hier"; data.template = "{d} {M} {y}"
+        months: [12]string = .["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"]
+        data.months = months
+        return data
+    }
+    if code == "id" {
+        data: CalendarLocale
+        data.today = "Hari ini"; data.yesterday = "Kemarin"; data.template = "{d} {M} {y}"
+        months: [12]string = .["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
+        data.months = months
+        return data
+    }
+    if code == "it" {
+        data: CalendarLocale
+        data.today = "Oggi"; data.yesterday = "Ieri"; data.template = "{d} {M} {y}"
+        months: [12]string = .["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"]
+        data.months = months
+        return data
+    }
+    if code == "pt" {
+        data: CalendarLocale
+        data.today = "Hoje"; data.yesterday = "Ontem"; data.template = "{d} de {M} de {y}"
+        months: [12]string = .["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+        data.months = months
+        return data
+    }
+    if code == "ru" {
+        data: CalendarLocale
+        data.today = "Сегодня"; data.yesterday = "Вчера"; data.template = "{dd}.{mm}.{y}"
+        months: [12]string = .["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"]
+        data.months = months
+        return data
+    }
+    if code == "ja" {
+        data: CalendarLocale
+        data.today = "今日"; data.yesterday = "昨日"; data.template = "{y}年{m}月{d}日"
+        months: [12]string = .["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"]
+        data.months = months
+        return data
+    }
+    if code == "ko" {
+        data: CalendarLocale
+        data.today = "오늘"; data.yesterday = "어제"; data.template = "{y}년 {m}월 {d}일"
+        months: [12]string = .["1월", "2월", "3월", "4월", "5월", "6월", "7월", "8월", "9월", "10월", "11월", "12월"]
+        data.months = months
+        return data
+    }
+    if code == "zh" {
+        data: CalendarLocale
+        data.today = "今天"; data.yesterday = "昨天"; data.template = "{y}年{m}月{d}日"
+        months: [12]string = .["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"]
+        data.months = months
+        return data
+    }
+    return .{}
+}
+
+ValidDay :: (day: s32) -> bool {
+    return Date.DateValid(day / 10000, (day / 100) % 100, day % 100)
+}
+
+// Strict ISO civil-day parsing; malformed and impossible dates are unknown (0).
+DayNumber :: (day: string) -> s32 {
+    if day.count != 10 || day[4] != #char "-" || day[7] != #char "-" { return 0 }
+    year := Date.DateNumber(day, 0, 4)
+    month := Date.DateNumber(day, 5, 2)
+    date := Date.DateNumber(day, 8, 2)
+    if !Date.DateValid(year, month, date) { return 0 }
+    return year * 10000 + month * 100 + date
+}
+
+DayBefore :: (day: s32) -> s32 {
+    if !ValidDay(day) || day == 10101 { return 0 }
+    year := day / 10000; month := (day / 100) % 100; date := day % 100
+    previous := Date.CivilFromUnix((Date.DaysFromCivil(year, month, date) - 1) * 86400)
+    return previous.year * 10000 + previous.month * 100 + previous.day
+}
+
+#scope_file
+Number :: (out: *Vec(u8), value: s32, width: s32) {
+    divisor: s32 = 1
+    for i: 1..width - 1 { divisor *= 10 }
+    while divisor > 1 && value < divisor { BuilderPrint(out, "0"); divisor /= 10 }
+    BuilderPrint(out, "%", value)
+}
+
+#scope_export
+// Returns an owned heading (release it after use), or "" for an unknown day.
+// An unknown today disables relative labels while preserving calendar dates.
+DayHeading :: (day: s32, today: s32, locale: string) -> string {
+    if !ValidDay(day) { return "" }
+    data := LocaleData(locale)
+    out: Vec(u8)
+    if ValidDay(today) && day == today { BuilderPrint(*out, "%", data.today) }
+    else if ValidDay(today) && day == DayBefore(today) { BuilderPrint(*out, "%", data.yesterday) }
+    else {
+        year := day / 10000; month := (day / 100) % 100; date := day % 100
+        at: s64
+        while at < data.template.count {
+            rest := data.template[at:]
+            if rest.count >= 4 && rest[:4] == "{dd}" { Number(*out, date, 2); at += 4 }
+            else if rest.count >= 4 && rest[:4] == "{mm}" { Number(*out, month, 2); at += 4 }
+            else if rest.count >= 3 && rest[:3] == "{d}" { Number(*out, date, 1); at += 3 }
+            else if rest.count >= 3 && rest[:3] == "{m}" { Number(*out, month, 1); at += 3 }
+            else if rest.count >= 3 && rest[:3] == "{M}" { BuilderPrint(*out, "%", data.months[month - 1]); at += 3 }
+            else if rest.count >= 3 && rest[:3] == "{y}" { Number(*out, year, 4); at += 3 }
+            else { unused VecPush(out, data.template[at]); at += 1 }
+        }
+    }
+    return BuilderFinish(out)
+}
+
+// Native BuilderFinish strings own their byte storage; portable strings are managed.
+#if #defined(POSIX_THREADS) || #defined(ANDROID_BUILD) {
+    #import "std/byte_text_linux"
+    #scope_file
+    libc :: #system_library "libc";
+    Free :: (value: *void) #foreign libc "free";
+    #scope_export
+    Release :: (value: string) {
+        if value.count == 0 { return }
+        descriptor := cast(*TextDescriptor)(*value)
+        Free(cast(*void)descriptor.data)
+    }
+} else {
+    Release :: (value: string) { unused value }
+}

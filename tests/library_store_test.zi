@@ -1,0 +1,278 @@
+Store :: #import "library_store";
+Types :: #import "service_types";
+Kit :: #import "kit";
+SQL :: #import "sqlite/SQLite";
+JSON :: #import "std/json_document";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+Float :: #import "std/float_text";
+Crypto :: #import "crypto/sha256";
+Process :: #import "std/process_run_linux";
+#import "std/byte_text_linux"
+#import "std/c_string"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+c :: #system_library "c";
+SymbolicLink :: (target: *u8, path: *u8) -> s32 #foreign c "symlink";
+TextColumn :: (statement: *void, column: s32) -> string {
+    data := SQL.SqliteColumnText(statement, column)
+    if data == null { return "" }
+    bytes := BytesFromPointer(data, cast(u64)SQL.SqliteColumnBytes(statement, column))
+    return TextFromBytes(bytes)
+}
+
+Scalar :: (db: *void, query: string) -> string {
+    statement: *void
+    if SQL.SqlitePrepareText(db, query, -1, *statement, null) != SQL.SQLITE_OK { return "" }
+    defer { unused SQL.SqliteFinalize(statement) }
+    if SQL.SqliteStep(statement) != SQL.SQLITE_ROW { return "" }
+    copy: Vec(u8)
+    BuilderPrint(*copy, "%", TextColumn(statement, 0))
+    return BuilderFinish(copy)
+}
+
+Identifier :: (name: string) -> bool {
+    if name.count == 0 { return false }
+    for byte: name {
+        if !((byte >= 97 && byte <= 122) || byte == 95) { return false }
+    }
+    return true
+}
+
+ValueMatches :: (dbrow: *void, column: s32, document: *JSON.JsonDocument, expected: s32) -> bool {
+    kind := SQL.SqliteColumnType(dbrow, column)
+    if kind == SQL.SQLITE_NULL { return JSON.JsonKindOf(document, expected) == JSON.JsonKind.Null }
+    if kind == SQL.SQLITE_INTEGER {
+        value, valid := JSON.JsonInteger(document, expected)
+        return valid && value == SQL.SqliteColumnInt64(dbrow, column)
+    }
+    if kind == SQL.SQLITE_FLOAT {
+        value, valid := Float.ParseFloat64(JSON.JsonNumberText(document, expected))
+        return valid && value == SQL.SqliteColumnDouble(dbrow, column)
+    }
+    if kind == SQL.SQLITE_TEXT {
+        return JSON.JsonKindOf(document, expected) == JSON.JsonKind.String &&
+            JSON.JsonString(document, expected) == TextColumn(dbrow, column)
+    }
+    if kind == SQL.SQLITE_BLOB {
+        hex := JSON.JsonString(document, JSON.JsonMember(document, expected, "blob_hex"))
+        count := SQL.SqliteColumnBytes(dbrow, column)
+        if count == 0 { return hex == "" }
+        encoded: Vec(u8)
+        VecResize(encoded, cast(s64)count * 2 + 1)
+        return Crypto.BytesToHex(SQL.SqliteColumnBlob(dbrow, column), count,
+            *encoded[0], encoded.count) != 0 && TextUntilNul(VecSlice(encoded, 0, encoded.count)) == hex
+    }
+    return false
+}
+
+RowMatches :: (dbrow: *void, document: *JSON.JsonDocument, expected: s32,
+    columns: s32, backfill: bool) -> bool {
+    child := JSON.JsonFirst(document, columns)
+    index: s32 = 0
+    while child >= 0 {
+        name := JSON.JsonString(document, child)
+        value := JSON.JsonMember(document, expected, name)
+        if backfill && (name == "created" || name == "updated") {
+            if SQL.SqliteColumnDouble(dbrow, index) <= 0.0 { return false }
+        } else if !ValueMatches(dbrow, index, document, value) { return false }
+        index += 1
+        child = JSON.JsonNext(document, child)
+    }
+    return true
+}
+
+SnapshotMatches :: (db: *void, document: *JSON.JsonDocument, state: string) -> bool {
+    tables := JSON.JsonMember(document, document.root, state)
+    table := JSON.JsonFirst(document, tables)
+    while table >= 0 {
+        name := JSON.JsonKey(document, table)
+        if !Identifier(name) { return false }
+        columns := JSON.JsonMember(document, table, "columns")
+        query: Vec(u8)
+        BuilderPrint(*query, "PRAGMA table_info(%)", name)
+        statement: *void
+        if SQL.SqlitePrepareText(db, BuilderFinish(query), -1, *statement, null) != SQL.SQLITE_OK { return false }
+        column := JSON.JsonFirst(document, columns)
+        while column >= 0 {
+            if SQL.SqliteStep(statement) != SQL.SQLITE_ROW ||
+                TextColumn(statement, 1) != JSON.JsonString(document, column) {
+                unused SQL.SqliteFinalize(statement)
+                return false
+            }
+            column = JSON.JsonNext(document, column)
+        }
+        endColumns := SQL.SqliteStep(statement) == SQL.SQLITE_DONE
+        unused SQL.SqliteFinalize(statement)
+        if !endColumns { return false }
+        rows := JSON.JsonMember(document, table, "rows")
+        select: Vec(u8)
+        BuilderPrint(*select, "SELECT * FROM %", name)
+        if SQL.SqlitePrepareText(db, BuilderFinish(select), -1, *statement, null) != SQL.SQLITE_OK { return false }
+        count: s32 = 0
+        while true {
+            code := SQL.SqliteStep(statement)
+            if code == SQL.SQLITE_DONE { break }
+            if code != SQL.SQLITE_ROW { unused SQL.SqliteFinalize(statement); return false }
+            count += 1
+            row := JSON.JsonFirst(document, rows)
+            found := false
+            while row >= 0 {
+                backfill := state == "legacy_migrated" && name == "albums" &&
+                    JSON.JsonString(document, JSON.JsonMember(document, row, "name")) == "Imported only"
+                if RowMatches(statement, document, row, columns, backfill) { found = true; break }
+                row = JSON.JsonNext(document, row)
+            }
+            if !found { unused SQL.SqliteFinalize(statement); return false }
+        }
+        unused SQL.SqliteFinalize(statement)
+        if count != JSON.JsonCount(document, rows) { return false }
+        table = JSON.JsonNext(document, table)
+    }
+    return true
+}
+
+Fixture :: (root: string, name: string) -> bool {
+    if !Files.CreatePrivateDirectory(root) { return false }
+    db: *void
+    if SQL.SqliteOpenText(Kit.Join(root, "library.sqlite"), *db,
+        SQL.SQLITE_OPEN_READWRITE | SQL.SQLITE_OPEN_CREATE) != SQL.SQLITE_OK { return false }
+    defer { unused SQL.SqliteClose(db) }
+    return Kit.LoadSql(db, Kit.Join("tests/fixtures/golden", name))
+}
+
+FixtureCase :: (root: string, document: *JSON.JsonDocument, legacy: bool) -> bool {
+    fixture := ifx legacy then "library-legacy.sql" else "library-v0.1.59.sql"
+    if !Fixture(root, fixture) { return false }
+    lib, error := Store.Open(root)
+    if lib == null || error != "" { print("store open: %\n", error); return false }
+    state := ifx legacy then "legacy_migrated" else "current"
+    matches := SnapshotMatches(lib.db, document, state)
+    schemaVersion := Scalar(lib.db, "PRAGMA schema_version")
+    timestamps := Scalar(lib.db, "SELECT group_concat(created||'/'||updated,';') FROM (SELECT created,updated FROM albums ORDER BY id)")
+    Store.Close(lib)
+    if !matches { return false }
+    again, nextError := Store.Open(root)
+    if again == null || nextError != "" { return false }
+    defer { Store.Close(again) }
+    return SnapshotMatches(again.db, document, state) &&
+        schemaVersion == Scalar(again.db, "PRAGMA schema_version") &&
+        timestamps == Scalar(again.db, "SELECT group_concat(created||'/'||updated,';') FROM (SELECT created,updated FROM albums ORDER BY id)")
+}
+
+RollbackCase :: (root: string, document: *JSON.JsonDocument) -> bool {
+    if !Fixture(root, "library-legacy.sql") { return false }
+    db: *void
+    path := Kit.Join(root, "library.sqlite")
+    if SQL.SqliteOpenText(path, *db, SQL.SQLITE_OPEN_READWRITE) != SQL.SQLITE_OK { return false }
+    code := SQL.SqliteExecText(db, "CREATE TRIGGER fail_fixture_album BEFORE INSERT ON albums BEGIN SELECT RAISE(ABORT,'fixture migration failure'); END")
+    unused SQL.SqliteClose(db)
+    if code != SQL.SQLITE_OK { return false }
+    rejected, error := Store.Open(root)
+    if rejected != null { Store.Close(rejected); return false }
+    if error != "fixture migration failure" { return false }
+    if SQL.SqliteOpenText(path, *db, SQL.SQLITE_OPEN_READWRITE) != SQL.SQLITE_OK { return false }
+    preserved := SnapshotMatches(db, document, "legacy")
+    code = SQL.SqliteExecText(db, "DROP TRIGGER fail_fixture_album")
+    unused SQL.SqliteClose(db)
+    if !preserved || code != SQL.SQLITE_OK { return false }
+    retried, retryError := Store.Open(root)
+    if retried == null || retryError != "" { return false }
+    defer { Store.Close(retried) }
+    return SnapshotMatches(retried.db, document, "legacy_migrated")
+}
+
+FreshCase :: (root: string) -> bool {
+    lib, error := Store.Open(root)
+    if lib == null || error != "" { return false }
+    defer { Store.Close(lib) }
+    if Scalar(lib.db, "PRAGMA journal_mode") != "wal" ||
+        Scalar(lib.db, "PRAGMA busy_timeout") != "60000" ||
+        Scalar(lib.db, "SELECT count(*) FROM photos") != "0" { return false }
+    argv: [4]string = .["stat", "-c", "%a", root]
+    options: Process.ProcessOptions = .{arguments = argv[:], capture_output = true}
+    run: Process.ProcessRun
+    if !Process.RunProcess(options, *run) || run.code != 0 || BuilderFinish(run.output) != "700\n" { return false }
+    absent, found := Store.LookupSetting(lib, "absent")
+    if absent != "" || found || lib.error != "" { return false }
+    if !Store.SetSetting(lib, "nullable", "null") { return false }
+    storedNull, nullFound := Store.LookupSetting(lib, "nullable")
+    if !nullFound || storedNull != "null" { return false }
+    if !Store.SetSetting(lib, "unknown", " {\"z\":1,\"a\":{\"k\":1,\"k\":2},\"z\":2,\"text\":\"旅行\",\"n\":1152921504606846987,\"float\":1e2} ") { return false }
+    expected := "{\"a\":{\"k\":2},\"float\":100.0,\"n\":1152921504606846987,\"text\":\"旅行\",\"z\":2}"
+    if Store.Setting(lib, "unknown") != expected { return false }
+    if Store.SetSetting(lib, "unknown", "{bad") || Store.Setting(lib, "unknown") != expected { return false }
+    Store.SetError(lib, "synthetic literal error")
+    if lib.error_allocation == null || lib.error != "synthetic literal error" { return false }
+    Store.SetError(lib, lib.error)
+    if lib.error != "synthetic literal error" { return false }
+    Store.ClearError(lib)
+    if lib.error != "" || lib.error_allocation != null { return false }
+    return Store.Setting(lib, "album_catalog_migrated") == "true"
+}
+
+RootCases :: (root: string) -> bool {
+    first, firstError := Store.Open(Kit.Join(root, "trailing/"))
+    if first == null || firstError != "" { return false }
+    normalized := Tree.ResolvePath(Kit.Join(root, "trailing"))
+    valid := first.root == normalized
+    Store.Close(first)
+    second, secondError := Store.Open(Kit.Join(root, "missing/../normalized/"))
+    if second == null || secondError != "" { return false }
+    valid = valid && second.root == Tree.ResolvePath(Kit.Join(root, "normalized")) &&
+        !Files.PathExists(Kit.Join(root, "missing"))
+    Store.Close(second)
+    target := Kit.Join(root, "real/target")
+    if !Tree.CreateDirectories(target, 448) { return false }
+    linkPath := Kit.Join(root, "alias")
+    targetCString: [4096]u8
+    linkCString: [4096]u8
+    if !CopyCString("real/target", targetCString[:]) || !CopyCString(linkPath, linkCString[:]) ||
+        SymbolicLink(*targetCString[0], *linkCString[0]) != 0 { return false }
+    third, thirdError := Store.Open(Kit.Join(linkPath, "../beside/"))
+    if third == null || thirdError != "" { return false }
+    valid = valid && third.root == Tree.ResolvePath(Kit.Join(root, "real/beside")) &&
+        !Files.PathExists(Kit.Join(root, "beside"))
+    Store.Close(third)
+    return valid
+}
+
+BackfillEdgeCase :: (root: string) -> bool {
+    if !Fixture(root, "library-legacy.sql") { return false }
+    db: *void
+    if SQL.SqliteOpenText(Kit.Join(root, "library.sqlite"), *db, SQL.SQLITE_OPEN_READWRITE) != SQL.SQLITE_OK { return false }
+    sql := "UPDATE albums SET deleted=1,dirty=0; INSERT INTO albums(id,name,created,updated,dirty) VALUES('83d6ecbb59b72e391b681791b33ccf26434f5e2579991c5a253bf6b229bb0dfc','Retained rename',0,0,0); UPDATE photos SET albums='[\"  Fixture album　\",\" Imported only \",\"Imported only\"]'; INSERT INTO settings VALUES('album_catalog_migrated','1e-999')"
+    code := SQL.SqliteExecText(db, sql)
+    unused SQL.SqliteClose(db)
+    if code != SQL.SQLITE_OK { return false }
+    lib, error := Store.Open(root)
+    if lib == null || error != "" { return false }
+    defer { Store.Close(lib) }
+    return Scalar(lib.db, "SELECT id FROM albums WHERE name='Imported only'") ==
+        "e32208f319aa8063bdc42d173276d1c38f6427c225b220212c47fb0a818150ad" &&
+        Scalar(lib.db, "SELECT deleted||'/'||dirty FROM albums WHERE name='Fixture album'") == "1/0" &&
+        Scalar(lib.db, "SELECT count(*) FROM albums") == "3" &&
+        Store.Setting(lib, "album_catalog_migrated") == "true"
+}
+
+#program_export
+main :: () -> s32 {
+    root := Kit.TempDirectory("library-store")
+    if root.count == 0 { return 1 }
+    defer { unused Kit.Cleanup(root) }
+    text, read := Files.ReadEntireFile("tests/fixtures/golden/library-expectations.json")
+    document: JSON.JsonDocument
+    if !read || !JSON.JsonRead(*document, text) { return 2 }
+    config: Types.Config
+    config.root = root
+    if !Kit.Expect(FreshCase(Kit.Join(config.root, "new/nested")), "fresh private WAL library and JSON settings") { return 3 }
+    if !Kit.Expect(FixtureCase(Kit.Join(root, "current"), *document, false), "current Python fixture preserved and reopening idempotent") { return 4 }
+    if !Kit.Expect(FixtureCase(Kit.Join(root, "legacy"), *document, true), "legacy schema and persisted rows match Python migration") { return 5 }
+    if !Kit.Expect(RollbackCase(Kit.Join(root, "rollback"), *document), "failed migration rolls back schema and rows; retry works") { return 6 }
+    if !Kit.Expect(RootCases(root), "trailing slash, relative missing/.. and symlink/.. roots normalize before creation") { return 7 }
+    if !Kit.Expect(BackfillEdgeCase(Kit.Join(root, "backfill-edges")), "backfill trims Unicode whitespace, preserves tombstones and renamed IDs, handles false numeric marker") { return 8 }
+    print("Photos library store: current/legacy fixtures, schema/settings parity and transactional rollback passed\n")
+    return 0
+}

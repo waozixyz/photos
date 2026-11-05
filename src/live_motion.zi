@@ -1,0 +1,547 @@
+// Native orchestration; camera parsing and codecs remain in their existing providers.
+Store :: #import "library_store";
+LibraryFiles :: #import "library_files";
+Guest :: #import "guest";
+Vault :: #import "vault";
+Access :: #import "access_registry";
+Auth :: #import "vault_auth";
+Buffers :: #import "sync_crypto";
+SQL :: #import "sqlite/SQLite";
+JSON :: #import "std/json_document";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+Float :: #import "std/float_text";
+Clock :: #import "std/date_time_linux";
+Timer :: #import "std/timer_linux";
+Mutex :: #import "std/mutex_linux";
+#import "std/c_string"
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_export
+// Trusted service dependencies, never populated from RPC fields. A dispatcher
+// already holding Guest.Enter sets guest_guard_held; standalone callers leave it false.
+Options :: struct {
+    files: LibraryFiles.FileOptions
+    token: string
+    registry: *Access.Registry
+    guest_guard_held: bool
+}
+Descriptor :: struct { version: s64; offset: s64; length: s64 }
+VideoInfo :: struct { duration_ms: s64; width: s32; height: s32; audio: bool }
+// Caller owns the path vector. Its view lasts until Close/another Extract.
+// The derived file belongs to the library, and may be replaced by later playback.
+Playback :: struct { path: Vec(u8); info: VideoInfo; descriptor: Descriptor; source_stamp: Tree.PathInfo }
+Close :: (result: *Playback) { Auth.WipeOwned(*result.path); result.info = .{}; result.descriptor= .{}; result.source_stamp= .{} }
+PlaybackPath :: (result: *Playback) -> string { return Text(*result.path) }
+
+#scope_file
+c :: #system_library "c";
+glib :: #system_library "glib-2.0";
+Free :: (memory: *void) #foreign c "free";
+CaseFold :: (text: *u8, length: s64) -> *u8 #foreign glib "g_utf8_casefold";
+GFree :: (memory: *void) #foreign glib "g_free";
+Initializer :: #type () #c_call;
+Once :: (control: *s32, callback: Initializer) -> s32 #foreign c "pthread_once";
+cache_once: s32;
+cache_guard: Mutex.Mutex;
+cache_ready: bool;
+Cache :: struct { root: [4096]u8; id: [65]u8; descriptor: Descriptor; source: Tree.PathInfo; target: Tree.PathInfo; info: VideoInfo }
+cache: [256]Cache;
+cache_count: s32;
+Initialize :: () { cache_ready = Mutex.Open(*cache_guard) }
+CacheEnter :: () -> bool { callback: Initializer = Initialize; return Once(*cache_once,callback)==0 && cache_ready && Mutex.Lock(*cache_guard) }
+Text :: (value: *Vec(u8)) -> string { return TextFromBytes(Buffers.OutputBytes(value)) }
+AddText :: (output: *Vec(u8), value: string) -> bool {
+    for byte: value { if !VecPush(<<output,byte) { return false } }; return true
+}
+Column :: (statement: *void, index: s32, output: *Vec(u8)) -> bool {
+    Auth.WipeOwned(output)
+    length:=SQL.SqliteColumnBytes(statement,index)
+    if length<0 || length>1048576 { return false }
+    data:=SQL.SqliteColumnText(statement,index)
+    if length==0 { return true }
+    return data!=null && AddText(output,TextFromBytes(BytesFromPointer(data,cast(u64)length)))
+}
+Bind :: (statement: *void, index: s32, value: string) -> bool { return SQL.SqliteBindTextString(statement,index,value,cast(s32)value.count)==SQL.SQLITE_OK }
+Fail :: (lib: *Store.Library, message: string) -> string { if lib!=null { Store.SetError(lib,message) }; return message }
+Ready :: (lib: *Store.Library) -> bool { return lib!=null && lib.db!=null }
+SnapshotSQL :: "SELECT json_object('id',id,'name',name,'extension',extension,'kind',kind,'size',size,'taken',taken,'width',width,'height',height,'metadata',json(metadata),'albums',json(albums),'favorite',favorite,'hidden',hidden,'archived',archived,'trashed',trashed,'caption',caption,'tags',tags,'updated',updated,'dirty',dirty,'manifest',json(manifest),'edits',json(edits)) FROM photos WHERE id=?";
+Row :: struct { bytes: Vec(u8); document: JSON.JsonDocument }
+ClearRow :: (row: *Row) { JSON.JsonReset(*row.document); Auth.WipeOwned(*row.bytes) }
+Read :: (lib: *Store.Library,id: string,row: *Row) -> bool {
+    ClearRow(row)
+    if !Ready(lib) || !Guest.Identity(id) { return false }
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,SnapshotSQL,-1,*statement,null)!=SQL.SQLITE_OK { return false }
+    defer { unused SQL.SqliteFinalize(statement) }
+    return Bind(statement,1,id) && SQL.SqliteStep(statement)==SQL.SQLITE_ROW && Column(statement,0,*row.bytes) && JSON.JsonRead(*row.document,Text(*row.bytes),Auth.JsonErase)
+}
+Same :: (lib: *Store.Library,id: string,row: *Row) -> bool {
+    current: Row; defer { ClearRow(*current) }
+    return Read(lib,id,*current) && Text(*current.bytes)==Text(*row.bytes)
+}
+Member :: (row: *Row,key: string) -> s32 { return JSON.JsonMember(*row.document,row.document.root,key) }
+Integer :: (row: *Row,key: string) -> s64 { value,ok:=JSON.JsonInteger(*row.document,Member(row,key)); return ifx ok then value else 0 }
+Is :: (row: *Row,key: string,value: string) -> bool { return JSON.JsonIs(*row.document,Member(row,key),value) }
+Truth :: (document: *JSON.JsonDocument,node: s32) -> bool {
+    kind:=JSON.JsonKindOf(document,node)
+    if kind==JSON.JsonKind.Null || node<0 { return false }
+    if kind==JSON.JsonKind.True { return true }
+    if kind==JSON.JsonKind.False { return false }
+    if kind==JSON.JsonKind.Number {
+        text: Vec(u8); defer { Auth.WipeOwned(*text) }
+        if !JSON.JsonNumberTextInto(document,node,*text) { return false }
+        value,ok:=Float.ParseFloat64(Text(*text)); return ok && value!=0.0
+    }
+    if kind==JSON.JsonKind.Object || kind==JSON.JsonKind.Array { return JSON.JsonCount(document,node)>0 }
+    value: Vec(u8); defer { Auth.WipeOwned(*value) }; return JSON.JsonStringInto(document,node,*value) && value.count>0
+}
+Flagged :: (row: *Row) -> bool {
+    doc:=*row.document; metadata:=Member(row,"metadata"); edits:=Member(row,"edits")
+    return Truth(doc,JSON.JsonMember(doc,metadata,"photosLive")) || Truth(doc,JSON.JsonMember(doc,metadata,"photosLiveSeparated")) || Truth(doc,JSON.JsonMember(doc,edits,"live_separated"))
+}
+Extension :: (row: *Row,output: *Vec(u8)) -> bool { Auth.WipeOwned(output); return JSON.JsonStringInto(*row.document,Member(row,"extension"),output) }
+Eligible :: (row: *Row) -> bool {
+    extension: Vec(u8); defer { Auth.WipeOwned(*extension) }
+    if !Is(row,"kind","photo") || !Extension(row,*extension) { return false }
+    text:=Text(*extension); return text==".jpg" || text==".jpeg" || text==".heic" || text==".heif" || text==".avif"
+}
+ReadDescriptor :: (document: *JSON.JsonDocument,node: s32,size: s64,out: *Descriptor) -> bool {
+    <<out = .{}
+    if JSON.JsonKindOf(document,node)!=JSON.JsonKind.Object { return false }
+    version,a:=JSON.JsonInteger(document,JSON.JsonMember(document,node,"version"))
+    offset,b:=JSON.JsonInteger(document,JSON.JsonMember(document,node,"offset"))
+    length,d:=JSON.JsonInteger(document,JSON.JsonMember(document,node,"length"))
+    if !a || !b || !d || version!=1 || length<16 || length>134217728 || offset<=0 || length>size || offset>size-length { return false }
+    <<out = .{version=version,offset=offset,length=length}; return true
+}
+Motion :: (row: *Row,out: *Descriptor) -> bool {
+    return Eligible(row) && !Flagged(row) && ReadDescriptor(*row.document,JSON.JsonMember(*row.document,Member(row,"metadata"),"photosMotion"),Integer(row,"size"),out)
+}
+EqualDescriptor :: (a: Descriptor,b: Descriptor) -> bool { return a.version==b.version && a.offset==b.offset && a.length==b.length }
+Original :: (lib: *Store.Library,id: string,row: *Row,out: *Vec(u8)) -> bool {
+    extension: Vec(u8); defer { Auth.WipeOwned(*extension) }
+    if !Guest.Identity(id) || !Extension(row,*extension) { return false }
+    value:=Text(*extension)
+    if value.count<2 || value.count>12 || value[0]!=46 { return false }
+    for byte: value[1:] { if !((byte>=97 && byte<=122)||(byte>=48 && byte<=57)) { return false } }
+    Auth.WipeOwned(out); return LibraryFiles.OriginalInto(out,lib,id,value)
+}
+Fingerprint :: (path: string,out: *Tree.PathInfo) -> bool {
+    <<out=Tree.FileSnapshot(path); return out.identity_valid
+}
+EqualStamp :: (a: Tree.PathInfo,b: Tree.PathInfo) -> bool { return Tree.SameFileSnapshot(a,b) }
+Unchanged :: (path: string,stamp: Tree.PathInfo) -> bool { current: Tree.PathInfo; return Fingerprint(path,*current) && EqualStamp(stamp,current) }
+// Only HelperProgram's documented owned result is freed here.
+ReadNative :: (source: string,output: string,size: s64,options: LibraryFiles.FileOptions,out: *Descriptor) -> s32 {
+    <<out = .{}
+    programBytes: Vec(u8); defer { Auth.WipeOwned(*programBytes) }
+    if !LibraryFiles.HelperProgramInto(*programBytes,options,"motion_photo","motion-photo") { return -1 }
+    program:=Text(*programBytes)
+    arguments: Vec(string); defer { VecClear(arguments) }
+    base: [8]string=.["env","YUE_DESKTOP_RECOVERY=0","prlimit","--as=268435456","--cpu=8","--",program,source]
+    for value: base { if !VecPush(arguments,value) { return -1 } }
+    if output!="" && !VecPush(arguments,output) { return -1 }
+    bytes: Vec(u8); defer { Auth.WipeOwned(*bytes) }; code: s32
+    ok:=LibraryFiles.RunHelper(VecSlice(arguments,0,arguments.count),LibraryFiles.HelperTimeout(options.decode_timeout_ms,10000),*bytes,*code)
+    if code==4 && bytes.count<=1024 { return 0 }
+    document: JSON.JsonDocument; defer { JSON.JsonReset(*document) }
+    if !ok || bytes.count>1024 || !JSON.JsonRead(*document,Text(*bytes),Auth.JsonErase) || !ReadDescriptor(*document,document.root,size,out) { return -1 }
+    return 1
+}
+Number :: (document: *JSON.JsonDocument,node: s32,out: *float64) -> bool {
+    value: Vec(u8); defer { Auth.WipeOwned(*value) }
+    kind:=JSON.JsonKindOf(document,node)
+    if kind==JSON.JsonKind.String { if !JSON.JsonStringInto(document,node,*value) { return false } }
+    else { if !JSON.JsonNumberTextInto(document,node,*value) { return false } }
+    number,valid:=Float.ParseFloat64(Text(*value)); <<out=number
+    return valid && number==number && number>=-1.0e12 && number<=1.0e12
+}
+Probe :: (path: string,motion: bool,options: Options,out: *VideoInfo) -> bool {
+    <<out = .{}
+    program:=ifx options.files.probe_program=="" then "ffprobe" else options.files.probe_program
+    args: [17]string=.["env","YUE_DESKTOP_RECOVERY=0","prlimit","--as=268435456","--cpu=8","--",program,"-v","error","-protocol_whitelist","file","-show_streams","-show_format","-of","json",path,""]
+    data: Vec(u8); defer { Auth.WipeOwned(*data) }
+    if !LibraryFiles.RunHelper(args[:16],LibraryFiles.HelperTimeout(options.files.preview_timeout_ms,8000),*data,null,1048576) { return false }
+    doc: JSON.JsonDocument; defer { JSON.JsonReset(*doc) }
+    if !JSON.JsonRead(*doc,Text(*data),Auth.JsonErase) { return false }
+    streams:=JSON.JsonMember(*doc,doc.root,"streams"); item:=JSON.JsonFirst(*doc,streams); video: s32=-1
+    while item>=0 {
+        if JSON.JsonIs(*doc,JSON.JsonMember(*doc,item,"codec_type"),"audio") { out.audio=true }
+        if video<0 && JSON.JsonIs(*doc,JSON.JsonMember(*doc,item,"codec_type"),"video") { video=item }
+        item=JSON.JsonNext(*doc,item)
+    }
+    if video<0 { return false }
+    duration: float64
+    durationNode:=JSON.JsonMember(*doc,video,"duration")
+    if !Truth(*doc,durationNode) { durationNode=JSON.JsonMember(*doc,JSON.JsonMember(*doc,doc.root,"format"),"duration") }
+    if !Number(*doc,durationNode,*duration) { return false }
+    width,a:=JSON.JsonInteger(*doc,JSON.JsonMember(*doc,video,"width")); height,b:=JSON.JsonInteger(*doc,JSON.JsonMember(*doc,video,"height"))
+    if !a || !b || width<2 || height<2 || width>16384 || height>16384 || duration<(ifx motion then 0.05 else 1.0) || duration>(ifx motion then 10.0 else 604800.0) { return false }
+    if !motion && (JSON.JsonIs(*doc,JSON.JsonMember(*doc,video,"color_transfer"),"smpte2084") || JSON.JsonIs(*doc,JSON.JsonMember(*doc,video,"color_transfer"),"arib-std-b67") || JSON.JsonIs(*doc,JSON.JsonMember(*doc,video,"color_primaries"),"bt2020")) { return false }
+    out.duration_ms=cast(s64)(duration*1000.0); out.width=cast(s32)width; out.height=cast(s32)height; return true
+}
+Permit :: (lib: *Store.Library,row: *Row,options: Options,authorization: *Vault.Authorization) -> bool {
+    if Guest.Active(lib) || Integer(row,"trashed")!=0 { return false }
+    <<authorization=Vault.BeginAuthorization(lib,options.token,Integer(row,"hidden")!=0,options.registry)
+    return authorization.error==""
+}
+Lease :: (authorization: *Vault.Authorization) -> bool { return authorization.error=="" && (authorization.until==0 || authorization.until>Timer.MonotonicMilliseconds()) }
+EnterGuest :: (options: Options) -> bool { return options.guest_guard_held || Guest.Enter() }
+LeaveGuest :: (options: Options) { if !options.guest_guard_held { Guest.Leave() } }
+
+#scope_export
+// Empty return means success, including a negative scan. Errors are borrowed
+// literals; lib.error contains its own copy. No existing records/keys are removed.
+MotionDetect :: (lib: *Store.Library,id: string,unchanged: bool=false,options: LibraryFiles.FileOptions=.{}) -> string {
+    if !Ready(lib) { return Fail(lib,"Photo library is not open") }
+    Store.ClearError(lib)
+    row: Row; defer { ClearRow(*row) }
+    if !Read(lib,id,*row) { return Fail(lib,"Photo not found") }
+    if !Eligible(*row) || Flagged(*row) { return "" }
+    if unchanged {
+        statement: *void
+        if SQL.SqlitePrepareText(lib.db,"SELECT 1 FROM motion_scans WHERE photo_id=? AND reader_version=3",-1,*statement,null)!=SQL.SQLITE_OK { return Fail(lib,"Cannot read motion scan state") }
+        found:=Bind(statement,1,id) && SQL.SqliteStep(statement)==SQL.SQLITE_ROW
+        unused SQL.SqliteFinalize(statement)
+        if found { return "" }
+    }
+    source: Vec(u8); defer { Auth.WipeOwned(*source) }; stamp: Tree.PathInfo
+    if !Original(lib,id,*row,*source) || !Fingerprint(Text(*source),*stamp) || stamp.size!=Integer(*row,"size") { return Fail(lib,"Motion Photo original changed; retry the scan") }
+    descriptor: Descriptor
+    result:=ReadNative(Text(*source),"",Integer(*row,"size"),options,*descriptor)
+    if result<0 { return Fail(lib,"Motion Photo could not be read; the original is retained") }
+    if !Unchanged(Text(*source),stamp) || !Same(lib,id,*row) { return Fail(lib,"Motion Photo changed during its scan; retry") }
+    if SQL.SqliteExecText(lib.db,"BEGIN IMMEDIATE")!=SQL.SQLITE_OK { return Fail(lib,"Cannot save motion scan") }
+    committed:=false; defer { if !committed { unused SQL.SqliteExecText(lib.db,"ROLLBACK") } }
+    if !Same(lib,id,*row) || !Unchanged(Text(*source),stamp) { return Fail(lib,"Motion Photo changed during its scan; retry") }
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,"INSERT OR REPLACE INTO motion_scans VALUES(?,3)",-1,*statement,null)!=SQL.SQLITE_OK { return Fail(lib,"Cannot save motion scan") }
+    saved:=Bind(statement,1,id) && SQL.SqliteStep(statement)==SQL.SQLITE_DONE; unused SQL.SqliteFinalize(statement)
+    if !saved { return Fail(lib,"Cannot save motion scan") }
+    previous: Descriptor
+    motionNode:=JSON.JsonMember(*row.document,Member(*row,"metadata"),"photosMotion")
+    matches:=result==1 && JSON.JsonCount(*row.document,motionNode)==3 && Motion(*row,*previous) && EqualDescriptor(previous,descriptor)
+    absent:=motionNode<0 || JSON.JsonKindOf(*row.document,motionNode)==JSON.JsonKind.Null
+    if !matches && !(result==0 && absent) {
+        patch:=ifx result==1 then "UPDATE photos SET metadata=json_set(metadata,'$.photosMotion',json_object('version',1,'offset',?,'length',?)),updated=?,dirty=1 WHERE id=?" else "UPDATE photos SET metadata=json_remove(metadata,'$.photosMotion'),updated=?,dirty=1 WHERE id=?"
+        if SQL.SqlitePrepareText(lib.db,patch,-1,*statement,null)!=SQL.SQLITE_OK { return Fail(lib,"Cannot save motion scan") }
+        index: s32=1; saved=true
+        if result==1 { saved=SQL.SqliteBindInt64(statement,1,descriptor.offset)==SQL.SQLITE_OK && SQL.SqliteBindInt64(statement,2,descriptor.length)==SQL.SQLITE_OK; index=3 }
+        saved=saved && SQL.SqliteBindDouble(statement,index,cast(float64)Clock.UnixMilliseconds()/1000.0)==SQL.SQLITE_OK && Bind(statement,index+1,id) && SQL.SqliteStep(statement)==SQL.SQLITE_DONE
+        unused SQL.SqliteFinalize(statement)
+        if !saved { return Fail(lib,"Cannot save motion scan") }
+    }
+    if SQL.SqliteExecText(lib.db,"COMMIT")!=SQL.SQLITE_OK { return Fail(lib,"Cannot save motion scan") }; committed=true; return ""
+}
+// Context is a borrowed stable FileOptions for this synchronous C19 hook.
+// A false result is a warning; the successfully imported photo remains present.
+MotionForImport :: (context: *void,lib: *Store.Library,id: string,unchanged: bool) -> bool {
+    options: LibraryFiles.FileOptions
+    if context!=null { pointer:=cast(*LibraryFiles.FileOptions)context; options= <<pointer }
+    return MotionDetect(lib,id,unchanged,options)==""
+}
+
+#scope_file
+Gate :: (lib: *Store.Library,id: string,row: *Row,options: Options) -> bool {
+    if !EnterGuest(options) { return false }; defer { LeaveGuest(options) }
+    authorization: Vault.Authorization; defer { Vault.EndAuthorization(*authorization) }
+    return Permit(lib,row,options,*authorization) && Same(lib,id,row) && Lease(*authorization)
+}
+Cached :: (lib: *Store.Library,id: string,value: Descriptor,source: Tree.PathInfo,target: Tree.PathInfo,info: *VideoInfo) -> bool {
+    if !CacheEnter() { return false }; defer { unused Mutex.Unlock(*cache_guard) }
+    for index: 0..cache_count-1 {
+        item:=cache[index]
+        if TextUntilNul(item.root[:])==lib.root && TextUntilNul(item.id[:])==id && EqualDescriptor(item.descriptor,value) && EqualStamp(item.source,source) && EqualStamp(item.target,target) { <<info=item.info; return true }
+    }; return false
+}
+Remember :: (lib: *Store.Library,id: string,value: Descriptor,source: Tree.PathInfo,target: Tree.PathInfo,info: VideoInfo) {
+    if !CacheEnter() { return }; defer { unused Mutex.Unlock(*cache_guard) }
+    if cache_count>=256 {
+        for current: 0..255 { Auth.JsonErase(null,cache[current].root[:]); Auth.JsonErase(null,cache[current].id[:]); cache[current]= .{} }
+        cache_count=0
+    }
+    index:=cache_count
+    for current: 0..cache_count-1 { if TextUntilNul(cache[current].root[:])==lib.root && TextUntilNul(cache[current].id[:])==id { index=cast(s32)current; break } }
+    item: Cache
+    if !CopyCString(lib.root,item.root[:]) || !CopyCString(id,item.id[:]) { return }
+    item.descriptor=value; item.source=source; item.target=target; item.info=info
+    cache[index]=item
+    if index==cache_count { cache_count+=1 }
+}
+// This function releases only the exact CreateTemporaryDirectory owner.
+DropDirectory :: (directory: string) {
+    if directory!="" { unused Tree.RemoveTree(directory); descriptor:=cast(*TextDescriptor)*directory; Free(cast(*void)descriptor.data) }
+}
+
+#scope_export
+// Call before closing a library to discard its bounded, process-local cache
+// identity. Null discards all entries. Derived files remain library-owned.
+ClearCache :: (lib: *Store.Library=null) {
+    if !CacheEnter() { return }; defer { unused Mutex.Unlock(*cache_guard) }
+    index: s32=0
+    while index<cache_count {
+        if lib==null || TextUntilNul(cache[index].root[:])==lib.root {
+            Auth.JsonErase(null,cache[index].root[:]); Auth.JsonErase(null,cache[index].id[:]); cache[index]= .{}
+            cache_count-=1
+            if index<cache_count { cache[index]=cache[cache_count]; cache[cache_count]= .{} }
+        } else { index+=1 }
+    }
+}
+MotionExtract :: (lib: *Store.Library,id: string,result: *Playback,options: Options=.{}) -> string {
+    if result==null { return Fail(lib,"Choose a playback output") }; Close(result)
+    if !Ready(lib) { return Fail(lib,"Photo library is not open") }; Store.ClearError(lib)
+    row: Row; defer { ClearRow(*row) }; value: Descriptor
+    if !Read(lib,id,*row) || !Motion(*row,*value) || !Gate(lib,id,*row,options) { return Fail(lib,"Motion Photo access ended; restore it or unlock Hidden before playing") }
+    source: Vec(u8); folder: Vec(u8); target: Vec(u8); temporary: Vec(u8)
+    defer { Auth.WipeOwned(*source); Auth.WipeOwned(*folder); Auth.WipeOwned(*target); Auth.WipeOwned(*temporary) }
+    original: Tree.PathInfo; existing: Tree.PathInfo
+    if !Original(lib,id,*row,*source) || !Fingerprint(Text(*source),*original) || original.size!=Integer(*row,"size") { return Fail(lib,"Motion Photo original changed; retry") }
+    BuilderPrint(*folder,"%/private/motion",lib.root)
+    if Files.PathIsLink(Text(*folder)) || !Tree.CreateDirectories(Text(*folder),448) || Tree.PathStatus(Text(*folder),false).kind!=Tree.PathKind.Directory { return Fail(lib,"Invalid private motion directory") }
+    BuilderPrint(*target,"%/%.mp4",Text(*folder),id)
+    info: VideoInfo
+    hit:=Fingerprint(Text(*target),*existing) && Cached(lib,id,value,original,existing,*info)
+    if hit {
+        if !EnterGuest(options) { return Fail(lib,"Motion Photo access ended") }; defer { LeaveGuest(options) }
+        authorization: Vault.Authorization; defer { Vault.EndAuthorization(*authorization) }
+        if !Permit(lib,*row,options,*authorization) || SQL.SqliteExecText(lib.db,"BEGIN IMMEDIATE")!=SQL.SQLITE_OK { return Fail(lib,"Motion Photo access ended") }
+        committed:=false; defer { if !committed { unused SQL.SqliteExecText(lib.db,"ROLLBACK"); Close(result) } }
+        if !Same(lib,id,*row) || !Unchanged(Text(*source),original) || !Unchanged(Text(*target),existing) || !Lease(*authorization) { return Fail(lib,"Motion Photo access ended; retry playback") }
+        if !AddText(*result.path,Text(*target)) { Close(result); return Fail(lib,"Cannot prepare motion playback") }; result.info=info; result.descriptor=value; result.source_stamp=original
+        if !Lease(*authorization) || SQL.SqliteExecText(lib.db,"COMMIT")!=SQL.SQLITE_OK { return Fail(lib,"Motion Photo access ended; retry playback") }; committed=true; return ""
+    }
+    staging:=Tree.CreateTemporaryDirectory(Text(*folder),".motion-")
+    if staging=="" { return Fail(lib,"Cannot prepare private motion playback") }; defer { DropDirectory(staging) }
+    BuilderPrint(*temporary,"%/clip.mp4",staging)
+    parsed: Descriptor
+    if ReadNative(Text(*source),Text(*temporary),Integer(*row,"size"),options.files,*parsed)!=1 || !EqualDescriptor(value,parsed) || !Fingerprint(Text(*temporary),*existing) || existing.size!=value.length { return Fail(lib,"Motion Photo metadata does not match its original") }
+    if !Probe(Text(*temporary),true,options,*info) { return Fail(lib,"The motion clip cannot be played; check FFmpeg codecs and clips from 0.05 to ten seconds") }
+    if !Unchanged(Text(*source),original) || !Same(lib,id,*row) { return Fail(lib,"Motion Photo changed during playback; retry") }
+    if !EnterGuest(options) { return Fail(lib,"Motion Photo access ended") }; defer { LeaveGuest(options) }
+    authorization: Vault.Authorization; defer { Vault.EndAuthorization(*authorization) }
+    if !Permit(lib,*row,options,*authorization) || SQL.SqliteExecText(lib.db,"BEGIN IMMEDIATE")!=SQL.SQLITE_OK { return Fail(lib,"Motion Photo access ended") }
+    committed:=false; defer { if !committed { unused SQL.SqliteExecText(lib.db,"ROLLBACK"); Close(result) } }
+    if !Same(lib,id,*row) || !Lease(*authorization) || !Unchanged(Text(*source),original) { return Fail(lib,"Motion Photo access ended; retry playback") }
+    if !Tree.SetPathMode(Text(*temporary),384) || !Files.RenamePath(Text(*temporary),Text(*target)) || !Fingerprint(Text(*target),*existing) { return Fail(lib,"Cannot publish private motion playback") }
+    Remember(lib,id,value,original,existing,info)
+    if !AddText(*result.path,Text(*target)) { Close(result); return Fail(lib,"Cannot prepare motion playback") }; result.info=info; result.descriptor=value; result.source_stamp=original
+    if !Lease(*authorization) || SQL.SqliteExecText(lib.db,"COMMIT")!=SQL.SQLITE_OK { return Fail(lib,"Motion Photo access ended; retry playback") }; committed=true; return ""
+}
+
+#scope_file
+SeparateRows :: (lib: *Store.Library,ids: []string) -> bool {
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,"UPDATE photos SET metadata=json_set(json_remove(metadata,'$.photosLive'),'$.photosLiveSeparated',json('true')),edits=json_set(edits,'$.live_separated',json('true')),updated=?,dirty=1 WHERE id=?",-1,*statement,null)!=SQL.SQLITE_OK { return false }
+    defer { unused SQL.SqliteFinalize(statement) }
+    for id: ids {
+        unused SQL.SqliteReset(statement)
+        if SQL.SqliteBindDouble(statement,1,cast(float64)Clock.UnixMilliseconds()/1000.0)!=SQL.SQLITE_OK || !Bind(statement,2,id) || SQL.SqliteStep(statement)!=SQL.SQLITE_DONE { return false }
+    }; return true
+}
+Linked :: (row: *Row,other: *Vec(u8),video: *bool) -> bool {
+    Auth.WipeOwned(other)
+    doc:=*row.document; link:=JSON.JsonMember(doc,Member(row,"metadata"),"photosLive")
+    if JSON.JsonKindOf(doc,link)!=JSON.JsonKind.Object || JSON.JsonCount(doc,link)!=1 { return false }
+    node:=JSON.JsonMember(doc,link,"video"); <<video=node>=0
+    if node<0 { node=JSON.JsonMember(doc,link,"photo") }
+    return JSON.JsonStringInto(doc,node,other) && Guest.Identity(Text(other))
+}
+CopyPrivate :: (source: string,target: string,expected: s64) -> bool {
+    input:=Files.OpenRead(source)
+    if !input.valid { return false }; defer { unused Files.CloseFile(input) }
+    output:=Files.OpenExclusivePrivate(target)
+    if !output.valid { return false }; defer { unused Files.CloseFile(output) }
+    buffer: [65536]u8; defer { Auth.JsonErase(null,buffer[:]) }; offset: s64
+    while offset<expected {
+        wanted:=ifx expected-offset<65536 then expected-offset else 65536
+        count:=Files.ReadAt(input,buffer[:wanted],offset)
+        if count<=0 || Files.WriteAt(output,buffer[:count],offset)!=count { return false }; offset+=count
+    }
+    extra: [1]u8
+    return Files.ReadAt(input,extra[:],offset)==0 && Files.SyncFile(output)
+}
+SeparateMotion :: (lib: *Store.Library,id: string,options: Options) -> string {
+    playback: Playback; defer { Close(*playback) }
+    error:=MotionExtract(lib,id,*playback,options)
+    if error!="" { return error }
+    // The baseline removes this disposable playback copy after separation.
+    defer { unused Files.RemoveFile(PlaybackPath(*playback)) }
+    digest,digestError:=LibraryFiles.DigestFile(PlaybackPath(*playback))
+    if digestError!="" { return Fail(lib,digestError) }
+    defer { digestAllocation:=cast(*TextDescriptor)*digest; Free(cast(*void)digestAllocation.data) }
+    row: Row; defer { ClearRow(*row) }; descriptor: Descriptor
+    if !Read(lib,id,*row) || !Motion(*row,*descriptor) || !EqualDescriptor(descriptor,playback.descriptor) || !Gate(lib,id,*row,options) { return Fail(lib,"Motion Photo access ended") }
+    source: Vec(u8); folder: Vec(u8); destination: Vec(u8); temporary: Vec(u8); name: Vec(u8)
+    defer { Auth.WipeOwned(*source); Auth.WipeOwned(*folder); Auth.WipeOwned(*destination); Auth.WipeOwned(*temporary); Auth.WipeOwned(*name) }
+    original: Tree.PathInfo; clip: Tree.PathInfo
+    extracted:=playback.source_stamp
+    if !Original(lib,id,*row,*source) || !Fingerprint(Text(*source),*original) || !EqualStamp(original,extracted) || !Fingerprint(PlaybackPath(*playback),*clip) || clip.size!=descriptor.length { return Fail(lib,"Motion Photo original changed; retry separation") }
+    if !LibraryFiles.OriginalInto(*destination,lib,digest,".mp4") || !AddText(*folder,Tree.PathParent(Text(*destination))) { return Fail(lib,"Cannot prepare separated motion original") }
+    if Files.PathIsLink(Text(*folder)) || !Tree.CreateDirectories(Text(*folder),448) { return Fail(lib,"Cannot save separated motion original") }
+    staging:=Tree.CreateTemporaryDirectory(Text(*folder),".motion-copy-")
+    if staging=="" { return Fail(lib,"Cannot save separated motion original") }; defer { DropDirectory(staging) }
+    BuilderPrint(*temporary,"%/clip.mp4",staging)
+    if !CopyPrivate(PlaybackPath(*playback),Text(*temporary),descriptor.length) || !Unchanged(PlaybackPath(*playback),clip) || !Unchanged(Text(*source),original) { return Fail(lib,"Motion Photo changed during separation; retry") }
+    if !JSON.JsonStringInto(*row.document,Member(*row,"name"),*name) { return Fail(lib,"Cannot read motion name") }
+    stem:=Text(*name); dot: s64=-1
+    for index: 0..stem.count-1 { if stem[index]==46 { dot=index } }
+    if dot>0 { stem=stem[:dot] }
+    childName: Vec(u8); defer { Auth.WipeOwned(*childName) }; BuilderPrint(*childName,"%-motion.mp4",stem)
+    if !EnterGuest(options) { return Fail(lib,"Motion Photo access ended") }
+    authorization: Vault.Authorization
+    locked:=true
+    defer { Vault.EndAuthorization(*authorization); if locked { LeaveGuest(options) } }
+    if !Same(lib,id,*row) || !Permit(lib,*row,options,*authorization) || !Lease(*authorization) { return Fail(lib,"Motion Photo access ended") }
+    if SQL.SqliteExecText(lib.db,"BEGIN IMMEDIATE")!=SQL.SQLITE_OK { return Fail(lib,"Cannot separate Motion Photo") }
+    committed:=false; published:=false
+    defer { if !committed { unused SQL.SqliteExecText(lib.db,"ROLLBACK"); if published { unused Files.RemoveFile(Text(*destination)) } } }
+    if !Same(lib,id,*row) || !Unchanged(Text(*source),original) || !Unchanged(PlaybackPath(*playback),clip) || !Lease(*authorization) { return Fail(lib,"Motion Photo changed during separation; retry") }
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,"SELECT 1 FROM photos WHERE id=?",-1,*statement,null)!=SQL.SQLITE_OK { return Fail(lib,"Cannot separate Motion Photo") }
+    bound:=Bind(statement,1,digest); code:=ifx bound then SQL.SqliteStep(statement) else cast(s32)-1
+    unused SQL.SqliteFinalize(statement)
+    if code!=SQL.SQLITE_ROW && code!=SQL.SQLITE_DONE { return Fail(lib,"Cannot separate Motion Photo") }
+    if code==SQL.SQLITE_DONE {
+        if Files.PathExists(Text(*destination)) {
+            existing: Tree.PathInfo
+            if !Fingerprint(Text(*destination),*existing) { return Fail(lib,"Existing motion original is not a regular file") }
+            savedHash,hashError:=LibraryFiles.DigestFile(Text(*destination))
+            if hashError!="" { return Fail(lib,"Cannot validate existing motion original") }
+            equal:=savedHash==digest; allocation:=cast(*TextDescriptor)*savedHash; Free(cast(*void)allocation.data)
+            if !equal { return Fail(lib,"Existing motion original was retained") }
+        } else {
+            if !Files.RenameNoReplace(Text(*temporary),Text(*destination)) { return Fail(lib,"Cannot save separated motion original") }; published=true
+        }
+        query:="INSERT INTO photos(id,name,extension,kind,size,taken,width,height,metadata,albums,favorite,hidden,archived,caption,tags,updated,edits) SELECT ?,?,'.mp4','video',?,taken,?,?,json_set(json_remove(metadata,'$.photosMotion','$.photosMotionScan','$.photosLive'),'$.photosLiveSeparated',json('true'),'$.photosMotionSource',id),albums,favorite,hidden,archived,caption,tags,?,json_set(edits,'$.live_separated',json('true')) FROM photos WHERE id=?"
+        if SQL.SqlitePrepareText(lib.db,query,-1,*statement,null)!=SQL.SQLITE_OK { return Fail(lib,"Cannot separate Motion Photo") }
+        saved:=Bind(statement,1,digest) && Bind(statement,2,Text(*childName)) && SQL.SqliteBindInt64(statement,3,descriptor.length)==SQL.SQLITE_OK && SQL.SqliteBindInt(statement,4,playback.info.width)==SQL.SQLITE_OK && SQL.SqliteBindInt(statement,5,playback.info.height)==SQL.SQLITE_OK && SQL.SqliteBindDouble(statement,6,cast(float64)Clock.UnixMilliseconds()/1000.0)==SQL.SQLITE_OK && Bind(statement,7,id) && SQL.SqliteStep(statement)==SQL.SQLITE_DONE
+        unused SQL.SqliteFinalize(statement)
+        if !saved { return Fail(lib,"Cannot separate Motion Photo") }
+    }
+    ids: [1]string=.[id]
+    if !SeparateRows(lib,ids[:]) || !Lease(*authorization) || SQL.SqliteExecText(lib.db,"COMMIT")!=SQL.SQLITE_OK { return Fail(lib,"Cannot separate Motion Photo") }; committed=true
+    Vault.EndAuthorization(*authorization); LeaveGuest(options); locked=false
+    // A preview failure is retryable; the successful split and immutable
+    // original remain, matching the earlier app's post-commit preview behavior.
+    child: Row; defer { ClearRow(*child) }; childKind: Vec(u8); childExtension: Vec(u8); childSource: Vec(u8)
+    defer { Auth.WipeOwned(*childKind); Auth.WipeOwned(*childExtension); Auth.WipeOwned(*childSource) }
+    if !Read(lib,digest,*child) || !Original(lib,digest,*child,*childSource) || !Extension(*child,*childExtension) || !JSON.JsonStringInto(*child.document,Member(*child,"kind"),*childKind) { return Fail(lib,"Cannot read separated motion original") }
+    photo: Store.PhotoRow; photo.id=digest; photo.kind=Text(*childKind); photo.extension=Text(*childExtension)
+    preview,previewError:=LibraryFiles.PreviewSource(lib,photo,Text(*childSource),options.files)
+    if preview!="" { allocation:=cast(*TextDescriptor)*preview; Free(cast(*void)allocation.data) }
+    return ifx previewError!="" then Fail(lib,previewError) else ""
+}
+
+#scope_export
+LiveSeparate :: (lib: *Store.Library,id: string,options: Options=.{}) -> string {
+    if !Ready(lib) { return Fail(lib,"Photo library is not open") }; Store.ClearError(lib)
+    row: Row; defer { ClearRow(*row) }; descriptor: Descriptor
+    if !Read(lib,id,*row) { return Fail(lib,"Photo not found") }
+    if Motion(*row,*descriptor) { return SeparateMotion(lib,id,options) }
+    otherId: Vec(u8); reciprocal: Vec(u8); defer { Auth.WipeOwned(*otherId); Auth.WipeOwned(*reciprocal) }
+    video: bool; opposite: bool; other: Row; defer { ClearRow(*other) }
+    if !Linked(*row,*otherId,*video) || Text(*otherId)==id || !Read(lib,Text(*otherId),*other) || !Linked(*other,*reciprocal,*opposite) || video==opposite || Text(*reciprocal)!=id || !Is(*row,"kind",ifx video then "photo" else "video") || !Is(*other,"kind",ifx video then "video" else "photo") { return Fail(lib,"Live Photo pairing is incomplete; wait for sync or import both originals") }
+    if !EnterGuest(options) { return Fail(lib,"Live Photo access ended") }; defer { LeaveGuest(options) }
+    first: Vault.Authorization; defer { Vault.EndAuthorization(*first) }
+    // One shared Vault guard covers both components. Check the strongest
+    // Hidden requirement together, avoiding recursive acquisition.
+    if Guest.Active(lib) { return Fail(lib,"Live Photo access ended") }
+    first=Vault.BeginAuthorization(lib,options.token,Integer(*row,"hidden")!=0 || Integer(*other,"hidden")!=0,options.registry)
+    if !Lease(*first) { return Fail(lib,"Hidden is locked; authenticate before separating a Live Photo") }
+    if SQL.SqliteExecText(lib.db,"BEGIN IMMEDIATE")!=SQL.SQLITE_OK { return Fail(lib,"Cannot separate Live Photo") }
+    committed:=false; defer { if !committed { unused SQL.SqliteExecText(lib.db,"ROLLBACK") } }
+    ids: [2]string=.[id,Text(*otherId)]
+    if !Same(lib,id,*row) || !Same(lib,Text(*otherId),*other) || !SeparateRows(lib,ids[:]) || !Lease(*first) || SQL.SqliteExecText(lib.db,"COMMIT")!=SQL.SQLITE_OK { return Fail(lib,"Live Photo changed during separation; retry") }; committed=true; return ""
+}
+
+#scope_file
+Scalar :: (db: *void,sql: string) -> s64 {
+    statement: *void
+    if SQL.SqlitePrepareText(db,sql,-1,*statement,null)!=SQL.SQLITE_OK { return -1 }; defer { unused SQL.SqliteFinalize(statement) }
+    return ifx SQL.SqliteStep(statement)==SQL.SQLITE_ROW then SQL.SqliteColumnInt64(statement,0) else -1
+}
+Groups :: (lib: *Store.Library,db: *void) -> bool {
+    if SQL.SqliteExecText(db,"CREATE TABLE entries(parent TEXT,stem TEXT,id TEXT,still INTEGER,mtime INTEGER,position INTEGER NOT NULL,PRIMARY KEY(parent,stem,id,still))")!=SQL.SQLITE_OK { return false }
+    source: *void; insert: *void
+    if SQL.SqlitePrepareText(lib.db,"SELECT path,mtime,photo_id,rowid FROM sources ORDER BY rowid",-1,*source,null)!=SQL.SQLITE_OK { return false }; defer { unused SQL.SqliteFinalize(source) }
+    // A repeated content identity updates the selected source timestamp while
+    // retaining when its group was first encountered, like the earlier dict.
+    if SQL.SqlitePrepareText(db,"INSERT INTO entries VALUES(?,?,?,?,?,?) ON CONFLICT(parent,stem,id,still) DO UPDATE SET mtime=excluded.mtime",-1,*insert,null)!=SQL.SQLITE_OK { return false }; defer { unused SQL.SqliteFinalize(insert) }
+    path: Vec(u8); id: Vec(u8); extension: Vec(u8)
+    defer { Auth.WipeOwned(*path); Auth.WipeOwned(*id); Auth.WipeOwned(*extension) }
+    while true {
+        code:=SQL.SqliteStep(source)
+        if code==SQL.SQLITE_DONE { break }
+        if code!=SQL.SQLITE_ROW || !Column(source,0,*path) || !Column(source,2,*id) { return false }
+        if !Guest.Identity(Text(*id)) { continue }
+        value:=Text(*path); slash: s64=-1; dot: s64=-1
+        for index: 0..value.count-1 { if value[index]==47 { slash=index; dot=-1 }; if value[index]==46 { dot=index } }
+        if dot<=slash+1 || dot==value.count-1 { continue }
+        Auth.WipeOwned(*extension)
+        for byte: value[dot:] { if !VecPush(extension,ifx byte>=65 && byte<=90 then byte+cast(u8)32 else byte) { return false } }
+        ext:=Text(*extension); still:=ext==".jpg" || ext==".jpeg" || ext==".heic" || ext==".heif"
+        if !still && ext!=".mp4" && ext!=".mov" { continue }
+        stem:=value[slash+1:dot]; descriptor:=cast(*TextDescriptor)*stem
+        folded:=CaseFold(descriptor.data,stem.count)
+        if folded==null { return false }
+        parent:=ifx slash<0 then "." else ifx slash==0 then "/" else value[:slash]
+        unused SQL.SqliteReset(insert)
+        saved:=Bind(insert,1,parent) && Bind(insert,2,TextFromCString(folded)) && Bind(insert,3,Text(*id)) && SQL.SqliteBindInt(insert,4,ifx still then 1 else 0)==SQL.SQLITE_OK && SQL.SqliteBindInt64(insert,5,SQL.SqliteColumnInt64(source,1))==SQL.SQLITE_OK && SQL.SqliteBindInt64(insert,6,SQL.SqliteColumnInt64(source,3))==SQL.SQLITE_OK && SQL.SqliteStep(insert)==SQL.SQLITE_DONE
+        GFree(cast(*void)folded)
+        if !saved { return false }
+    }; return true
+}
+Pair :: (lib: *Store.Library,stillId: string,movieId: string,stillTime: s64,movieTime: s64,options: Options) -> bool {
+    still: Row; movie: Row; defer { ClearRow(*still); ClearRow(*movie) }; motion: Descriptor
+    if !Read(lib,stillId,*still) || !Read(lib,movieId,*movie) || !Is(*still,"kind","photo") || !Is(*movie,"kind","video") || Flagged(*still) || Flagged(*movie) || Motion(*still,*motion) { return false }
+    stillTaken: float64; movieTaken: float64
+    if !Number(*still.document,Member(*still,"taken"),*stillTaken) || !Number(*movie.document,Member(*movie,"taken"),*movieTaken) { return false }
+    taken:=stillTaken-movieTaken
+    low:=ifx stillTime<movieTime then stillTime else movieTime; high:=ifx stillTime<movieTime then movieTime else stillTime
+    far:=low<=9223285636854775807 && high>low+86400000000000
+    if (taken>86400.0 || taken< -86400.0) && far { return false }
+    source: Vec(u8); defer { Auth.WipeOwned(*source) }; stamp: Tree.PathInfo
+    if !Original(lib,movieId,*movie,*source) || !Fingerprint(Text(*source),*stamp) || stamp.size!=Integer(*movie,"size") { return false }
+    version:=Scalar(lib.db,"PRAGMA data_version"); changes:=Scalar(lib.db,"SELECT total_changes()")
+    info: VideoInfo
+    if !Probe(Text(*source),false,options,*info) || info.duration_ms>10000 || !Unchanged(Text(*source),stamp) { return false }
+    if SQL.SqliteExecText(lib.db,"BEGIN IMMEDIATE")!=SQL.SQLITE_OK { return false }
+    committed:=false; defer { if !committed { unused SQL.SqliteExecText(lib.db,"ROLLBACK") } }
+    // Includes source-table mutations while the helper was running, including
+    // a newly ambiguous filename. Never pair from an outdated grouping.
+    if Scalar(lib.db,"PRAGMA data_version")!=version || Scalar(lib.db,"SELECT total_changes()")!=changes || !Same(lib,stillId,*still) || !Same(lib,movieId,*movie) || !Unchanged(Text(*source),stamp) { return false }
+    query:="UPDATE photos SET metadata=json_set(metadata,'$.photosLive',json_object(CASE WHEN id=? THEN 'video' ELSE 'photo' END,CASE WHEN id=? THEN ? ELSE ? END)),albums=(SELECT json_group_array(value) FROM (SELECT DISTINCT value FROM photos p,json_each(p.albums) WHERE p.id IN (?,?) ORDER BY value)),hidden=(SELECT max(hidden) FROM photos WHERE id IN (?,?)),trashed=(SELECT max(trashed) FROM photos WHERE id IN (?,?)),archived=(SELECT max(archived) FROM photos WHERE id IN (?,?)),favorite=(SELECT max(favorite) FROM photos WHERE id IN (?,?)),updated=?,dirty=1 WHERE id IN (?,?)"
+    statement: *void
+    if SQL.SqlitePrepareText(lib.db,query,-1,*statement,null)!=SQL.SQLITE_OK { return false }; defer { unused SQL.SqliteFinalize(statement) }
+    args: [14]string=.[stillId,stillId,movieId,stillId,stillId,movieId,stillId,movieId,stillId,movieId,stillId,movieId,stillId,movieId]
+    for index: 0..13 { if !Bind(statement,cast(s32)index+1,args[index]) { return false } }
+    if SQL.SqliteBindDouble(statement,15,cast(float64)Clock.UnixMilliseconds()/1000.0)!=SQL.SQLITE_OK || !Bind(statement,16,stillId) || !Bind(statement,17,movieId) || SQL.SqliteStep(statement)!=SQL.SQLITE_DONE || SQL.SqliteExecText(lib.db,"COMMIT")!=SQL.SQLITE_OK { return false }; committed=true; return true
+}
+
+#scope_export
+// Background import orchestration. Count includes only newly paired originals;
+// ambiguous, long, stale or unplayable candidates retain independent records.
+LiveDetect :: (lib: *Store.Library,options: Options=.{}) -> s32,string {
+    if !Ready(lib) { return 0,Fail(lib,"Photo library is not open") }; Store.ClearError(lib)
+    version:=Scalar(lib.db,"PRAGMA data_version"); changes:=Scalar(lib.db,"SELECT total_changes()")
+    db: *void
+    if SQL.SqliteOpenText(":memory:",*db,SQL.SQLITE_OPEN_READWRITE|SQL.SQLITE_OPEN_CREATE)!=SQL.SQLITE_OK { if db!=null { unused SQL.SqliteClose(db) }; return 0,Fail(lib,"Cannot group Live Photo originals") }; defer { unused SQL.SqliteExecText(db,"DROP TABLE IF EXISTS entries"); unused SQL.SqliteClose(db) }
+    if SQL.SqliteExecText(db,"PRAGMA temp_store=MEMORY; PRAGMA secure_delete=ON")!=SQL.SQLITE_OK || !Groups(lib,db) { return 0,Fail(lib,"Cannot group Live Photo originals") }
+    if Scalar(lib.db,"PRAGMA data_version")!=version || Scalar(lib.db,"SELECT total_changes()")!=changes { return 0,Fail(lib,"Live Photo sources changed; retry pairing") }
+    statement: *void
+    query:="SELECT max(CASE WHEN still=1 THEN id END),max(CASE WHEN still=0 THEN id END),max(CASE WHEN still=1 THEN mtime END),max(CASE WHEN still=0 THEN mtime END) FROM entries GROUP BY parent,stem HAVING sum(still=1)=1 AND sum(still=0)=1 ORDER BY min(position)"
+    if SQL.SqlitePrepareText(db,query,-1,*statement,null)!=SQL.SQLITE_OK { return 0,Fail(lib,"Cannot group Live Photo originals") }; defer { unused SQL.SqliteFinalize(statement) }
+    still: Vec(u8); movie: Vec(u8); defer { Auth.WipeOwned(*still); Auth.WipeOwned(*movie) }; count: s32
+    while true {
+        code:=SQL.SqliteStep(statement)
+        if code==SQL.SQLITE_DONE { break }
+        if code!=SQL.SQLITE_ROW || !Column(statement,0,*still) || !Column(statement,1,*movie) { return count,Fail(lib,"Cannot group Live Photo originals") }
+        if Scalar(lib.db,"PRAGMA data_version")!=version || Scalar(lib.db,"SELECT total_changes()")!=changes { return count,Fail(lib,"Live Photo sources changed; retry pairing") }
+        paired:=Pair(lib,Text(*still),Text(*movie),SQL.SqliteColumnInt64(statement,2),SQL.SqliteColumnInt64(statement,3),options)
+        if paired { count+=1; changes+=2 }
+        if Scalar(lib.db,"PRAGMA data_version")!=version || Scalar(lib.db,"SELECT total_changes()")!=changes { return count,Fail(lib,"Live Photo sources changed; retry pairing") }
+    }; return count,""
+}

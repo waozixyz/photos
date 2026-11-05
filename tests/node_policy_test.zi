@@ -1,0 +1,42 @@
+Policy :: #import "node_policy";
+#import "std/text_buffer"
+
+Expect :: (condition: bool, label: string) -> bool {
+    if !condition { print("FAIL: %\n",label) }; return condition
+}
+main :: () -> s32 {
+    pin: [32]u8; for i: 0..31 { pin[i] = 170 }
+    identity:="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    valid: Vec(u8); BuilderPrint(*valid,"{\"node_id\":\"%\",\"known_nodes\":[],\"unknown\":{\"integer\":9007199254740993}}",identity)
+    json:=BuilderFinish(valid)
+    if !Expect(Policy.Check(json,pin[: ])==0,"pin and unknown fields") { return 1 }
+    pin[0]^=1
+    if !Expect(Policy.Check(json,pin[: ])==6 && Policy.Check(json,pin[: 31])==5,"wrong identity and pin bounds") { return 1 }; pin[0]^=1
+    allowed: [4]string = .{"{\"sync\":{\"direction\":\"pull\",\"apps\":[]}}","{\"sync\":{\"direction\":\"none\",\"apps\":[\"entity\"]}}","{\"sync\":{\"direction\":\"push\",\"apps\":[\"other\"]}}","{\"sync\":{\"direction\":\"bidirectional\",\"apps\":[\"other\"]}}"}
+    for peer: allowed {
+        text: Vec(u8); BuilderPrint(*text,"{\"node_id\":\"%\",\"known_nodes\":[%]}",identity,peer)
+        if !Expect(Policy.Check(BuilderFinish(text),pin[: ])==0,"permitted private replication policy") { return 1 }
+    }
+    refused: [8]string = .{"{}","{\"sync\":null}","{\"sync\":{\"direction\":\"push\"}}","{\"sync\":{\"direction\":\"push\",\"apps\":[]}}","{\"sync\":{\"direction\":\"push\",\"apps\":[\"photos\"]}}","{\"sync\":{\"direction\":\"bidirectional\",\"apps\":[\"entity\"]}}","{\"sync\":{\"direction\":\"push\",\"apps\":[\"*\"]}}","{\"sync\":{\"direction\":\"push\",\"apps\":[\"other\",\"photos\"]}}"}
+    for peer: refused {
+        text: Vec(u8); BuilderPrint(*text,"{\"node_id\":\"%\",\"known_nodes\":[%]}",identity,peer)
+        if !Expect(Policy.Check(BuilderFinish(text),pin[: ])==7,"outward Photos/entity/default scopes refused") { return 1 }
+    }
+    malformed: [8]string = .{"null","[]","{\"known_nodes\":[],\"known_nodes\":[]}","{\"known_nodes\":[],\"known\\u005fnodes\":[]}","{\"known_nodes\":[null]}","{\"known_nodes\":[{\"sync\":{\"direction\":\"pull\",\"direction\":\"push\"}}]}","{\"known_nodes\":[{\"sync\":{\"direction\":\"pull\",\"apps\":[null]}}]}","{\"known_nodes\":[{\"sync\":{\"direction\":\"unknown\"}}]}"}
+    for value: malformed {
+        // Invalid root/shape can be either malformed or missing identity; none permits sync.
+        if value=="null" || value=="[]" {
+            if !Expect(Policy.Check(value,pin[: ])==5,"malformed root") { return 1 }; continue
+        }
+        text: Vec(u8); BuilderPrint(*text,"{\"node_id\":\"%\",%",identity,value[1: ])
+        if !Expect(Policy.Check(BuilderFinish(text),pin[: ])==5,"duplicate escaped keys and malformed policy types") { return 1 }
+    }
+    escaped: Vec(u8); BuilderPrint(*escaped,"{\"node\\u005fid\":\"%\",\"known\\u005fnodes\":[]}",identity)
+    trailing: Vec(u8); BuilderPrint(*trailing,"% trailing",json)
+    if !Expect(Policy.Check(BuilderFinish(escaped),pin[: ])==0 && Policy.Check(BuilderFinish(trailing),pin[: ])==5,"escaped canonical fields and trailing bytes") { return 1 }
+    tooMany: Vec(u8); BuilderPrint(*tooMany,"{\"node_id\":\"%\",\"known_nodes\":[",identity)
+    for i: 0..1024 { if i>0 { BuilderPrint(*tooMany,",") }; BuilderPrint(*tooMany,"{\"sync\":{\"direction\":\"none\",\"apps\":[]}}") }
+    BuilderPrint(*tooMany,"]}")
+    if !Expect(Policy.Check(BuilderFinish(tooMany),pin[: ])==5,"bounded peer count") { return 1 }
+    print("node_policy: local tests passed\n"); return 0
+}

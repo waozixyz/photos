@@ -1,0 +1,80 @@
+Pages :: #import "sync_page";
+Test :: #import "sync_crypto_test";
+SQL :: #import "sqlite/SQLite";
+Files :: #import "std/file";
+#import "std/byte_text_linux"
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+Bytes :: (text: string) -> []u8 {
+    d:=cast(*TextDescriptor)*text; return BytesFromPointer(d.data,cast(u64)text.count)
+}
+Photo :: (id: string,updated: s64,bad: bool = false) -> string {
+    out: Vec(u8)
+    BuilderPrint(*out,"{\"id\":\"%\",\"name\":\"Synthetic 旅行.jpg\",\"extension\":\".jpg\",\"kind\":\"photo\",\"size\":%,\"taken\":-154641294.5,\"width\":17,\"height\":9,\"updated\":%,\"metadata\":{\"unknown\":{\"n\":9007199254740993,\"null\":null}},\"manifest\":{\"entity\":{\"unknown\":true}},\"edits\":{\"unknown\":{\"keep\":true}},\"albums\":[],\"album_ids\":[],\"albums_mode\":\"record\",\"favorite\":0,\"hidden\":0,\"trashed\":0,\"archived\":1,\"caption\":\"Synthetic caption\",\"tags\":\"fixture\"}",id,ifx bad then -1 else 128,updated)
+    return BuilderFinish(out)
+}
+Record :: (id: string) -> string {
+    out: Vec(u8); BuilderPrint(*out,"{\"collection\":\"private.entity.v1.photos\",\"id\":\"%\",\"unknown\":{\"n\":9007199254740993}}",id); return BuilderFinish(out)
+}
+Cursor :: (id: string,version: s64) -> string {
+    out: Vec(u8); BuilderPrint(*out,"{\"collection\":\"private.entity.v1.photos\",\"id\":\"%\",\"version\":%}",id,version); return BuilderFinish(out)
+}
+Page :: (since: s64,cursor: string,version: s64,complete: bool,records: string,decoded: string,next: string = "null") -> string {
+    out: Vec(u8); BuilderPrint(*out,"{\"since\":%,\"cursor\":%,\"limit\":2,\"response\":{\"status\":\"ok\",\"encrypted_records_only\":true,\"server_version\":%,\"changes_complete\":%,\"record_cursor\":%,\"changes\":{\"encrypted_records\":[%]},\"unknown\":{\"keep\":true}},\"decoded\":[%]}",since,cursor,version,ifx complete then "true" else "false",next,records,decoded)
+    return BuilderFinish(out)
+}
+TempClean :: (db: *void) -> bool {
+    return Pages.Integer(db,"SELECT count(*) FROM sqlite_temp_master WHERE name IN ('page','incoming','records','face_index','face_input','person_input')")==0
+}
+main :: () -> s32 {
+    db: *void
+    if SQL.SqliteOpenText(":memory:",*db,SQL.SQLITE_OPEN_READWRITE|SQL.SQLITE_OPEN_CREATE)!=SQL.SQLITE_OK { return 1 }
+    defer { unused SQL.SqliteClose(db) }
+    sql,found:=Files.ReadEntireFile("tests/fixtures/golden/library-v0.1.59.sql")
+    if !Test.Expect(found && Pages.Execute(db,sql) && Pages.Execute(db,"DELETE FROM photos; DELETE FROM settings WHERE key IN ('server_version','record_cursor')"),"synthetic baseline schema") { return 1 }
+    first:="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    second:="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    next:=Cursor(first,5)
+    initial:=Page(0,"null",10,false,Record(first),Photo(first,1),next)
+    if !Test.Expect(Pages.ApplyPage(db,Bytes(initial),"null") && TempClean(db) &&
+        Pages.Integer(db,"SELECT count(*) FROM photos")==1 && Pages.Integer(db,"SELECT value FROM settings WHERE key='server_version'")==0 &&
+        Pages.Integer(db,"SELECT json_extract(value,'$.version') FROM settings WHERE key='record_cursor'")==5,
+        "first page merges data/cursor atomically without acknowledging incomplete server version") { return 1 }
+    // Failure of the next page leaves the committed earlier page resumable.
+    broken:=Page(0,next,10,true,Record(second),Photo(second,2,true))
+    if !Test.Expect(!Pages.ApplyPage(db,Bytes(broken),next) && TempClean(db) && Pages.Integer(db,"SELECT count(*) FROM photos")==1 &&
+        Pages.Integer(db,"SELECT json_extract(value,'$.version') FROM settings WHERE key='record_cursor'")==5,
+        "invalid following record retains checkpoint and earlier page") { return 1 }
+    final:=Page(0,next,10,true,Record(second),Photo(second,2))
+    if !Test.Expect(!Pages.ApplyPage(db,Bytes(final),"null") && TempClean(db) &&
+        Pages.ApplyPage(db,Bytes(final),next) && TempClean(db) && Pages.Integer(db,"SELECT count(*) FROM photos")==2 &&
+        Pages.Integer(db,"SELECT value FROM settings WHERE key='server_version'")==10 &&
+        Pages.Integer(db,"SELECT value='null' FROM settings WHERE key='record_cursor'")==1,
+        "resumed page validates caller cursor and advances completed version") { return 1 }
+    if !Test.Expect(Pages.Integer(db,"SELECT json_extract(metadata,'$.unknown.n')=9007199254740993 AND json_type(metadata,'$.unknown.null')='null' AND json_extract(edits,'$.unknown.keep')=1 AND archived=1 AND taken=-154641294.5 FROM photos LIMIT 1")==1,
+        "unknown nested metadata/edits, large integers and old dates preserved") { return 1 }
+    // A later invalid record rolls back a successful merge earlier in the same page.
+    records: Vec(u8); BuilderPrint(*records,"%,%",Record(first),Record(second))
+    decoded: Vec(u8); BuilderPrint(*decoded,"%,%",Photo(first,20),Photo(second,20,true))
+    rollback:=Page(10,"null",20,true,BuilderFinish(records),BuilderFinish(decoded))
+    if !Test.Expect(!Pages.ApplyPage(db,Bytes(rollback),"null") && TempClean(db) &&
+        Pages.Integer(db,"SELECT max(updated) FROM photos")==2 && Pages.Integer(db,"SELECT value FROM settings WHERE key='server_version'")==10,
+        "whole page rolls back on later record error") { return 1 }
+    // The API neither commits nor rolls back an edit owned by its caller.
+    if !Test.Expect(Pages.Execute(db,"BEGIN; INSERT INTO settings(key,value) VALUES('caller_edit','42')") &&
+        !Pages.ApplyPage(db,Bytes(Page(10,"null",20,true,"","")),"null") &&
+        Pages.Integer(db,"SELECT value FROM settings WHERE key='caller_edit'")==42 && Pages.Execute(db,"ROLLBACK") &&
+        Pages.Integer(db,"SELECT count(*) FROM settings WHERE key='caller_edit'")==0 && TempClean(db), "caller transaction preserved") { return 1 }
+    if !Test.Expect(Pages.Execute(db,"CREATE TEMP TABLE page(owner TEXT); INSERT INTO page VALUES('keep')") &&
+        !Pages.ApplyPage(db,Bytes(final),next) && Pages.Integer(db,"SELECT count(*) FROM page WHERE owner='keep'")==1 &&
+        Pages.Execute(db,"DROP TABLE page"), "caller temporary tables preserved") { return 1 }
+    // Counters remain exact beyond JavaScript's integer range.
+    high:=9007199254740993
+    if !Test.Expect(Pages.Execute(db,"UPDATE settings SET value='9007199254740993' WHERE key='server_version'") &&
+        Pages.ApplyPage(db,Bytes(Page(high,"null",high+2,true,"","")),"null") &&
+        Pages.Integer(db,"SELECT value FROM settings WHERE key='server_version'")==high+2 && TempClean(db), "exact large checkpoint integers") { return 1 }
+    invalid: [4]string = .{"{}","{\"since\":1,\"since\":2}","[]","{\"since\":0} trailing"}
+    for value: invalid { if !Test.Expect(!Pages.ApplyPage(db,Bytes(value),"null") && TempClean(db),"malformed page fails without temporary state") { return 1 } }
+    print("sync_page: local tests passed\n"); return 0
+}

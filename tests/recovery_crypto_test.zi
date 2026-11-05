@@ -1,0 +1,55 @@
+Crypto :: #import "recovery_crypto";
+Wire :: #import "sync_crypto";
+Test :: #import "sync_crypto_test";
+#import "std/byte_text_linux"
+using Vectors :: #import "std/vec";
+
+main :: () -> s32 {
+    password: Vec(u8); plain: Vec(u8); file: Vec(u8); sealed: Vec(u8); out: Vec(u8); retry: Vec(u8)
+    defer { Wire.ClearOutput(*password); Wire.ClearOutput(*out); Wire.ClearOutput(*sealed); Wire.ClearOutput(*retry) }
+    if !Test.Expect(Test.Fixture("password.txt",*password) && Test.Fixture("recovery-plain.bin",*plain) &&
+        Test.Fixture("recovery.bin",*file), "Python recovery fixtures") { return 1 }
+    magic: [16]u8=.{80,72,79,84,79,83,45,82,69,67,79,86,69,82,89,1}
+    if !Test.Expect(Test.Equal(VecSlice(file,0,16),magic[:]), "full Python recovery file magic") { return 1 }
+    pw := VecSlice(password,0,password.count); p := VecSlice(plain,0,plain.count)
+    body := VecSlice(file,16,file.count)
+    if !Test.Expect(Crypto.RecoveryCrypt(pw,body,false,*out) && Test.Equal(VecSlice(out,0,out.count),p) &&
+        Crypto.RecoveryCrypt(pw,p,true,*sealed) && sealed.count==p.count+56 && Test.Save("recovery",*sealed) &&
+        Crypto.RecoveryCrypt(pw,VecSlice(sealed,0,sealed.count),false,*out) && Test.Equal(VecSlice(out,0,out.count),p) &&
+        Crypto.RecoveryCrypt(pw,p,true,*retry) && !Test.Equal(VecSlice(sealed,0,40),VecSlice(retry,0,40)),
+        "Argon2id/XChaCha Python recovery and randomized Ziran output") { return 1 }
+    for mode: 0..5 {
+        unused VecResize(out,1024); for i: 0..out.count-1 { out[i]=165 }
+        password[0] ^= ifx mode==0 then cast(u8)1 else cast(u8)0
+        at := ifx mode==1 then 0 else ifx mode==2 then 16 else ifx mode==3 then 40 else sealed.count-1
+        sealed[at] ^= ifx mode>=1 && mode<=4 then cast(u8)1 else cast(u8)0
+        size := sealed.count - ifx mode==5 then 1 else 0
+        failed := !Crypto.RecoveryCrypt(pw,VecSlice(sealed,0,size),false,*out)
+        password[0] ^= ifx mode==0 then cast(u8)1 else cast(u8)0
+        sealed[at] ^= ifx mode>=1 && mode<=4 then cast(u8)1 else cast(u8)0
+        if !Test.Expect(failed && Test.Wiped(*out), "wrong password, salt/nonce/cipher/tag tamper and truncation wipe output") { return 1 }
+    }
+    for size: 0..56 {
+        if !Test.Expect(!Crypto.RecoveryCrypt(pw,VecSlice(sealed,0,size),false,*out) && Test.Wiped(*out), "truncated recovery header/tag") { return 1 }
+    }
+    short: [12]u8=.{195,169,195,169,195,169,195,169,195,169,195,169}
+    invalid: [12]u8; for i: 0..11 { invalid[i]=255 }
+    longPassword: [1025]u8; for i: 0..1024 { longPassword[i]=97 }
+    password[0]=0
+    if !Test.Expect(!Crypto.RecoveryCrypt(pw,p,true,*out) && Test.Wiped(*out) &&
+        !Crypto.RecoveryCrypt(pw[:11],p,true,*out) && Test.Wiped(*out) &&
+        !Crypto.RecoveryCrypt(short[:],p,true,*out) && Test.Wiped(*out) &&
+        !Crypto.RecoveryCrypt(invalid[:],p,true,*out) && Test.Wiped(*out) &&
+        !Crypto.RecoveryCrypt(longPassword[:],p,true,*out) && Test.Wiped(*out), "password UTF-8, NUL, character and byte bounds") { return 1 }
+    password[0]=115
+    maximum: Vec(u8); unused VecResize(maximum,65593)
+    if !Test.Expect(!Crypto.RecoveryCrypt(pw,p[:0],true,*out) && Test.Wiped(*out) &&
+        !Crypto.RecoveryCrypt(pw,VecSlice(maximum,0,65537),true,*out) && Test.Wiped(*out) &&
+        !Crypto.RecoveryCrypt(pw,VecSlice(maximum,0,65593),false,*out) && Test.Wiped(*out) &&
+        Crypto.RecoveryCrypt(longPassword[:1024],p[:1],true,*out) &&
+        Crypto.RecoveryCrypt(longPassword[:1024],VecSlice(out,0,out.count),false,*retry) && retry.count==1 &&
+        Crypto.RecoveryCrypt(pw,VecSlice(maximum,0,65536),true,*out) &&
+        Crypto.RecoveryCrypt(pw,VecSlice(out,0,out.count),false,*retry) && retry.count==65536,
+        "recovery plaintext/password inclusive limits") { return 1 }
+    print("recovery_crypto: local tests passed\n"); return 0
+}

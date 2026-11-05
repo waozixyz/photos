@@ -1,0 +1,119 @@
+// Actual pinned public CLIP model, independently encoded HF goldens.
+// No owner library, downloads, Python runtime, GUI or host regex.
+T :: #import "clip_tokenizer/Tokenizer";
+U :: #import "std/unicode";
+UTF8 :: #import "std/utf8";
+J :: #import "std/json_document";
+Files :: #import "std/file";
+Tree :: #import "std/file_tree_linux";
+Crypto :: #import "crypto/sha256";
+#import "std/text_buffer"
+using Vectors :: #import "std/vec";
+
+#scope_file
+ModelSHA :: "f7f3b7af117d467b58374797691a6438d3e6b9e9cef800dfd5dced7f697a90cd";
+Read :: (path: string, output: *Vec(u8), limit: s64) -> bool {
+    info := Tree.PathStatus(path)
+    if info.kind != Tree.PathKind.File || info.size <= 0 || info.size > limit { return false }
+    file := Files.OpenRead(path)
+    if !file.valid { return false }
+    defer { unused Files.CloseFile(file) }
+    bytes: Vec(u8)
+    if !VecResize(bytes,info.size) || Files.ReadAt(file,VecSlice(bytes,0,bytes.count),0) != bytes.count { return false }
+    extra: [1]u8
+    if Files.ReadAt(file,extra[:],info.size) != 0 { return false }
+    VecSwap(<<output,bytes)
+    return true
+}
+Hash :: (bytes: []u8) -> bool {
+    context: Crypto.Sha256Context
+    Crypto.Sha256Initialize(*context)
+    Crypto.Sha256Update(*context,*bytes[0],bytes.count)
+    digest: [32]u8; hex: [65]u8
+    Crypto.Sha256Finish(*context,*digest[0])
+    return Crypto.BytesToHex(*digest[0],32,*hex[0],hex.count) == 1 && TextUntilNul(hex[:]) == ModelSHA
+}
+Decoded :: (text: string, at: s64) -> UTF8.Decoded {
+    count := text.count-at
+    if count > 4 { count = 4 }
+    return UTF8.Decode(text[at:at+count],0)
+}
+// Explicit Photos adapter contract for C04: validate the ORIGINAL byte length,
+// reject NUL/blank, then Python .strip (including U+001C..1F) before generic HF
+// tokenization. Generic Encode77 deliberately accepts empty strings and NUL.
+PhotosEncode :: (model: *T.Model, text: string, ids: []s64) -> bool {
+    for at: 0..ids.count-1 { ids[at] = 0 }
+    if text.count == 0 || text.count > 512 || !UTF8.Valid(text) { return false }
+    start: s64; end: s64; at: s64; found: bool
+    while at < text.count {
+        d := Decoded(text,at)
+        if d.value == 0 { return false }
+        if !U.IsSpace(d.value) {
+            if !found { start = at; found = true }
+            end = at+d.after
+        }
+        at += d.after
+    }
+    return found && T.Encode77(model,text[start:end],ids)
+}
+Compare :: (model: *T.Model, doc: *J.JsonDocument, row: s32) -> bool {
+    text: Vec(u8)
+    if !J.JsonStringInto(doc,J.JsonMember(doc,row,"text"),*text) { return false }
+    ids: [77]s64
+    if !PhotosEncode(model,TextView(VecSlice(text,0,text.count)),ids[:]) { return false }
+    expected := J.JsonMember(doc,row,"ids")
+    if J.JsonCount(doc,expected) != 77 || ids[0] != 49406 || ids[76] != 49407 { return false }
+    child := J.JsonFirst(doc,expected); at: s64
+    while child >= 0 {
+        value,ok := J.JsonInteger(doc,child)
+        if !ok || ids[at] != value { print("CLIP token % got % expected %\n",at,ids[at],value); return false }
+        at += 1; child = J.JsonNext(doc,child)
+    }
+    return at == 77
+}
+Invalid :: (model: *T.Model) -> bool {
+    ids: [77]s64
+    bad: [4]string = .[""," \t\n\x1c\x1f","\x00","a\x00b"]
+    for text: bad { if PhotosEncode(model,text,ids[:]) { return false } }
+    malformed: [9]u8 = .[255,192,175,237,160,128,226,130,65]
+    for count: 1..9 { if PhotosEncode(model,TextView(malformed[0:count]),ids[:]) { return false } }
+    too_long: [513]u8
+    for at: 0..512 { too_long[at] = 32 }
+    too_long[256] = 120
+    // Trimming must not allow an originally over-limit query through.
+    if PhotosEncode(model,TextView(too_long[:]),ids[:]) { return false }
+    for id: ids { if id != 0 { return false } }
+    return true
+}
+#scope_export
+#program_export
+main :: () -> s32 {
+    source: Vec(u8)
+    if !Read("build/models/tokenizer.json",*source,T.MaxModelBytes) || !Hash(VecSlice(source,0,source.count)) {
+        print("Pinned CLIP tokenizer missing or SHA-256 mismatch\n"); return 1
+    }
+    model: T.Model; defer { T.Close(*model) }
+    if !T.LoadJSON(*model,TextView(VecSlice(source,0,source.count))) { print("Pinned CLIP tokenizer model rejected\n"); return 2 }
+    if model.tokens.count != 49408 || model.merges.count != 48894 { print("Unexpected CLIP vocabulary/merge count\n"); return 2 }
+    {
+        discarded: Vec(u8)
+        VecSwap(discarded,source)
+    }
+    golden: Vec(u8)
+    if !Read("tests/fixtures/golden/clip-tokenizer.json",*golden,1048576) { return 3 }
+    doc: J.JsonDocument; defer { J.JsonReset(*doc) }
+    if !J.JsonRead(*doc,TextView(VecSlice(golden,0,golden.count))) ||
+       !J.JsonIs(*doc,J.JsonMember(*doc,doc.root,"sha256"),ModelSHA) { return 4 }
+    cases := J.JsonMember(*doc,doc.root,"cases")
+    if J.JsonCount(*doc,cases) < 20 { return 5 }
+    row := J.JsonFirst(*doc,cases); number: s32
+    while row >= 0 {
+        if !Compare(*model,*doc,row) { print("Actual CLIP oracle row % failed\n",number); return 6 }
+        row = J.JsonNext(*doc,row); number += 1
+    }
+    if !Invalid(*model) { return 7 }
+    ids: [77]s64
+    for repeat: 0..999 { if !PhotosEncode(*model,"cafe\xcc\x81 ΟΣ 🙂 ١٢٣ <|STARTOFTEXT|>",ids[:]) { return 8 } }
+    print("CLIP tokenizer: % independent actual-model HF goldens, validation and 1000 reused encodes passed\n",number)
+    return 0
+}
