@@ -13,6 +13,7 @@ from pqcrypto.sign import ml_dsa_44
 from photos import account_sign as signing
 from photos.library import Library, atomic, packed
 from photos.sync import Client
+from owner_fixture import ACCOUNT
 
 
 class AccountSignTest(unittest.TestCase):
@@ -79,24 +80,29 @@ class AccountSignTest(unittest.TestCase):
                 atomic(identity,packed(dict(public=self.old_public.hex(),private=self.old_private.hex(),
                                            content_key='42'*32)).encode())
                 before=identity.read_bytes()
-                client=Client(library,dict(node='http://127.0.0.1:18080',node_id='a'*64))
-                account=hashlib.sha256(self.old_public).hexdigest()
-                nonce='ab'*32
-                responses=[dict(nonce=nonce),dict(auth_token='fixture-token'),{}]
-                with patch.object(client,'check_node'), patch.object(client,'raw',side_effect=responses) as raw:
-                    client.login()
-                login=raw.call_args_list[1]
-                body=login.args[2]
-                message='\n'.join(['daochi-sync-v1','POST','/api/v1/sync/login',
-                                  hashlib.sha256(body).hexdigest(),nonce,'']).encode()
-                self.assertTrue(ml_dsa_44.verify(self.old_public,message,bytes.fromhex(login.args[3]['X-Daochi-Signature'])))
-                device=json.loads(raw.call_args_list[2].args[2])
-                message=f'daochi-device-registration-v1\n{account}\nphotos\n{client.device_id}\n{client.client_id}\n{device["public_key"]}\n{device["nonce"]}\n{device["expires_at"]}\n'.encode()
-                self.assertTrue(ml_dsa_44.verify(self.old_public,message,bytes.fromhex(device['signature'])))
-                tx=json.loads(client.header('POST','/api/v1/sync',b'fixture'))
-                message='\n'.join(['daochi-tx-v1','6',tx['tx_id'],account,'photos',client.device_id,
-                                  'POST','/api/v1/sync',tx['body_sha256'],tx['nonce'],str(tx['expires_at']),'']).encode()
-                self.assertTrue(ml_dsa_44.verify(self.old_public,message,bytes.fromhex(tx['signature'])))
+                client=Client(library,dict(node='http://127.0.0.1:18080',node_id='a'*64),account=ACCOUNT)
+                # The owner's account signs the shared photos; the earlier
+                # Photos account still signs reading its own old copies.
+                self.assertEqual(client.legacy.public,self.old_public)
+                for signer,public in [(client.legacy,self.old_public),(client.owner,ACCOUNT.public)]:
+                    account=hashlib.sha256(public).hexdigest()
+                    nonce='ab'*32
+                    responses=[dict(nonce=nonce),dict(auth_token='fixture-token'),{}]
+                    with patch.object(client,'check_node'), patch.object(client,'raw',side_effect=responses) as raw:
+                        client.login(signer)
+                    login=raw.call_args_list[1]
+                    body=login.args[2]
+                    message='\n'.join(['daochi-sync-v1','POST','/api/v1/sync/login',
+                                      hashlib.sha256(body).hexdigest(),nonce,'']).encode()
+                    self.assertTrue(ml_dsa_44.verify(public,message,bytes.fromhex(login.args[3]['X-Daochi-Signature'])))
+                    device=json.loads(raw.call_args_list[2].args[2])
+                    message=f'daochi-device-registration-v1\n{account}\nphotos\n{client.device_id}\n{client.client_id}\n{device["public_key"]}\n{device["nonce"]}\n{device["expires_at"]}\n'.encode()
+                    self.assertTrue(ml_dsa_44.verify(public,message,bytes.fromhex(device['signature'])))
+                    tx=json.loads(client.header(signer,'POST','/api/v1/sync',b'fixture'))
+                    message='\n'.join(['daochi-tx-v1','6',tx['tx_id'],account,'photos',client.device_id,
+                                      'POST','/api/v1/sync',tx['body_sha256'],tx['nonce'],str(tx['expires_at']),'']).encode()
+                    self.assertTrue(ml_dsa_44.verify(public,message,bytes.fromhex(tx['signature'])))
+                    self.assertEqual(client.tokens[account],'fixture-token')
                 self.assertEqual(identity.read_bytes(),before)
             finally:library.db.close()
 
@@ -106,16 +112,19 @@ class AccountSignTest(unittest.TestCase):
             try:
                 identity=library.root/'private/identity.json'
                 config=dict(node='http://127.0.0.1:18080',node_id='a'*64)
+                # A new library has no account of its own, only a content key.
                 with patch.object(signing,'program',side_effect=ValueError('unavailable')):
-                    with self.assertRaises(ValueError):Client(library,config)
-                self.assertFalse(identity.exists())
+                    Client(library,config,account=ACCOUNT)
+                self.assertEqual(set(json.loads(identity.read_bytes())),{'content_key'})
+                identity.unlink(); (library.root/'private/device.json').unlink()
                 atomic(identity,packed(dict(public=self.old_public.hex(),private=self.old_private.hex(),
                                            content_key='42'*32)).encode())
-                before=identity.read_bytes();client=Client(library,config)
+                before=identity.read_bytes();client=Client(library,config,account=ACCOUNT)
                 device=client.device_path.read_bytes()
                 from photos import sync_transaction
                 with patch.object(sync_transaction,'program',side_effect=ValueError('unavailable')):
-                    with self.assertRaises(ValueError):client.header('POST','/api/v1/sync',b'fixture')
+                    for signer in (client.legacy,client.owner):
+                        with self.assertRaises(ValueError):client.header(signer,'POST','/api/v1/sync',b'fixture')
                 self.assertEqual(identity.read_bytes(),before)
                 self.assertEqual(client.device_path.read_bytes(),device)
                 self.assertEqual(library.query()['total'],0)

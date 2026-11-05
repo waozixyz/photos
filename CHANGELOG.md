@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+- Your photos and albums are now kept once for your whole account, so Diary and your other apps show the same photos instead of keeping copies of their own. Favorites, hidden, archive, trash, captions, tags and edits travel with each photo to every app.
+- Photos syncs to your desktop Harmony node, which has room for your library. Your earlier copies on the ThinkPad stay untouched, so older Photos versions keep working.
+- Your library moves to the new storage one photo at a time; a photo counts as moved only after the node confirmed its new copy.
+- Photos uses the account you signed in to Inbe with on this computer.
+
 ## 0.1.59
 
 - Photos in Harmony now runs as a `.zx` portable app. Harmony updates an installed Photos automatically and keeps your library, albums, edits and settings.

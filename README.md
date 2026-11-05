@@ -48,16 +48,35 @@ The owner's merged desktop library is `/mnt/storage/Photos`, imported from
 `/mnt/storage/adel` and `/mnt/storage/Album`. Private data never belongs in this
 repository. Your full-quality originals remain available offline on the desktop.
 
-Sync connects only to the pinned local Daochi instance on the ThinkPad. Desktop
-access uses an authenticated SSH loopback tunnel, and the ThinkPad uses its own
-loopback. Photos refuses public URLs, redirects, proxies, identity changes, and
-node policies that would replicate Photos outward. Originals and metadata are
-encrypted client-side using XChaCha20-Poly1305. Requests use Daochi v6 account and
-device signatures; downloaded originals must match their SHA-256 and size.
-When sync completes, the ThinkPad node holds a complete encrypted copy. Photos retrieves previews
-and materializes originals when needed; its installed index is private local data.
-Large libraries exchange metadata in signed pages with private local checkpoints.
-The ThinkPad node needs the paged encrypted-record sync endpoint for this version.
+Sync connects only to the owner's pinned local Daochi nodes. Photos and albums
+are the account's shared entity data (Daochi `docs/entity-data.md`), kept once
+for the owner's one account, the one Inbe signed in with, so Diary and other
+apps show the same photos. They live on the desktop Harmony node, reached through
+a loopback proxy (`photos-node.socket`). Photos refuses public URLs, redirects,
+identity changes, and node policies that would replicate Photos or entity data
+outward. Each photo is one record named by the SHA-256 of its original, and its
+bytes are 8 MiB chunks encrypted with keys derived from the account key and the
+content, so every app and device seals the same photo to the same chunks. What
+you say about a photo (favorite, hidden, archived, trash, caption, tags, edits)
+is in that shared record; what Photos derives (file metadata, album bookkeeping,
+search and face indexes) is in Photos' own private annotations. Albums are shared
+records too; each photo's record names the albums it is in, so an album of any
+size fits Daochi's record limit. Requests use Daochi v6 account and device
+signatures; downloaded originals must match their SHA-256 and size. When sync
+completes, the desktop node holds a complete encrypted copy. Photos retrieves
+previews and materializes originals when needed; its installed index is private
+local data. Large libraries exchange metadata in signed pages with private local
+checkpoints. The desktop node needs Daochi 17bfd12 or later, which returns entity
+records in paged syncs.
+
+A library synced before entity data keeps its earlier copies on the ThinkPad,
+under the account Photos used to have, and moves one photo at a time: Photos
+reads the old chunks when the original is not on this computer, writes the
+shared chunks and record, and marks the photo moved only after the desktop node
+confirmed them. Old records and previews stay readable for older Photos releases
+through 2027-10-24. Old original chunks are deleted only when the configuration
+sets `retire_legacy_chunks`, and then only after the shared copy downloads again
+and matches the photo's hash.
 
 Photos opens to a newest-first feed grouped by day. Older photos load as you
 scroll, with only visible thumbnails drawn. The app follows Harmony’s colors
@@ -707,10 +726,14 @@ service and `photos-sync.service`, preserving existing settings and keys.
 Publish the checked portable bundle with Harmony's `scripts/publish-app.py`,
 then use its Apps Install action. The installed local service supplies the same
 library to both apps; this release supports Linux desktop hosts.
-It must be given the pinned ThinkPad node ID before enabling sync. Never point
-Photos at a public node. Uninstalling the app must retain the library and keys.
-Keep a separate backup of `private/identity.json`: losing its account and content
-keys makes the encrypted ThinkPad copy unreadable. Do not send keys in chat.
+It must be given the pinned ThinkPad node ID before enabling sync, and
+`--shared-node 192.168.100.194:18081 --shared-node-id <id>` moves sync to the
+desktop Harmony node, keeping the ThinkPad as the source of earlier copies. Never
+point Photos at a public node. Uninstalling the app must retain the library and keys.
+The account key comes from desktop Inbe (`~/.local/share/inbe/inbe.db`); sign in
+to Inbe before syncing. Keep a separate backup of `private/identity.json`: losing
+its content key, and in a library synced before entity data its earlier account
+keys, makes the earlier encrypted copies unreadable. Do not send keys in chat.
 
 Local sync also offers Save recovery file. Choose a new full file path outside
 the library, then enter and confirm a separate password of at least 12 characters.

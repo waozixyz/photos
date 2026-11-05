@@ -55,7 +55,16 @@ def crypt(password, payload, *, restore=False):
 
 
 def identity(value):
+    """The account of the keys, or '' for a library that never had its own.
+
+    The owner's account comes from Inbe; Photos keeps its content key, and a
+    library synced before entity data also its earlier account's keys.
+    """
     try:
+        if type(value) is dict and set(value) == {'content_key'}:
+            if len(bytes.fromhex(value['content_key'])) != 32:
+                raise ValueError()
+            return ''
         if type(value) is not dict or set(value) != {'public', 'private', 'content_key'}:
             raise ValueError()
         public, private, content = (bytes.fromhex(value[k]) for k in ['public', 'private', 'content_key'])

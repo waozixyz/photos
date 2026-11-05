@@ -9,7 +9,7 @@ AccountRequest :: #import "sync_account";
 c :: #system_library "c";
 Read :: (fd: s32, bytes: *u8, count: usize) -> s64 #foreign c "read";
 main :: () -> s32 {
-    // version, method (GET/POST/PUT/HEAD), path length and Unix expiration.
+    // version, method (GET/POST/PUT/HEAD/DELETE), path length and Unix expiration.
     frame: [12]u8
     if !Wire.ReadAll(*frame[0],12) { return 2 }
     if frame[0] == 2 {
@@ -18,7 +18,7 @@ main :: () -> s32 {
         if !Wire.ReadAll(*account_frame[12], 4) { return 2 }
         return AccountRequest.Prepare(account_frame[:])
     }
-    if frame[0]!=1 || frame[1]<1 || frame[1]>4 { return 2 }
+    if frame[0]!=1 || frame[1]<1 || frame[1]>5 { return 2 }
     count:=cast(s64)Wire.Number(frame[2:4])
     expires: u64
     for byte: frame[4:] { expires=(expires<<8)|cast(u64)byte }

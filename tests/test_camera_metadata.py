@@ -13,6 +13,7 @@ from codec_fixtures import heic
 from photos import importing
 from photos.library import Library, LibraryError, digest_file, packed
 from photos.sync import Client
+from owner_fixture import ACCOUNT
 
 
 def camera_exif(latitude='S', longitude='W', degrees=25, minutes=18, seconds=0):
@@ -205,7 +206,7 @@ class CameraMetadataTest(unittest.TestCase):
         self.assertIsNone(readers[-1].child); self.assertIsNone(self.library.import_reader)
 
     def test_historic_camera_dates_import_export_and_encrypted_restore(self):
-        client = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a'*64))
+        client = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a'*64), account=ACCOUNT)
         for date, timestamp in [('1960:01:02 03:04:05', -315521755),
                                 ('1970:01:01 00:00:00', 0), ('1969:12:31 23:59:59', -1)]:
             with self.subTest(date=date):
@@ -215,7 +216,7 @@ class CameraMetadataTest(unittest.TestCase):
                 self.assertEqual(self.library.import_file(self.path, self.source), 'added')
                 identity = digest_file(self.path); photo = self.library.photo(identity)
                 self.assertEqual(photo['taken'], timestamp)
-                record = client.record(photo, dict(chunks=[]))
+                record = client.record(photo, dict(blobs=[]))
                 self.library.db.execute('DELETE FROM photos WHERE id=?', (identity,)); self.library.db.commit()
                 client.accept(record); self.library.db.commit()
                 self.assertEqual(self.library.photo(identity)['taken'], timestamp)

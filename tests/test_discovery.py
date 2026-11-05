@@ -10,6 +10,7 @@ from photos import people
 from photos.library import Library, LibraryError, digest_file
 from photos.worker import process
 from photos.sync import Client
+from owner_fixture import ACCOUNT
 from test_people import vector
 
 
@@ -72,10 +73,10 @@ class DiscoveryTest(unittest.TestCase):
 
     def test_birth_date_encrypted_round_trip_and_old_indexes_are_accepted(self):
         people.edit(self.library,'person_birth',self.person,'2018-06-01')
-        sender=Client(self.library,dict(node='http://127.0.0.1:18080',node_id='a'*64))
+        sender=Client(self.library,dict(node='http://127.0.0.1:18080',node_id='a'*64),account=ACCOUNT)
         peer=Library(self.root/'peer');self.addCleanup(peer.db.close)
-        receiver=Client(peer,dict(node='http://127.0.0.1:18080',node_id='a'*64),sender.identity_path)
-        record=sender.record(self.library.photo(self.ids[0]),manifest={});self.assertNotIn('2018-06-01',json.dumps(record))
+        receiver=Client(peer,dict(node='http://127.0.0.1:18080',node_id='a'*64),sender.identity_path,account=ACCOUNT)
+        record=sender.record(self.library.photo(self.ids[0]), dict(blobs=[]));self.assertNotIn('2018-06-01',json.dumps(record))
         receiver.accept(record);peer.db.commit();self.assertEqual(people.group(peer,self.person)['birth'],'2018-06-01')
         old=people.export_index(self.library,self.ids[1]);old['faces'][0]['person'].pop('birth')
         people.accept_index(peer,self.ids[1],old);peer.db.commit();self.assertEqual(people.group(peer,self.person)['birth'],'2018-06-01')

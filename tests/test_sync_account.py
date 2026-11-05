@@ -9,7 +9,7 @@ from unittest.mock import patch
 from nacl.signing import SigningKey
 from pqcrypto.sign import ml_dsa_44
 
-from photos import sync_account, sync_transaction
+from photos import owner_account, sync_account, sync_transaction
 from photos.sync import Client
 
 
@@ -79,11 +79,12 @@ class SyncAccountTest(unittest.TestCase):
 
     def test_failed_device_registration_does_not_publish_a_login_token(self):
         client = Client.__new__(Client)
-        client.public, client.private, client.device_key = self.public, self.private, self.seed
-        client.client_id, client.account, client.token = self.client, self.account, None
+        client.owner, client.device_key = owner_account.Account(self.public, self.private), self.seed
+        client.client_id, client.tokens, client.legacy = self.client, {}, None
+        client.node = client.legacy_node = 'http://127.0.0.1:18080'
         with patch.object(client, 'check_node') as check, patch.object(client, 'raw', side_effect=[
                 dict(nonce='ab' * 32), dict(auth_token='synthetic-token'), ValueError('registration failed')]):
             with self.assertRaisesRegex(ValueError, 'registration failed'):
                 client.login()
         check.assert_called_once()
-        self.assertIsNone(client.token)
+        self.assertEqual(client.tokens, {})

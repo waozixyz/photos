@@ -9,6 +9,7 @@ from PIL import Image
 from photos import auto_albums, people
 from photos.library import Library, LibraryError, digest_file
 from photos.sync import Client
+from owner_fixture import ACCOUNT
 from photos.worker import process
 from photos.export import Export
 from test_people import vector
@@ -88,12 +89,12 @@ class AutoAlbumsTest(unittest.TestCase):
 
     def test_rule_and_provenance_encrypted_restore_and_folder_export(self):
         auto_albums.configure(self.library,self.album,[self.person])
-        sender=Client(self.library,dict(node='http://127.0.0.1:18080',node_id='a'*64))
+        sender=Client(self.library,dict(node='http://127.0.0.1:18080',node_id='a'*64),account=ACCOUNT)
         peer=Library(self.root/'peer');self.addCleanup(peer.db.close)
-        receiver=Client(peer,dict(node='http://127.0.0.1:18080',node_id='a'*64),sender.identity_path)
+        receiver=Client(peer,dict(node='http://127.0.0.1:18080',node_id='a'*64),sender.identity_path,account=ACCOUNT)
         record=sender.album_record(self.library.album_details(self.album));self.assertNotIn(self.person,json.dumps(record))
         receiver.accept_album(record)
-        for i in self.ids[:2]:receiver.accept(sender.record(self.library.photo(i),manifest={}))
+        for i in self.ids[:2]:receiver.accept(sender.record(self.library.photo(i), dict(blobs=[])))
         peer.db.commit()
         self.assertEqual(json.loads(peer.album_details(self.album)['auto_people']),[self.person])
         auto_albums.configure(peer,self.album,[],remove=True)

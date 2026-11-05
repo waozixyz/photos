@@ -8,6 +8,7 @@ from PIL import Image
 from photos.library import Library, LibraryError, digest_file
 from photos.worker import process
 from photos.sync import Client
+from owner_fixture import ACCOUNT
 from photos.export import Export
 
 
@@ -103,10 +104,10 @@ class SearchTest(unittest.TestCase):
         self.assertEqual(self.library.details(self.ids[0])['taken'],'1900-03-01T01:30:00.125000+00:00')
         self.library.import_folders([self.root/'source'])
         self.assertEqual(self.library.photo(self.ids[0])['taken'],taken)
-        client=Client(self.library,dict(node='http://127.0.0.1:18080',node_id='a'*64))
+        client=Client(self.library,dict(node='http://127.0.0.1:18080',node_id='a'*64),account=ACCOUNT)
         peer=Library(self.root/'peer');self.addCleanup(peer.db.close)
-        receiver=Client(peer,dict(node='http://127.0.0.1:18080',node_id='a'*64),client.identity_path)
-        receiver.accept(client.record(self.library.photo(self.ids[0]),manifest={}))
+        receiver=Client(peer,dict(node='http://127.0.0.1:18080',node_id='a'*64),client.identity_path,account=ACCOUNT)
+        receiver.accept(client.record(self.library.photo(self.ids[0]), dict(blobs=[])))
         peer.db.commit()
         self.assertEqual(peer.photo(self.ids[0])['taken'],taken)
         self.assertEqual(peer.query(search='on:1900-03-01')['photos'][0]['id'],self.ids[0])
@@ -144,11 +145,11 @@ class SearchTest(unittest.TestCase):
 
     def test_smart_album_encrypted_records_and_export_definition_round_trip(self):
         self.library.edit_album('', 'smart_create', 'Beach', search='tag:beach year:2024')
-        client = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a' * 64))
+        client = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a' * 64), account=ACCOUNT)
         record = client.album_record(self.library.album_details('Beach'))
         self.assertNotIn('tag:beach', json.dumps(record))
         peer = Library(self.root / 'peer'); self.addCleanup(peer.db.close)
-        receiver = Client(peer, dict(node='http://127.0.0.1:18080', node_id='a' * 64), client.identity_path)
+        receiver = Client(peer, dict(node='http://127.0.0.1:18080', node_id='a' * 64), client.identity_path, account=ACCOUNT)
         receiver.accept_album(record)
         self.assertEqual(peer.album_details('Beach')['filter'], 'tag:beach year:2024')
         target = self.root / 'export'

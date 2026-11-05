@@ -678,7 +678,7 @@ Frame :: (session: Session, viewport: Rectangle) -> s32 {
         if Action(session, cast(s32)(10 + i), labels[i], .{left, top + 58.0 + cast(float32)i * sidebar_step, sidebar, sidebar_step - 8.0}) { Model.Navigate(views[i]) }
     }
     if Action(session,634,"App lock",.{left,viewport.y+viewport.height-116.0,sidebar,34.0}) { Model.BeginEdit("app_lock_settings","App lock","","") }
-    Label(session, 3, "ThinkPad only", .{left, viewport.y + viewport.height - 76.0, sidebar, 22.0}, 13)
+    Label(session, 3, "Private nodes only", .{left, viewport.y + viewport.height - 76.0, sidebar, 22.0}, 13)
     Label(session, 4, "Private local library", .{left, viewport.y + viewport.height - 50.0, sidebar, 22.0}, 12)
     search_committed := Field(session, .{x, top, width - 78.0, 40.0}, true, key, modifiers, typed)
     if Action(session, 42, "Find", .{x + width - 70.0, top, 70.0, 40.0}) || search_committed { Model.Find() }

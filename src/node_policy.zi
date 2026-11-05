@@ -31,7 +31,8 @@ Fields :: (json: string, at: s32, names: []string, positions: []s32) -> bool {
 }
 
 Check :: (json: string, pin: []u8) -> s32 {
-    // 0 permitted, 5 malformed policy, 6 identity mismatch, 7 outward Photos.
+    // 0 permitted, 5 malformed policy, 6 identity mismatch, 7 outward Photos
+    // or entity data (the account's shared photos).
     if json.count < 2 || json.count > 1048576 || pin.count != 32 || !UTF8.Valid(json) { return 5 }
     at := Space(json,0); end := ValueEnd(json,at,0)
     if end < 0 || Space(json,end) != cast(s32)json.count || json[at] != 123 { return 5 }
@@ -71,7 +72,7 @@ Check :: (json: string, pin: []u8) -> s32 {
                 if length < 1 || length > 256 { return 5 }
                 for i: 0..length-1 { if app[i] == 0 { return 5 } }
                 app[length] = 0; name := TextFromBytes(app[0:length])
-                if name == "photos" || name == "*" { matches = true }
+                if name == "photos" || name == "entity" || name == "*" { matches = true }
                 scope = Space(json,ValueEnd(json,scope,0))
                 if scope < 0 { return 5 }; if json[scope] == 44 { scope = Space(json,scope+1) }
             }

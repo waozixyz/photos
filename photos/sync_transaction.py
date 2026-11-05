@@ -5,7 +5,7 @@ from pathlib import Path
 import struct
 import subprocess
 
-METHODS = {"GET": 1, "POST": 2, "PUT": 3, "HEAD": 4}
+METHODS = {"GET": 1, "POST": 2, "PUT": 3, "HEAD": 4, "DELETE": 5}
 
 
 def program():

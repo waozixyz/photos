@@ -6,8 +6,12 @@ and uses Kryon ImageProps.
 
 Owner requirement (2026-10-07): import and merge `/mnt/storage/adel` and
 `/mnt/storage/Album`, preserving originals, albums and Ente metadata. The full
-desktop library lives in `/mnt/storage/Photos`. Sync uses ONLY the owner's local
-Daochi node on the ThinkPad, pinned by node identity, through loopback or SSH.
+desktop library lives in `/mnt/storage/Photos`. Sync uses ONLY the owner's own
+local Daochi nodes, pinned by node identity, through loopback or SSH. Owner
+decision (2026-10-23, "Move photos to the desktop node"): the account's shared
+photos (entity data) live on the desktop Harmony node; the ThinkPad node keeps
+the copies made before entity data, which stay untouched until every Photos
+install reads the entity data and the owner agrees to delete them.
 Never use Ente, a public Daochi node, a cloud service or public peer for Photos.
 Never change this restriction or enable outward replication without an explicit
 owner instruction. No photo content or library metadata belongs in Git or Social.

@@ -147,6 +147,7 @@ def restore_uploaded_originals(origin, node_id, identity, seeds, folder, expecte
     """A separate desktop library restores the phone's uploads from the node."""
     from photos.library import Library, packed
     from photos.sync import Client
+    from owner_fixture import ACCOUNT
 
     library = Library(folder)
     private = library.root / "private"
@@ -155,7 +156,7 @@ def restore_uploaded_originals(origin, node_id, identity, seeds, folder, expecte
         public=identity["identity"]["public"], private=identity["identity"]["private"],
         content_key=identity["identity"]["content_key"])).encode())
     os.chmod(private / "identity.json", 0o600)
-    client = Client(library, dict(node=origin, node_id=node_id))
+    client = Client(library, dict(node=origin, node_id=node_id), account=ACCOUNT)
     if client.sync() != 0:
         raise RuntimeError("Desktop restore left queued records")
     rows = library.db.execute("SELECT id,name,kind,manifest FROM photos").fetchall()

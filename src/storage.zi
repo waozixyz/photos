@@ -1,3 +1,5 @@
 // Storage review counts a paired Live Photo once, including its motion original.
 LargeBytesSQL :: "(size+coalesce((SELECT motion.size FROM photos motion WHERE motion.id=json_extract(photos.metadata,'$.photosLive.video')),0))";
-BackedSQL :: "json_type(manifest,'$.chunks')='array' AND json_array_length(manifest,'$.chunks')>0 AND (json_extract(metadata,'$.photosLive.video') IS NULL OR EXISTS(SELECT 1 FROM photos motion WHERE motion.id=json_extract(photos.metadata,'$.photosLive.video') AND json_type(motion.manifest,'$.chunks')='array' AND json_array_length(motion.manifest,'$.chunks')>0))";
+// Backed up: the node confirmed the shared entity copy, or still keeps the
+// copy made before entity data.
+BackedSQL :: "(coalesce(json_extract(manifest,'$.entity.confirmed')=1 AND json_array_length(manifest,'$.entity.blobs')>0,0) OR (json_type(manifest,'$.chunks')='array' AND json_array_length(manifest,'$.chunks')>0)) AND (json_extract(metadata,'$.photosLive.video') IS NULL OR EXISTS(SELECT 1 FROM photos motion WHERE motion.id=json_extract(photos.metadata,'$.photosLive.video') AND (coalesce(json_extract(motion.manifest,'$.entity.confirmed')=1 AND json_array_length(motion.manifest,'$.entity.blobs')>0,0) OR (json_type(motion.manifest,'$.chunks')='array' AND json_array_length(motion.manifest,'$.chunks')>0))))";

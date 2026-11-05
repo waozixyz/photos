@@ -13,10 +13,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PIL import Image
 from photos.library import Library, packed, digest_file, atomic
 from photos.sync import Client
+from owner_fixture import ACCOUNT, OTHER
 import photos.sync
 
-# Exercise actual signed continuation requests even with this tiny fixture.
-photos.sync.RECORD_PAGE = 1
+# Exercise actual signed continuation requests even with this tiny fixture,
+# within the node's 300 syncs a minute for one account.
+photos.sync.RECORD_PAGE = 5
 
 repo = Path(__file__).resolve().parents[1]
 node_binary = os.environ.get('PHOTOS_DAOCHI') or shutil.which('daochi')
@@ -89,7 +91,7 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         existing_identity = first.root/'private/identity.json'
         atomic(existing_identity,packed(dict(public=public.hex(),private=private.hex(),content_key='42'*32)).encode())
         existing_bytes = existing_identity.read_bytes()
-        client = Client(first, config)
+        client = Client(first, config, account=ACCOUNT)
         assert client.sync() == 0
         large_id = digest_file(source/'second.jpg')
         large_bytes = (source/'second.jpg').stat().st_size
@@ -115,7 +117,7 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         identity.parent.mkdir(mode=0o700)
         shutil.copyfile(client.identity_path, identity)
         os.chmod(identity,0o600)
-        peer = Client(second, config)
+        peer = Client(second, config, account=ACCOUNT)
         assert peer.sync() == 0
         assert second.query()['total'] == 2
         restored_large = second.query('large')
@@ -123,7 +125,9 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         assert Path(peer.materialize(large_id)).read_bytes() == (source/'second.jpg').read_bytes()
         assert second.album_details('Fixture')['description'] == imported_album['description']
         assert second.album_details('Fixture')['pinned'] == 0
-        assert json.loads(second.photo(digest_file(source/'fixture.jpg'))['edits'])['auto_albums'] == imported_provenance
+        # Each device names the shared album by its own ID.
+        assert json.loads(second.photo(digest_file(source/'fixture.jpg'))['edits'])['auto_albums'] == {
+            second.album_details('Fixture')['id']: ['f'*64]}
         assert json.loads(second.photo(photo_id)['metadata']) == imported_metadata
         assert second.photo(photo_id)['taken'] == -315521755
         assert semantic.encrypted_index(second, photo_id) == semantic.encrypted_index(first, photo_id)
@@ -157,7 +161,7 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         recovered = Library(folder/'recovered')
         try:
             recovery.restore(recovered,config,{},str(recovery_file),recovery_password)
-            recovered_client = Client(recovered,config)
+            recovered_client = Client(recovered,config,account=ACCOUNT)
             assert recovered_client.account==client.account and recovered_client.key==client.key
             assert recovered_client.device_public!=client.device_public
             assert recovered_client.sync()==0
@@ -348,12 +352,12 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
             imported_faces.import_folders([face_export])
             assert people.export_index(imported_faces,batch_ids[1])==people.export_index(first,batch_ids[1])
             assert 'photosPeople' not in json.loads(imported_faces.photo(batch_ids[1])['metadata'])
-            imported_client = Client(imported_faces,config)
+            imported_client = Client(imported_faces,config,account=OTHER)
             # This fixture deliberately uses a separate private account.
             assert imported_client.sync()==0
             restored_faces = Library(folder/'face-restored')
             try:
-                restored_client = Client(restored_faces,config,imported_client.identity_path)
+                restored_client = Client(restored_faces,config,imported_client.identity_path,account=OTHER)
                 assert restored_client.sync()==0
                 assert people.export_index(restored_faces,batch_ids[1])==people.export_index(first,batch_ids[1])
                 assert Path(restored_client.materialize(batch_ids[1])).read_bytes()==(batch/'Image 1.png').read_bytes()
@@ -411,6 +415,42 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         assert first.original(first.photo(embedded_id)).read_bytes()==(motion_folder/'EmbeddedMP.jpg').read_bytes()
         first.import_folders([motion_folder.parent])
         assert motion.descriptor(first.photo(embedded_id)) is None
+        # A photo synced before entity data, whose original exists only as the
+        # earlier account's chunks: moving it reads them, and they stay until
+        # retiring is allowed and the shared copy downloads and checks out.
+        from photos.sync_crypto import seal_blob
+        import urllib.error
+        old_folder = folder/'legacy/Old'; old_folder.mkdir(parents=True)
+        Image.new('RGB',(64,48),'#335577').save(old_folder/'old.jpg')
+        first.import_folders([old_folder.parent])
+        old_id = digest_file(old_folder/'old.jpg'); old = first.photo(old_id)
+        plain = (old_folder/'old.jpg').read_bytes()
+        assert client.legacy is not None and client.legacy.account != client.account
+        old_chunk = client.put('photos', seal_blob(plain, client.legacy_aad(old_id,'chunk:0'), client.key), account=client.legacy)
+        thumb = first.thumbnail(old_id).read_bytes(); thumb_id = hashlib.sha256(thumb).hexdigest()
+        old_preview = client.put('photos', seal_blob(thumb, client.legacy_aad(thumb_id,'preview'), client.key), account=client.legacy)
+        first.db.execute('UPDATE photos SET manifest=?,dirty=0 WHERE id=?', (packed(dict(
+            chunks=[old_chunk], chunk_bytes=8388608, preview=old_preview, preview_id=thumb_id)), old_id))
+        first.db.commit()
+        first.original(old).unlink(); first.thumbnail(old_id).unlink()
+        while client.sync(): pass
+        moved = json.loads(first.photo(old_id)['manifest'])
+        assert moved['entity']['confirmed'] is True and moved['chunks'] == [old_chunk]
+        assert peer.sync() == 0
+        assert Path(peer.materialize(old_id)).read_bytes() == plain
+        assert client.fetch_blob(old_chunk, old_id, 'chunk:0') == plain
+        client.config = {**config, 'retire_legacy_chunks': True}
+        assert client.sync() == 0
+        moved = json.loads(first.photo(old_id)['manifest'])
+        assert 'chunks' not in moved and moved['preview'] == old_preview
+        try:
+            client.request(f'/api/v1/blobs/photos/{old_chunk}', binary=True, account=client.legacy)
+            raise AssertionError('The old chunk was kept')
+        except urllib.error.HTTPError as error:
+            assert error.code == 404
+        # Older releases still show the photo from its old record and preview.
+        assert client.fetch_blob(old_preview, thumb_id, 'preview') == thumb
+        assert Path(client.materialize(old_id)).read_bytes() == plain
         print('Isolated Daochi v6: signed sync, face/semantic indexes, unchanged originals, editing, places, Live Photo privacy, embedded JPEG/HEIC/AVIF motion and separation round trip passed')
     finally:
         process.terminate()

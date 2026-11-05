@@ -14,6 +14,7 @@ from photos import semantic
 from photos.library import Library, LibraryError, digest_file
 from photos.worker import process
 from photos.sync import Client
+from owner_fixture import ACCOUNT
 
 
 def vector(first=1.0):
@@ -97,16 +98,16 @@ class SemanticTest(unittest.TestCase):
             self.assertNotIn(self.ids[0],{p['id'] for p in self.search()['photos']})
 
     def test_embeddings_sync_only_inside_authenticated_encryption(self):
-        sender=Client(self.library,dict(node='http://127.0.0.1:18080',node_id='a'*64))
+        sender=Client(self.library,dict(node='http://127.0.0.1:18080',node_id='a'*64),account=ACCOUNT)
         peer=Library(self.root/'peer');self.addCleanup(peer.db.close)
-        receiver=Client(peer,dict(node='http://127.0.0.1:18080',node_id='a'*64),sender.identity_path)
-        record=sender.record(self.library.photo(self.ids[0]),manifest={})
+        receiver=Client(peer,dict(node='http://127.0.0.1:18080',node_id='a'*64),sender.identity_path,account=ACCOUNT)
+        record=sender.record(self.library.photo(self.ids[0]), dict(blobs=[]))
         self.assertNotIn(semantic.MODEL,json.dumps(record));self.assertNotIn('values',json.dumps(record))
         receiver.accept(record);peer.db.commit()
         self.assertEqual(semantic.encrypted_index(peer,self.ids[0]),semantic.encrypted_index(self.library,self.ids[0]))
         self.assertFalse(peer.setting('semantic_enabled',False))
         # Authentication binds the index to its photo just like other metadata.
-        with self.assertRaises(ValueError):receiver.accept({**record,'id':self.ids[1]})
+        with self.assertRaises(ValueError):receiver.accept({**record[1],'id':self.ids[1]})
         for value in [[],{},dict(model=semantic.MODEL,values=[True]*512),dict(model=semantic.MODEL,values=[float('nan')]*512)]:
             with self.assertRaises(ValueError):semantic.accept_index(peer,self.ids[0],value)
         self.assertIsNotNone(semantic.encrypted_index(peer,self.ids[0]))
@@ -120,8 +121,8 @@ class SemanticTest(unittest.TestCase):
         blob = struct.pack('<512f', *(v/norm for v in values))
         self.library.db.execute('UPDATE semantic_embeddings SET embedding=? WHERE photo_id=?', (blob,self.ids[0]))
         self.library.db.commit()
-        sender = Client(self.library,dict(node='http://127.0.0.1:18080',node_id='a'*64))
-        record = sender.record(self.library.photo(self.ids[0]),manifest={})
+        sender = Client(self.library,dict(node='http://127.0.0.1:18080',node_id='a'*64),account=ACCOUNT)
+        record = sender.record(self.library.photo(self.ids[0]), dict(blobs=[]))
         self.assertLess(len(packed(dict(records=[record]*50)).encode()), 900000)
         restored = Library(self.root/'compact'); self.addCleanup(restored.db.close)
         semantic.accept_index(restored,self.ids[0],semantic.encrypted_index(self.library,self.ids[0]))

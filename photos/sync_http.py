@@ -9,7 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 
 LIMIT = 128*1024*1024
-METHODS = {'GET':1,'POST':2,'PUT':3,'HEAD':4}
+METHODS = {'GET':1,'POST':2,'PUT':3,'HEAD':4,'DELETE':5}
 HEADERS = {'Content-Type','Authorization','X-Daochi-User','X-Daochi-Tx','X-Daochi-Signature'}
 HASH = r'[0-9a-f]{64}'
 
@@ -26,7 +26,7 @@ def route(path,method):
     if type(path) is not str or type(method) is not str: return False
     if method=='GET' and (path=='/api/v1/node' or re.fullmatch('/api/v1/sync/challenge\\?user_id='+HASH,path)): return True
     if method=='POST' and path in {'/api/v1/sync','/api/v1/sync/login','/api/v1/account/devices'}: return True
-    return method in {'GET','PUT','HEAD'} and re.fullmatch('/api/v1/blobs/photos/'+HASH,path) is not None
+    return method in {'GET','PUT','HEAD','DELETE'} and re.fullmatch('/api/v1/blobs/(photos|entity)/'+HASH,path) is not None
 
 
 def frame(node,path,method='GET',body=None,headers=None,limit=LIMIT,timeout_ms=60000,node_id=None):
@@ -45,7 +45,7 @@ def frame(node,path,method='GET',body=None,headers=None,limit=LIMIT,timeout_ms=6
                     path!='/api/v1/node' or method!='GET' or headers or limit>1048576):
                 raise ValueError()
             pin=bytes.fromhex(node_id)
-        if len(body)>LIMIT or (method in {'GET','HEAD'} and body): raise ValueError()
+        if len(body)>LIMIT or (method in {'GET','HEAD','DELETE'} and body): raise ValueError()
         headers={} if headers is None else headers
         if type(headers) is not dict or len(headers)>5: raise ValueError()
         path_bytes=path.encode('ascii'); pairs=[]

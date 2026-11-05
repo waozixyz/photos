@@ -14,6 +14,7 @@ from photos import people
 from photos.library import Library, LibraryError, digest_file
 from photos.worker import process
 from photos.sync import Client
+from owner_fixture import ACCOUNT
 
 
 def vector(first=1.):
@@ -95,11 +96,11 @@ class PeopleTest(unittest.TestCase):
     def test_encrypted_backup_and_export_reimport_keep_names_corrections_and_vectors(self):
         people.edit(self.library,'person_name',self.person,'Ada')
         people.edit(self.library,'person_remove',self.person,ids=[self.ids[0]])
-        sender = Client(self.library,dict(node='http://127.0.0.1:18080',node_id='a'*64))
+        sender = Client(self.library,dict(node='http://127.0.0.1:18080',node_id='a'*64),account=ACCOUNT)
         peer = Library(self.root/'peer'); self.addCleanup(peer.db.close)
-        receiver = Client(peer,dict(node='http://127.0.0.1:18080',node_id='a'*64),sender.identity_path)
+        receiver = Client(peer,dict(node='http://127.0.0.1:18080',node_id='a'*64),sender.identity_path,account=ACCOUNT)
         for i in self.ids[:3]:
-            record = sender.record(self.library.photo(i),manifest={})
+            record = sender.record(self.library.photo(i), dict(blobs=[]))
             self.assertNotIn('Ada',json.dumps(record)); self.assertNotIn(people.MODEL,json.dumps(record))
             receiver.accept(record); peer.db.commit()
             self.assertEqual(people.export_index(peer,i),people.export_index(self.library,i))
@@ -134,7 +135,7 @@ class PeopleTest(unittest.TestCase):
             self.assertFalse(people.valid_vector(blob))
 
     def test_face_rich_sync_batches_fit_node_limit_and_failure_keeps_edits_queued(self):
-        client = Client(self.library,dict(node='http://127.0.0.1:18080',node_id='a'*64))
+        client = Client(self.library,dict(node='http://127.0.0.1:18080',node_id='a'*64),account=ACCOUNT)
         self.library.db.execute('UPDATE albums SET dirty=0'); self.library.db.commit()
         batches = []
         def exchange(records=None):
@@ -144,8 +145,8 @@ class PeopleTest(unittest.TestCase):
                 if len(batches)==2: raise ValueError('Interrupted second page')
             return dict(status='ok')
         with patch.object(client,'check_node'),patch.object(client,'exchange',side_effect=exchange),\
-             patch.object(client,'prepare_original',return_value={}),\
-             patch.object(client,'record',side_effect=lambda photo,manifest:dict(id=photo['id'],ciphertext='x'*260000)):
+             patch.object(client,'prepare_entity',return_value=dict(blobs=[])),\
+             patch.object(client,'records',side_effect=lambda photo,entity:[dict(id=photo['id'],ciphertext='x'*260000)]):
             with self.assertRaises(ValueError): client.sync()
         self.assertEqual(len(batches),2)
         self.assertEqual(self.library.db.execute('SELECT count(*) FROM photos WHERE dirty=1').fetchone()[0],5)

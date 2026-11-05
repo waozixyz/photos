@@ -4,7 +4,9 @@ import tempfile
 import unittest
 from PIL import Image
 from photos.library import Library, digest_file
-from photos.sync import Client, encrypt, decrypt
+import hashlib
+from photos.sync import Client
+from owner_fixture import ACCOUNT
 from unittest.mock import Mock, patch
 import urllib.error
 
@@ -164,10 +166,10 @@ class LibraryTest(unittest.TestCase):
         self.library.import_folders([source])
         photo_id = digest_file(path)
         photo = self.library.photo(photo_id)
-        client = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a' * 64))
-        client.save_manifest(photo, client.prepare_original(photo))
+        client = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a' * 64), account=ACCOUNT)
+        client.request = Mock(side_effect=AssertionError('An empty original needs no blob'))
+        client.save_entity(photo, client.prepare_entity(photo))
         self.library.original(photo).unlink()
-        client.fetch_blob = Mock(side_effect=AssertionError('An empty original needs no blob'))
         restored = Path(client.materialize(photo_id))
         self.assertEqual(restored.read_bytes(), b'')
         self.assertEqual(digest_file(restored), photo_id)
@@ -212,14 +214,17 @@ class LibraryTest(unittest.TestCase):
         self.addCleanup(migrated.db.close)
         self.assertEqual(migrated.photo(photo_id)['archived'], 0)
         self.assertEqual(migrated.query()['count'], 1)
-        client = Client(migrated, dict(node='http://127.0.0.1:18080', node_id='a' * 64))
-        record = client.record(photo, dict(chunks=[]))
+        client = Client(migrated, dict(node='http://127.0.0.1:18080', node_id='a' * 64), account=ACCOUNT)
+        # A shared record from an app that does not know "archived" leaves it unarchived.
+        value = client.photo_value(migrated.photo(photo_id), dict(blobs=[]))
+        value.pop('archived')
         migrated.db.execute('DELETE FROM photos')
-        client.accept(record)
+        migrated.db.commit()
+        client.accept(client.seal_entity(value, 'photos', photo_id, 'entity.photo.v1', photo['updated']))
         self.assertEqual(migrated.photo(photo_id)['archived'], 0)
-        photo['archived'] = 2
+        value['archived'] = 2
         with self.assertRaises(ValueError):
-            client.accept(client.record(photo, dict(chunks=[])))
+            client.accept(client.seal_entity(value, 'photos', photo_id, 'entity.photo.v1', photo['updated'] + 1))
 
     def test_export_corrects_the_date_of_an_existing_phone_copy(self):
         phone = self.export('phone', 'Camera', metadata=False)
@@ -358,10 +363,11 @@ class LibraryTest(unittest.TestCase):
         self.library.edit(photo_id, 'taken', '2024-06-15')
         self.library.edit(photo_id, 'album_remove', 'Holiday')
         self.library.edit(photo_id, 'archived_set', '1')
-        client = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a' * 64))
-        record = client.record(self.library.photo(photo_id), dict(chunks=[]))
+        client = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a' * 64), account=ACCOUNT)
+        record = client.record(self.library.photo(photo_id), dict(blobs=[]))
         self.assertNotIn('removed_albums', json.dumps(record))
         self.library.db.execute('DELETE FROM photos WHERE id=?', (photo_id,))
+        self.library.db.commit()
         client.accept(record)
         photo = self.library.photo(photo_id)
         self.assertEqual(json.loads(photo['edits']), dict(taken=True, removed_albums=['Holiday']))
@@ -457,23 +463,23 @@ class LibraryTest(unittest.TestCase):
     def test_public_urls_and_unpinned_nodes_are_rejected_before_key_creation(self):
         for node in ['https://api.waozi.xyz', 'http://thinkpad.local:18080', 'http://192.168.100.97:18080', 'http://127.0.0.1:18080/path', 'http://127.0.0.1:18080']:
             with self.assertRaises(ValueError):
-                Client(self.library, dict(node=node, node_id=''))
+                Client(self.library, dict(node=node, node_id=''), account=ACCOUNT)
         self.assertFalse((self.library.root / 'private/identity.json').exists())
 
     def test_metadata_encryption_is_bound_to_account_collection_and_id(self):
         path = self.export('desktop', 'Holiday')
         self.library.import_folders([path.parents[1]])
-        client = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a' * 64))
-        client.upload_original = lambda photo: dict(chunks=['b' * 64])
+        client = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a' * 64), account=ACCOUNT)
+        client.prepare_entity = lambda photo: dict(blobs=[])
         photo = self.library.photo(digest_file(path))
-        record = client.record(photo)
+        record = client.record(photo)[0]
         self.assertNotIn('caption', record['ciphertext'])
         record['id'] = 'f' * 64
         with self.assertRaises(ValueError):
             client.accept(record)
 
     def test_sync_refuses_wrong_identity_and_outward_photos_replication(self):
-        client = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a' * 64))
+        client = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a' * 64), account=ACCOUNT)
         # Actual native policy parsing is exercised by the loopback fixtures.
         # The client must propagate failures and cannot fall back to raw JSON.
         from unittest.mock import patch
@@ -489,10 +495,10 @@ class LibraryTest(unittest.TestCase):
         path = self.export('desktop', 'Holiday')
         self.library.import_folders([path.parents[1]])
         photo_id = digest_file(path)
-        client = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a' * 64))
+        client = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a' * 64), account=ACCOUNT)
         client.check_node = Mock()
-        client.prepare_original = Mock(return_value=dict(chunks=['b' * 64]))
-        client.record = Mock(return_value=dict(id=photo_id))
+        client.prepare_entity = Mock(return_value=dict(blobs=[]))
+        client.records = Mock(return_value=[dict(id=photo_id)])
         client.exchange = Mock(side_effect=[{}, dict(status='error')])
         with self.assertRaises(ValueError):
             client.sync()
@@ -506,19 +512,22 @@ class LibraryTest(unittest.TestCase):
         self.assertEqual(client.sync(), 1)
         self.assertEqual(self.library.photo(photo_id)['caption'], 'Edited during upload')
 
-    def test_changed_chunk_bytes_never_reuse_an_encryption_nonce(self):
-        client = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a' * 64))
+    def test_entity_chunks_belong_to_their_content(self):
+        client = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a' * 64), account=ACCOUNT)
         uploaded = []
-        def request(path, method='GET', body=None, binary=False):
+        def request(path, method='GET', body=None, binary=False, account=None):
             if method == 'HEAD':
                 raise urllib.error.HTTPError(path, 404, 'missing', {}, None)
             uploaded.append(body)
         client.request = request
+        # The same photo seals to the same chunks on every device and in every
+        # app, so the node keeps one copy; other bytes never share a key.
         for plain in [b'original', b'changed', b'original']:
-            client.upload_blob(plain, 'b' * 64, 'chunk:0')
-        self.assertNotEqual(uploaded[0][:24], uploaded[1][:24])
+            client.put_content(hashlib.sha256(plain).hexdigest(), [plain])
+        self.assertNotEqual(uploaded[0], uploaded[1])
         self.assertEqual(uploaded[0], uploaded[2])
-
+        with self.assertRaisesRegex(ValueError, 'changed'):
+            client.put_content(hashlib.sha256(b'original').hexdigest(), [b'changed'])
 
 if __name__ == '__main__':
     unittest.main()

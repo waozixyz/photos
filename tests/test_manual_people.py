@@ -8,6 +8,7 @@ from PIL import Image
 from photos import auto_albums, people, live
 from photos.library import Library, LibraryError, digest_file
 from photos.sync import Client
+from owner_fixture import ACCOUNT
 from photos.worker import process
 from test_people import vector
 
@@ -127,12 +128,12 @@ class ManualPeopleTest(unittest.TestCase):
 
     def test_encrypted_export_restore_untag_and_legacy_records_preserve_scans(self):
         person=people.tag(self.library,self.ids[:2],'Ada')
-        sender=Client(self.library,dict(node='http://127.0.0.1:18080',node_id='a'*64))
+        sender=Client(self.library,dict(node='http://127.0.0.1:18080',node_id='a'*64),account=ACCOUNT)
         peer=Library(self.root/'peer');self.addCleanup(peer.db.close)
-        receiver=Client(peer,dict(node='http://127.0.0.1:18080',node_id='a'*64),sender.identity_path)
+        receiver=Client(peer,dict(node='http://127.0.0.1:18080',node_id='a'*64),sender.identity_path,account=ACCOUNT)
         peer.set_setting('people_enabled',True)
         for photo_id in self.ids[:2]:
-            record=sender.record(self.library.photo(photo_id),manifest={})
+            record=sender.record(self.library.photo(photo_id), dict(blobs=[]))
             self.assertNotIn('Ada',json.dumps(record));self.assertNotIn('tags',json.dumps(record))
             receiver.accept(record);peer.db.commit()
             self.assertEqual(people.export_index(peer,photo_id),people.export_index(self.library,photo_id))
@@ -144,7 +145,7 @@ class ManualPeopleTest(unittest.TestCase):
         self.assertEqual(imported.query(search='person:Ada')['count'],1)
         self.assertFalse(imported.db.execute('SELECT 1 FROM face_scans').fetchone())
         people.tag(self.library,[self.ids[0]],'Ada',remove=True)
-        record=sender.record(self.library.photo(self.ids[0]),manifest={});receiver.accept(record);peer.db.commit()
+        record=sender.record(self.library.photo(self.ids[0]), dict(blobs=[]));receiver.accept(record);peer.db.commit()
         self.assertEqual(peer.query(search='person:Ada')['count'],1)
         self.assertEqual(people.export_index(peer,self.ids[0])['tags'],[])
         # Tags from an unscanned peer must not remove another device's completed faces.

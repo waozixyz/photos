@@ -6,6 +6,7 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,os.environ.get('PHOTOS_SERVICE_PACKAGE',str(ROOT)))
 from photos.library import Library,digest_file,LibraryError
 from photos.sync import Client
+from owner_fixture import ACCOUNT
 from photos import recovery
 from photos.service import Server
 import photos.service as service_module
@@ -27,7 +28,7 @@ with tempfile.TemporaryDirectory() as temporary:
         ids.append(digest_file(path));originals[path]=path.read_bytes()
     library=Library(folder/'library');library.import_folders([source.parent])
     config=dict(root=str(library.root),node='http://127.0.0.1:18080',node_id='a'*64)
-    client=Client(library,config);keys=client.identity_path.read_bytes();device=client.device_path.read_bytes()
+    client=Client(library,config,account=ACCOUNT);keys=client.identity_path.read_bytes();device=client.device_path.read_bytes()
     destination=folder/'fixture.photos-recovery';password='synthetic recovery password'
     calls=[];original_process=service_module.process
     def record(request,config):
@@ -83,7 +84,7 @@ with tempfile.TemporaryDirectory() as temporary:
             peer=Library(folder/'recovered')
             try:
                 recovery.restore(peer,config,{},str(destination),password)
-                assert Client(peer,config).identity==client.identity
+                assert Client(peer,config,account=ACCOUNT).identity==client.identity
             finally:peer.db.close()
             control('Restore backup keys',489,597);text(str(destination));control('Save',250,339)
             text(password);since=len(calls);control('Save',250,339)
@@ -103,7 +104,7 @@ with tempfile.TemporaryDirectory() as temporary:
                 text(password);since=len(calls);control('Save',250,339)
                 restored_result=wait(lambda:result('recovery_restore',since),'New-library recovery did not finish')
                 assert 'error' not in restored_result,restored_result.get('error')
-                assert Client(restored,config).identity==client.identity
+                assert Client(restored,config,account=ACCOUNT).identity==client.identity
             finally:restored.db.close()
             control('Save recovery file',296,597);text(str(folder/'cancelled.photos-recovery'));control('Save',250,339)
             text(password);control('Cancel',350,339)

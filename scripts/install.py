@@ -10,9 +10,19 @@ import sys
 import venv
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from photos.library import atomic, packed
-from photos.service_units import units
+from photos.service_units import shared_node, units
 from urllib.parse import urlsplit
 import re
+
+
+def installed_proxy(unit_root):
+    """The loopback port and desktop node address of an installed proxy, kept on reinstall."""
+    socket, service = unit_root/'photos-node.socket', unit_root/'photos-node.service'
+    if not socket.is_file() or not service.is_file():
+        return None
+    port = next(int(line.rpartition(':')[2]) for line in socket.read_text().splitlines() if line.startswith('ListenStream='))
+    target = next(line.split()[-1] for line in service.read_text().splitlines() if line.startswith('ExecStart='))
+    return port, target
 
 
 def main():
@@ -22,6 +32,9 @@ def main():
     parser.add_argument('--node')
     parser.add_argument('--node-id')
     parser.add_argument('--ssh-host', help='Owner SSH destination for the ThinkPad loopback tunnel')
+    parser.add_argument('--shared-node', help="The desktop Harmony node's private address:port, which keeps the account's shared photos")
+    parser.add_argument('--shared-node-id', help="The desktop Harmony node's pinned identity")
+    parser.add_argument('--shared-port', type=int, default=18087, help='Loopback port of the proxy to the desktop node')
     parser.add_argument('--defer-sync', action='store_true', help='Install the worker but leave its start to a running import')
     parser.add_argument('--source', action='append', default=[])
     parser.add_argument('--no-dependencies', action='store_true')
@@ -39,6 +52,13 @@ def main():
             parser.error('Use the SSH loopback tunnel to the ThinkPad node')
         if not re.fullmatch('[0-9a-f]{64}', args.node_id or ''):
             parser.error('Pin the ThinkPad node identity when enabling sync')
+    if args.shared_node:
+        try:
+            args.shared_node = shared_node(args.shared_node)
+        except ValueError as error:
+            parser.error(str(error))
+        if not re.fullmatch('[0-9a-f]{64}', args.shared_node_id or '') or not 1024 <= args.shared_port < 65536:
+            parser.error('Pin the desktop node identity and choose a loopback port for it')
     repo = Path(__file__).resolve().parents[1]
     if args.harmony:
         current = Path.home()/'.local/share/harmony/apps/photos/current.json'
@@ -205,6 +225,15 @@ def main():
         if config.get('node_id') and config['node_id'] != args.node_id:
             parser.error('Existing ThinkPad identity differs; settings were preserved')
         config.update(node=args.node,node_id=args.node_id)
+    if args.shared_node:
+        # Photos moves to the desktop node; the ThinkPad keeps the copies made
+        # before entity data, which Photos only reads while moving them.
+        shared = f'http://127.0.0.1:{args.shared_port}'
+        if config.get('node_id') not in (None, args.shared_node_id) and not config.get('legacy_node'):
+            config.update(legacy_node=config['node'], legacy_node_id=config['node_id'])
+        if config.get('legacy_node') == shared:
+            parser.error('The ThinkPad loopback port is taken by the desktop node; settings were preserved')
+        config.update(node=shared, node_id=args.shared_node_id)
     atomic(config_path,packed(config).encode())
     launcher = args.prefix/'bin/photos'
     launcher.parent.mkdir(parents=True,exist_ok=True)
@@ -245,11 +274,15 @@ def main():
         tunnel = (args.ssh_host, urlsplit(args.node).port) if args.ssh_host else None
         unit_root = Path.home()/'.config/systemd/user'
         has_tunnel = tunnel is not None or (unit_root/'photos-tunnel.service').is_file()
-        for name, content in units(installed, tunnel=tunnel, tunnel_present=has_tunnel).items():
+        proxy = (args.shared_port, args.shared_node) if args.shared_node else installed_proxy(unit_root)
+        has_proxy = proxy is not None
+        for name, content in units(installed, tunnel=tunnel, tunnel_present=has_tunnel, proxy=proxy).items():
             atomic(unit_root/name, content.encode())
         workers = ['photos.service', 'photos-sync.service']
         if has_tunnel:
             workers.append('photos-tunnel.service')
+        if has_proxy:
+            workers += ['photos-node.socket', 'photos-node.service']
         # Only the socket starts at login. Requests activate the library and
         # its scoped workers; a clean idle exit releases their entire groups.
         subprocess.run(['systemctl','--user','disable',*workers],check=True)

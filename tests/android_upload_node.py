@@ -23,8 +23,9 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from PIL import Image
-from photos.library import Library, packed, digest_file
+from photos.library import Library, atomic, packed, digest_file
 from photos.sync import Client
+from owner_fixture import ACCOUNT
 from photos import sync_account, sync_http, sync_transaction
 
 UPLOAD = ROOT / "build/backup-upload-test/backup_upload_probe"
@@ -167,7 +168,14 @@ def main():
             shared_id = digest_file(source / "shared.jpg")
             desktop.edit(shared_id, "album_add", "Desk album")
             config = dict(node=origin, node_id=node["node_id"])
-            desktop_client = Client(desktop, config)
+            # The phone still backs up to the account Photos had before entity
+            # data; the desktop brings its new photos into the shared photos.
+            from photos import account_sign
+            earlier_public, earlier_private = account_sign.generate_keypair()
+            (desktop.root / "private").mkdir(mode=0o700, exist_ok=True)
+            atomic(desktop.root / "private/identity.json", packed(dict(public=earlier_public.hex(),
+                   private=earlier_private.hex(), content_key=os.urandom(32).hex())).encode())
+            desktop_client = Client(desktop, config, account=ACCOUNT)
             assert desktop_client.sync() == 0
 
             identity_json = json.loads(desktop_client.identity_path.read_bytes())
@@ -228,7 +236,7 @@ def main():
             private_dir.mkdir(mode=0o700, exist_ok=True)
             shutil.copyfile(desktop_client.identity_path, private_dir / "identity.json")
             os.chmod(private_dir / "identity.json", 0o600)
-            peer = Client(peer_library, config)
+            peer = Client(peer_library, config, account=ACCOUNT)
             assert peer.sync() == 0
             assert peer_library.query()["total"] == 3, peer_library.query()["total"]
             new = peer_library.photo(ids["IMG_0001.jpg"])

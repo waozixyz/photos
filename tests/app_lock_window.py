@@ -17,6 +17,7 @@ from photos.library import Library
 from photos import app_lock, vault
 from photos.service import Server
 from photos.sync import Client
+from owner_fixture import ACCOUNT
 import photos.service as service_module
 
 assert os.environ.get('PHOTOS_PRIVATE_XVFB') == '1'
@@ -42,7 +43,7 @@ with tempfile.TemporaryDirectory() as temporary:
         path = source/f'Photo {i}.png'; Image.new('RGB', (300, 200), (70+i*50, 150, 100)).save(path)
         originals[path] = path.read_bytes()
     library = Library(folder/'library'); library.import_folders([source.parent])
-    Client(library, dict(node='http://127.0.0.1:1', node_id='42'*32))
+    Client(library, dict(node='http://127.0.0.1:1', node_id='42'*32), account=ACCOUNT)
     keys = (library.root/'private/identity.json').read_bytes()
     password = 'synthetic-app-lock-password'; hidden = vault.authenticate(library, password, setup=True)
     hidden_settings = (library.root/'private/hidden-password.json').read_bytes()

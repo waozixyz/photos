@@ -24,6 +24,11 @@ class LibraryError(ValueError):
     """A local validation message safe to show in the native editor."""
 
 
+def shown_album(row):
+    # Sync bookkeeping (the shared record and its ID) is not album detail.
+    return {key: value for key, value in dict(row).items() if key not in ('entity', 'record')}
+
+
 def packed(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
 
@@ -122,6 +127,16 @@ class Library:
                 self.db.execute('BEGIN IMMEDIATE')
                 if 'auto_people' not in {row[1] for row in self.db.execute('PRAGMA table_info(albums)')}:
                     self.db.execute("ALTER TABLE albums ADD COLUMN auto_people TEXT NOT NULL DEFAULT '[]'")
+        # An album shared as entity data has a random record ID; keep it, and
+        # the shared record with fields other apps add.
+        for column in ('entity', 'record'):
+            if column in {row[1] for row in self.db.execute('PRAGMA table_info(albums)')}:
+                continue
+            with self.db:
+                self.db.execute('BEGIN IMMEDIATE')
+                if column not in {row[1] for row in self.db.execute('PRAGMA table_info(albums)')}:
+                    default = {'entity': "''", 'record': "'{}'"}[column]
+                    self.db.execute(f'ALTER TABLE albums ADD COLUMN {column} TEXT NOT NULL DEFAULT {default}')
         if 'birth' not in {row[1] for row in self.db.execute('PRAGMA table_info(people)')}:
             with self.db:
                 self.db.execute('BEGIN IMMEDIATE')
@@ -429,7 +444,7 @@ class Library:
         row = self.db.execute('SELECT * FROM albums WHERE name=? AND deleted=0', (name,)).fetchone()
         if not row:
             raise LibraryError('Album not found')
-        return dict(row)
+        return shown_album(row)
 
     def edit_album(self, name, action, value=None, search='', source=''):
         from . import native_edit
@@ -450,7 +465,7 @@ class Library:
             members.setdefault(row['value'], []).append(row['id'])
         result = []
         for row in self.db.execute('SELECT * FROM albums WHERE deleted=0'):
-            album = dict(row)
+            album = shown_album(row)
             from .places import is_place
             place = is_place(album['filter'])
             if mode == 'places' and not place:
@@ -573,7 +588,7 @@ class Library:
         totals = self.db.execute('SELECT COUNT(*),COALESCE(SUM(size),0),SUM(dirty) FROM photos').fetchone()
         album_pending = self.db.execute('SELECT COUNT(*) FROM albums WHERE dirty=1').fetchone()[0]
         result = dict(photos=photos, count=count, albums=albums, total=totals[0], bytes=totals[1], pending=(totals[2] or 0) + album_pending,
-                    status=self.setting('status', 'Local library · ThinkPad sync only'), importing=self.setting('import', {}))
+                    status=self.setting('status', 'Local library · private node sync only'), importing=self.setting('import', {}))
         if response.get('jump_offset') is not None and jump_day:
             result['jump_offset'] = response['jump_offset']
         if view in {'people','lane'}:
@@ -597,7 +612,7 @@ class Library:
         if album:
             row = self.db.execute('SELECT * FROM albums WHERE name=? AND deleted=0', (album,)).fetchone()
             if row:
-                result['album_detail'] = dict(row)
+                result['album_detail'] = shown_album(row)
                 from .places import is_place
                 result['album_detail']['place'] = int(is_place(row['filter']))
         return result

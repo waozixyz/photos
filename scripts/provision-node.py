@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
-"""Register Photos only on the ThinkPad's existing local Daochi node."""
+"""Register Photos only on an existing local-only Daochi node.
+
+By default this is the ThinkPad's node, run on the ThinkPad. The desktop
+Harmony node, which keeps the account's shared photos, is registered with
+--origin and --env pointing at its address and environment file.
+"""
+import argparse
 import json
 from pathlib import Path
 import shlex
 import urllib.request
 import urllib.error
 
-origin='http://127.0.0.1:18080'
+parser=argparse.ArgumentParser()
+parser.add_argument('--origin',default='http://127.0.0.1:18080')
+parser.add_argument('--env',type=Path,default=Path.home()/'daochi-local/daochi.env')
+args=parser.parse_args()
+origin=args.origin.rstrip('/')
 opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
 node=json.load(opener.open(origin+'/api/v1/node'))
 for peer in node.get('known_nodes',[]):
     policy=peer.get('sync') or {}
-    if policy.get('direction')!='pull' and (not policy.get('apps') or 'photos' in policy['apps'] or '*' in policy['apps']):
+    if policy.get('direction') not in ('pull','none') and (not policy.get('apps') or {'photos','entity','*'} & set(policy['apps'])):
         raise SystemExit('Outward Photos replication must be disabled before registration')
 try:
     app=json.load(opener.open(origin+'/api/v1/apps/photos'))
@@ -21,7 +31,7 @@ except urllib.error.HTTPError as error:
     if error.code!=404:
         raise
     values={}
-    for line in (Path.home()/'daochi-local/daochi.env').read_text().splitlines():
+    for line in args.env.read_text().splitlines():
         key,separator,value=line.partition('=')
         if separator and key.strip()=='DAOCHI_ADMIN_TOKEN':
             parts=shlex.split(value)

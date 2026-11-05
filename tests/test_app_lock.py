@@ -10,6 +10,7 @@ from photos import app_lock, guest, vault, access_sessions
 from photos.library import Library, LibraryError, digest_file
 from photos.worker import process
 from photos.sync import Client
+from owner_fixture import ACCOUNT
 
 
 class AppLockTest(unittest.TestCase):
@@ -20,7 +21,7 @@ class AppLockTest(unittest.TestCase):
         self.original = photo.read_bytes(); self.identity = digest_file(photo)
         self.library = Library(self.root/'library'); self.addCleanup(self.library.db.close)
         self.library.import_folders([self.source.parent]); self.config = dict(root=str(self.library.root))
-        Client(self.library, dict(node='http://127.0.0.1:1', node_id='42'*32))
+        Client(self.library, dict(node='http://127.0.0.1:1', node_id='42'*32), account=ACCOUNT)
         self.password = 'private-app-lock-password'
         self.hidden = vault.authenticate(self.library, self.password, setup=True)
         self.addCleanup(app_lock.revoke, self.library)

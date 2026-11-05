@@ -13,6 +13,7 @@ from photos import editing, live, motion
 from photos.export import Export
 from photos.library import Library, LibraryError, digest_file, packed
 from photos.sync import Client
+from owner_fixture import ACCOUNT
 from photos.worker import process
 
 
@@ -127,9 +128,9 @@ class MotionTest(unittest.TestCase):
             self.assertEqual(peer.query(search='type:live')['count'],1)
             self.assertEqual(peer.query()['total'],1)
             self.assertEqual(peer.original(peer.photo(self.photo_id)).read_bytes(),self.original)
-        sender = Client(self.library,dict(node='http://127.0.0.1:18080',node_id='a'*64))
-        receiver = Client(peer,dict(node='http://127.0.0.1:18080',node_id='a'*64),sender.identity_path)
-        record = sender.record(self.library.photo(self.photo_id),manifest={})
+        sender = Client(self.library,dict(node='http://127.0.0.1:18080',node_id='a'*64),account=ACCOUNT)
+        receiver = Client(peer,dict(node='http://127.0.0.1:18080',node_id='a'*64),sender.identity_path,account=ACCOUNT)
+        record = sender.record(self.library.photo(self.photo_id), dict(blobs=[]))
         self.assertNotIn('photosMotion',json.dumps(record))
         receiver.accept(record); peer.db.commit()
         self.assertEqual(motion.descriptor(peer.photo(self.photo_id)),motion.descriptor(self.library.photo(self.photo_id)))

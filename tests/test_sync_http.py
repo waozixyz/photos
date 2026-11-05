@@ -16,6 +16,7 @@ from urllib.error import HTTPError, URLError
 from photos import sync_http
 from photos.library import Library
 from photos.sync import Client
+from owner_fixture import ACCOUNT
 
 BLOB='/api/v1/blobs/photos/'+'b'*64
 
@@ -130,15 +131,18 @@ class SyncHTTPTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             library=Library(Path(folder)/'library')
             try:
-                client=Client(library,dict(node=self.node,node_id='a'*64))
+                client=Client(library,dict(node=self.node,node_id='a'*64),account=ACCOUNT)
                 identity=client.identity_path.read_bytes();device=client.device_path.read_bytes()
                 client.check_node()
                 self.server.content=json.dumps(dict(node_id='c'*64)).encode()
                 with self.assertRaisesRegex(ValueError,'identity mismatch'):client.check_node()
                 self.server.content=json.dumps(dict(node_id='a'*64,known_nodes=[dict(sync=dict(direction='push',apps=['photos']))])).encode()
                 with self.assertRaisesRegex(ValueError,'outward'):client.check_node()
-                client.token='expired';self.server.content=b'restored fixture'
-                def login():client.token='renewed'
+                # The account's shared photos are refused on such a node as well.
+                self.server.content=json.dumps(dict(node_id='a'*64,known_nodes=[dict(sync=dict(direction='bidirectional',apps=['entity']))])).encode()
+                with self.assertRaisesRegex(ValueError,'outward'):client.check_node()
+                client.tokens[ACCOUNT.account]='expired';self.server.content=b'restored fixture'
+                def login(account):client.tokens[account.account]='renewed'
                 with patch.object(client,'login',side_effect=login) as authenticate:
                     self.assertEqual(client.request(BLOB,binary=True),b'restored fixture')
                     self.assertEqual(authenticate.call_count,1)

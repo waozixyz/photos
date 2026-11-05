@@ -10,6 +10,7 @@ from PIL import Image
 from photos import collage, live
 from photos.library import Library, LibraryError, digest_file, packed
 from photos.sync import Client
+from owner_fixture import ACCOUNT
 from photos.worker import process
 
 
@@ -88,9 +89,9 @@ class CollageTest(unittest.TestCase):
         export = self.root / 'export'; self.library.export(saved, export)
         imported = Library(self.root / 'imported'); self.addCleanup(imported.db.close); imported.import_folders([export])
         self.assertEqual(json.loads(imported.photo(saved)['metadata'])['photosCollage'], spec)
-        sender = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a'*64))
-        receiver = Client(imported, dict(node='http://127.0.0.1:18080', node_id='a'*64), sender.identity_path)
-        record = sender.record(photo, manifest={})
+        sender = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a'*64), account=ACCOUNT)
+        receiver = Client(imported, dict(node='http://127.0.0.1:18080', node_id='a'*64), sender.identity_path, account=ACCOUNT)
+        record = sender.record(photo, dict(blobs=[]))
         self.assertNotIn('photosCollage', json.dumps(record))
         receiver.accept(record); imported.db.commit()
         self.assertEqual(json.loads(imported.photo(saved)['metadata'])['photosCollage'], spec)

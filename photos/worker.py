@@ -382,7 +382,10 @@ def library_request(library, request, config, guest_bypass=False):
         if config.get('node'):
             client = None
             for photo in result['photos']:
-                if not photo['thumbnail'] and json.loads(library.photo(photo['id'])['manifest']).get('preview'):
+                if photo['thumbnail']:
+                    continue
+                manifest = json.loads(library.photo(photo['id'])['manifest'])
+                if manifest.get('preview') or (manifest.get('entity') or {}).get('preview'):
                     try:
                         client = client or Client(library, config)
                         photo['thumbnail'] = client.materialize(photo['id'], preview_only=True)
@@ -403,7 +406,7 @@ def library_request(library, request, config, guest_bypass=False):
         library.set_setting('status', 'Import queued · originals stay intact')
     elif action == 'sync':
         library.set_setting('sync_requested', True)
-        library.set_setting('status', 'ThinkPad sync requested')
+        library.set_setting('status', 'Private node sync requested')
     elif action in {'export_start', 'export_continuous'}:
         from .export import destination
         target = destination(library, request.get('value', ''), config.get('sources', []))
@@ -496,19 +499,21 @@ def run_worker(library, config, once=False):
     last_import = 0
     last_export = 0
     export_retry = 0
-    client = Client(library, config) if config.get('node') else None
+    client = None
     while True:
         pending = 0
         try:
             sources = library.setting('sources', config.get('sources', []))
             if sources and (time.monotonic() - last_import > 300 or library.setting('import_requested', False)):
-                library.set_setting('status', 'Merging local folders · ThinkPad sync only')
+                library.set_setting('status', 'Merging local folders · private node sync only')
                 imported = library.import_folders(sources)
                 last_import = time.monotonic()
                 library.set_setting('import_requested', False)
                 if imported['errors']:
                     library.set_setting('status', f"Import paused: {imported['errors']} files will be retried; source files are safe")
             if config.get('node'):
+                # The owner's account comes from Inbe, which may sign in later.
+                client = client or Client(library, config)
                 pending = client.sync()
                 library.set_setting('sync_requested', False)
             else:
@@ -516,9 +521,9 @@ def run_worker(library, config, once=False):
         except Exception as error:
             # Never expose HTTP bodies, tokens, signatures or private keys.
             if isinstance(error, urllib.error.HTTPError):
-                message = f'ThinkPad sync paused (HTTP {error.code}); originals remain local'
+                message = f'Private node sync paused (HTTP {error.code}); originals remain local'
             elif isinstance(error, urllib.error.URLError):
-                message = 'ThinkPad offline · originals are safe here; sync retries automatically'
+                message = 'Private node offline · originals are safe here; sync retries automatically'
             else:
                 message = str(error)[:256]
             library.set_setting('status', message)

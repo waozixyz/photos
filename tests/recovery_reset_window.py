@@ -17,6 +17,7 @@ sys.path.insert(0, os.environ.get('PHOTOS_SERVICE_PACKAGE', str(ROOT)))
 from photos import app_lock, recovery, vault
 from photos.library import Library, digest_file, LibraryError
 from photos.sync import Client
+from owner_fixture import ACCOUNT
 from photos.service import Server
 import photos.service as service_module
 
@@ -45,7 +46,7 @@ with tempfile.TemporaryDirectory() as temporary:
         originals[path] = path.read_bytes()
     library = Library(folder/'library'); library.import_folders([source.parent])
     config = dict(root=str(library.root), node='http://127.0.0.1:1', node_id='42'*32)
-    client = Client(library, config)
+    client = Client(library, config, account=ACCOUNT)
     keys = client.identity_path.read_bytes(); device = client.device_path.read_bytes()
     backup = folder/'fixture.photos-recovery'; proof = 'synthetic recovery file password'
     recovery.save(library, config, {}, str(backup), proof)

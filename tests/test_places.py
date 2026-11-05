@@ -11,6 +11,7 @@ from photos.library import Library, LibraryError, digest_file
 from photos.worker import process
 from photos import places
 from photos.sync import Client
+from owner_fixture import ACCOUNT
 from photos.export import Export
 
 
@@ -124,9 +125,9 @@ class PlacesTest(unittest.TestCase):
 
     def test_encrypted_export_import_update_and_tombstone_round_trip(self):
         self.create()
-        sender = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a' * 64))
+        sender = Client(self.library, dict(node='http://127.0.0.1:18080', node_id='a' * 64), account=ACCOUNT)
         peer = Library(self.root / 'peer'); self.addCleanup(peer.db.close)
-        receiver = Client(peer, dict(node='http://127.0.0.1:18080', node_id='a' * 64), sender.identity_path)
+        receiver = Client(peer, dict(node='http://127.0.0.1:18080', node_id='a' * 64), sender.identity_path, account=ACCOUNT)
         record = sender.album_record(self.library.album_details('Home'))
         self.assertNotIn('near:', json.dumps(record)); self.assertNotIn('Home', json.dumps(record))
         receiver.accept_album(record); peer.db.commit()

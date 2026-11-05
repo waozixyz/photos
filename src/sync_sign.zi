@@ -113,12 +113,13 @@ Registration :: (public_key: []u8, private_key: []u8, seed: []u8, client_id: str
         cast(Auth.AuthResult)Auth.AuthResult.AUTH_OK
 }
 
-// X-Daochi-Tx for one request: method 1 GET, 2 POST, 3 PUT, 4 HEAD. The body
-// digest is the caller's exact request bytes, so large blobs are not copied.
+// X-Daochi-Tx for one request: method 1 GET, 2 POST, 3 PUT, 4 HEAD, 5 DELETE.
+// The body digest is the caller's exact request bytes, so large blobs are not
+// copied.
 Header :: (public_key: []u8, private_key: []u8, seed: []u8, method: u8, path: string, digest: []u8,
     expires: s64, output: []u8) -> bool {
     if output.count > 0 { output[0] = 0 }
-    if method < 1 || method > 4 || path.count < 1 || path.count > 1024 || seed.count != 32 ||
+    if method < 1 || method > 5 || path.count < 1 || path.count > 1024 || seed.count != 32 ||
         digest.count != 32 || expires < 1 { return false }
     account: Keys.AccountKeys
     defer { ClearAccount(*account) }
@@ -136,7 +137,7 @@ Header :: (public_key: []u8, private_key: []u8, seed: []u8, method: u8, path: st
     transaction.device_key_id = TextUntilNul(device_id[:]); transaction.tx_id = TextUntilNul(tx_text[:])
     transaction.nonce = TextUntilNul(nonce_text[:]); transaction.body_sha256_hex = TextUntilNul(hash[:])
     transaction.expires_at = expires
-    methods: [4]string = .{"GET", "POST", "PUT", "HEAD"}
+    methods: [5]string = .{"GET", "POST", "PUT", "HEAD", "DELETE"}
     client: Client.Client
     client.app_id = "photos"; client.identity.account_id = transaction.account_id
     client.identity.signing_context = cast(*void)*account; client.signer = Keys.SignAccountMessage

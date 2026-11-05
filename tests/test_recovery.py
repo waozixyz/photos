@@ -15,6 +15,7 @@ from PIL import Image
 from photos import recovery, vault, worker, account_sign, app_lock, guest, access_sessions
 from photos.library import Library, packed, LibraryError
 from photos.sync import Client
+from owner_fixture import ACCOUNT
 
 PASSWORD = 'private recovery fixture password'
 
@@ -25,7 +26,12 @@ class RecoveryTest(unittest.TestCase):
         self.folder = Path(self.directory.name)
         self.library = Library(self.folder/'library'); self.addCleanup(self.library.db.close)
         self.config = dict(root=str(self.library.root), node='http://127.0.0.1:18080', node_id='a'*64)
-        self.client = Client(self.library, self.config)
+        # A library synced before entity data keeps its earlier account's keys.
+        public, private = account_sign.generate_keypair()
+        (self.library.root/'private').mkdir(exist_ok=True, mode=0o700)
+        (self.library.root/'private/identity.json').write_text(json.dumps(dict(
+            public=public.hex(), private=private.hex(), content_key=os.urandom(32).hex())))
+        self.client = Client(self.library, self.config, account=ACCOUNT)
         self.before = self.client.identity_path.read_bytes()
         self.device = self.client.device_path.read_bytes()
         self.target = self.folder/'backup.photos-recovery'
@@ -58,13 +64,28 @@ class RecoveryTest(unittest.TestCase):
         self.assertNotIn(self.client.identity['content_key'].encode(), self.target.read_bytes())
         library, config = self.empty()
         recovery.restore(library, config, {}, str(self.target), PASSWORD)
-        peer = Client(library, config)
+        peer = Client(library, config, account=ACCOUNT)
         self.assertEqual(peer.identity, self.client.identity)
         self.assertEqual(peer.account, self.client.account)
         self.assertEqual(peer.key, self.client.key)
         self.assertNotEqual(peer.device_public, self.client.device_public)
         self.assertEqual(self.client.identity_path.read_bytes(), self.before)
         self.assertEqual(self.client.device_path.read_bytes(), self.device)
+
+    def test_library_without_its_own_account_recovers_its_content_key(self):
+        library = Library(self.folder/'new'); self.addCleanup(library.db.close)
+        config = {**self.config, 'root': str(library.root)}
+        client = Client(library, config, account=ACCOUNT)
+        self.assertEqual(set(client.identity), {'content_key'})
+        self.assertIsNone(client.legacy)
+        target = self.folder/'new.photos-recovery'
+        recovery.save(library, config, {}, str(target), PASSWORD)
+        self.assertNotIn(client.identity['content_key'].encode(), target.read_bytes())
+        restored, restored_config = self.empty()
+        recovery.restore(restored, restored_config, {}, str(target), PASSWORD)
+        self.assertEqual(Client(restored, restored_config, account=ACCOUNT).key, client.key)
+        with self.assertRaisesRegex(LibraryError, 'Invalid backup identity'):
+            recovery.identity(dict(content_key='00'*31))
 
     def test_wrong_password_altered_file_and_mismatched_pin_never_create_keys(self):
         self.save(); library, config = self.empty()

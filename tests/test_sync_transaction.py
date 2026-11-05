@@ -61,7 +61,7 @@ class SyncTransactionTest(unittest.TestCase):
 
         valid = frame()
         for value in (b"", valid[:11], valid[:-1], valid + b"extra", b"\0" + valid[1:],
-                      valid[:1] + b"\5" + valid[2:], frame(b"relative"),
+                      valid[:1] + b"\6" + valid[2:], frame(b"relative"),
                       frame(b"/api/v1/sync\nother"), frame(b"/api/v1/sync\0other")):
             with self.subTest(length=len(value)):
                 result = subprocess.run([str(sync_transaction.program())], input=value,
