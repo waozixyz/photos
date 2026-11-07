@@ -2,6 +2,14 @@
   "format": 1,
   "packages": [
     {
+      "commit": "6ea29a5db1d76fb9a4f6ed57981996625b531e8d",
+      "dependencies": {},
+      "id": "p15336e03f9039673",
+      "name": "CLIPTokenizer",
+      "ref": "master",
+      "url": "https://github.com/ziranlang/clip-tokenizer.git"
+    },
+    {
       "commit": "829a65d769d935c4852f8159e964312c0957260a",
       "dependencies": {},
       "id": "p16cd0434af3dff7b",
@@ -29,15 +37,6 @@
       "url": "https://github.com/jedisct1/libsodium.git"
     },
     {
-      "commit": "b29d4f43fd295377f745ee88fe6596358fdd12c0",
-      "dependencies": {"image_codec": "pf881ecd979d92258", "libwebp": "p3b3c785a0e17e605"},
-      "dependency_refs": {"image_codec": "a8767d78d0c08d5b1c1fc0bab6fcafdc7a6da930", "libwebp": "1844042d1ca751e62e61df7617dba19c98588339"},
-      "id": "p3506771824db7a7c",
-      "name": "webp",
-      "ref": "b29d4f43fd295377f745ee88fe6596358fdd12c0",
-      "url": "https://github.com/ziranlang/webp.git"
-    },
-    {
       "commit": "1844042d1ca751e62e61df7617dba19c98588339",
       "dependencies": {},
       "id": "p3b3c785a0e17e605",
@@ -45,15 +44,6 @@
       "ref": "1844042d1ca751e62e61df7617dba19c98588339",
       "source": true,
       "url": "https://github.com/webmproject/libwebp.git"
-    },
-    {
-      "commit": "1aadfad932c98c069a1204261b1856f81f3bc199",
-      "dependencies": {},
-      "id": "p57c0272208aae8db",
-      "name": "libavif",
-      "ref": "1aadfad932c98c069a1204261b1856f81f3bc199",
-      "source": true,
-      "url": "https://github.com/AOMediaCodec/libavif.git"
     },
     {
       "commit": "e1f480f382d9443c4412133b55948374c77a5c21",
@@ -83,15 +73,6 @@
       "url": "https://github.com/ziranlang/oqs.git"
     },
     {
-      "commit": "d649529af4effb79cf538d68a74841ce0f9c800b",
-      "dependencies": {"dav1d": "pb24767b9eb34d961", "image_codec": "pf881ecd979d92258", "libaom": "pfba2650e0a73c0ea", "libavif": "p57c0272208aae8db"},
-      "dependency_refs": {"dav1d": "54706fc6bc0cdecab7e9593974a4039cc038fca7", "image_codec": "a8767d78d0c08d5b1c1fc0bab6fcafdc7a6da930", "libaom": "d772e334cc724105040382a977ebb10dfd393293", "libavif": "1aadfad932c98c069a1204261b1856f81f3bc199"},
-      "id": "pa02edb78c0cdc1d4",
-      "name": "avif",
-      "ref": "d649529af4effb79cf538d68a74841ce0f9c800b",
-      "url": "https://github.com/ziranlang/avif.git"
-    },
-    {
       "commit": "2e1dc925e0ad162ffff61749174c9c5c6f7265cd",
       "dependencies": {"sqlite3": "p193f493072e2b40b"},
       "dependency_refs": {"sqlite3": "version-3.53.4"},
@@ -101,27 +82,9 @@
       "url": "https://github.com/ziranlang/sqlite.git"
     },
     {
-      "commit": "e3536e6d056961d2ba7fa5f18af81f75c80e8f62",
-      "dependencies": {"kryon": "pc1804bf62ee8780e"},
-      "dependency_refs": {"kryon": "1cd873fda5d12cd4dd562956da94cee33c3e364c"},
-      "id": "pa3347b028712cc32",
-      "name": "Kss",
-      "ref": "master",
-      "url": "https://github.com/kryonlabs/kss.git"
-    },
-    {
-      "commit": "54706fc6bc0cdecab7e9593974a4039cc038fca7",
-      "dependencies": {},
-      "id": "pb24767b9eb34d961",
-      "name": "dav1d",
-      "ref": "54706fc6bc0cdecab7e9593974a4039cc038fca7",
-      "source": true,
-      "url": "https://github.com/videolan/dav1d.git"
-    },
-    {
       "commit": "20b38574f23e329f889c581d37fe84e34f55b2f0",
-      "dependencies": {"avif": "pa02edb78c0cdc1d4", "image_codec": "pf881ecd979d92258", "libaom": "pfba2650e0a73c0ea", "libavif": "p57c0272208aae8db", "libwebp": "p3b3c785a0e17e605", "raylib": "pcc7aa76725f2fb2f", "sdl3": "p16cd0434af3dff7b", "webp": "p3506771824db7a7c"},
-      "dependency_refs": {"avif": "d649529af4effb79cf538d68a74841ce0f9c800b", "image_codec": "a8767d78d0c08d5b1c1fc0bab6fcafdc7a6da930", "libaom": "d772e334cc724105040382a977ebb10dfd393293", "libavif": "1aadfad932c98c069a1204261b1856f81f3bc199", "libwebp": "1844042d1ca751e62e61df7617dba19c98588339", "raylib": "fafa2cea97d0cb379d832086ba45a989fa6f9c8e", "sdl3": "829a65d769d935c4852f8159e964312c0957260a", "webp": "b29d4f43fd295377f745ee88fe6596358fdd12c0"},
+      "dependencies": {"libwebp": "p3b3c785a0e17e605", "raylib": "pcc7aa76725f2fb2f", "sdl3": "p16cd0434af3dff7b"},
+      "dependency_refs": {"libwebp": "1844042d1ca751e62e61df7617dba19c98588339", "raylib": "fafa2cea97d0cb379d832086ba45a989fa6f9c8e", "sdl3": "829a65d769d935c4852f8159e964312c0957260a"},
       "id": "pc1804bf62ee8780e",
       "name": "kryon",
       "ref": "master",
@@ -151,36 +114,11 @@
       "name": "mingcute",
       "ref": "master",
       "url": "https://github.com/kryonlabs/mingcute.git"
-    },
-    {
-      "development": "unborn:2cc9a3b526420df1eb4f20f944bec2e51f120bd7308bf887840750aa9bd585a1",
-      "dependencies": {},
-      "id": "pf46ec780779387e0",
-      "name": "CLIPTokenizer",
-      "ref": "master",
-      "url": "https://github.com/ziranlang/clip-tokenizer.git"
-    },
-    {
-      "commit": "a8767d78d0c08d5b1c1fc0bab6fcafdc7a6da930",
-      "dependencies": {},
-      "id": "pf881ecd979d92258",
-      "name": "image-codec",
-      "ref": "a8767d78d0c08d5b1c1fc0bab6fcafdc7a6da930",
-      "url": "https://github.com/ziranlang/image-codec.git"
-    },
-    {
-      "commit": "d772e334cc724105040382a977ebb10dfd393293",
-      "dependencies": {},
-      "id": "pfba2650e0a73c0ea",
-      "name": "libaom",
-      "ref": "d772e334cc724105040382a977ebb10dfd393293",
-      "source": true,
-      "url": "https://aomedia.googlesource.com/aom"
     }
   ],
   "root": {
-    "dependencies": {"clip_tokenizer": "pf46ec780779387e0", "crypto": "pc23fbf455e97614d", "daochi_client": "p6af0b5bd9fd0cd31", "kryon": "pc1804bf62ee8780e", "kss": "pa3347b028712cc32", "libsodium": "p19748d234a176170", "mingcute": "pe1027b9d16704793", "oqs": "p7098ac9cd92f7e5f", "sqlite": "pa1fc237d0b78c6ed"},
-    "dependency_refs": {"clip_tokenizer": "master", "crypto": "master", "daochi_client": "master", "kryon": "master", "kss": "master", "libsodium": "stable", "mingcute": "master", "oqs": "master", "sqlite": "master"},
+    "dependencies": {"clip_tokenizer": "p15336e03f9039673", "crypto": "pc23fbf455e97614d", "daochi_client": "p6af0b5bd9fd0cd31", "kryon": "pc1804bf62ee8780e", "libsodium": "p19748d234a176170", "mingcute": "pe1027b9d16704793", "oqs": "p7098ac9cd92f7e5f", "sqlite": "pa1fc237d0b78c6ed"},
+    "dependency_refs": {"clip_tokenizer": "master", "crypto": "master", "daochi_client": "master", "kryon": "master", "libsodium": "stable", "mingcute": "master", "oqs": "master", "sqlite": "master"},
     "name": "photos"
   },
   "toolchain": {

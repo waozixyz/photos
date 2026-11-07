@@ -42,10 +42,6 @@ categories = "Graphics;Photography;"
 git = "https://github.com/kryonlabs/kryon.git"
 ref = "master"
 
-[dependencies.kss]
-git = "https://github.com/kryonlabs/kss.git"
-ref = "master"
-
 [dependencies.sqlite]
 git = "https://github.com/ziranlang/sqlite.git"
 ref = "master"
