@@ -1,10 +1,10 @@
 # Photos
 
-The canonical checkout is `waozixyz/photos` under the Projects directory.
+A standalone photo library. Its `.zx` module can also run inside other applications.
+The portable package lives in `portable/`.
 
-A standalone native photo library that also opens inside Harmony. Photos merges
-local folders and Ente exports without changing their files. Identical originals
-are stored once while every album membership is retained. Ente Desktop
+Photos merges local folders and Ente exports without changing their files.
+Identical originals are stored once while every album membership is retained. Ente Desktop
 `metadata/`, CLI `.meta/`, and adjacent Google Takeout JSON sidecars are supported.
 Corrected dates, captions, original metadata and locations survive import.
 Original copying runs in a headless Ziran importer: it streams and verifies the

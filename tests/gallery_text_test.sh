@@ -5,8 +5,8 @@ unset DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS SESSION_MANAGE
 ziran=${ZIRAN:-ziran}
 work=build/gallery-text-test
 mkdir -p "$work"
-flags=
-if test ! -f ziran.local.toml; then flags=--locked; fi
+flags=${PACKAGE_FLAGS-}
+if test -z "${PACKAGE_FLAGS+x}" && test ! -f ziran.local.toml; then flags=--locked; fi
 "$ziran" ir --project $flags --root tests -o "$work/ir" tests/gallery_text_probe.zi
 for form in source saved; do
     input=tests/gallery_text_probe.zi

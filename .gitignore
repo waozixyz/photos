@@ -1,6 +1,8 @@
 /build/
 /backup/
 /ziran.local.toml
+/portable/ziran.local.toml
+/portable/build/
 __pycache__/
 *.pyc
 /droid/.gradle/

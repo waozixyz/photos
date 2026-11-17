@@ -1,0 +1,16 @@
+{
+  "host_api": 43,
+  "oldest_host_api": 43,
+  "module_api": 2,
+  "package_format": "zx",
+  "zx_revision": 28,
+  "node_apps": {
+    "photos": {
+      "id": "inbe.photos",
+      "title": "Photos",
+      "version": "1.0.6",
+      "sequence": 7,
+      "host_api": 43
+    }
+  }
+}

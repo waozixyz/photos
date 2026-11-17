@@ -1,0 +1,80 @@
+name: Photos node release
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha256:
+        description: SHA-256 of the locally verified Photos module
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: photos-node-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: waozixyz/photos
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: waozixyz/photos
+      - name: Read the locked compiler
+        id: dependencies
+        env:
+          EXPECTED_SHA256: ${{ inputs.sha256 }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          if not re.fullmatch('[0-9a-f]{64}', os.environ['EXPECTED_SHA256']):
+              raise SystemExit('Give the exact locally verified Photos SHA-256')
+          lock = json.load(open('portable/ziran.lock'))
+          commit = lock['toolchain']['commit']
+          if not re.fullmatch('[0-9a-f]{40}', commit):
+              raise SystemExit('Photos must lock a pushed compiler commit')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('toolchain=' + commit + '\n')
+          PY
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ziranlang/ziran
+          ref: ${{ steps.dependencies.outputs.toolchain }}
+          path: ziranlang/ziran
+      - name: Build the locked compiler
+        run: |
+          sh ../../ziranlang/ziran/scripts/ci_packages.sh build-essential python3-cryptography
+          make -j2 -C ../../ziranlang/ziran
+          echo "$GITHUB_WORKSPACE/ziranlang/ziran/build/bin" >> "$GITHUB_PATH"
+      - name: Build and test the portable package
+        env:
+          EXPECTED_SHA256: ${{ inputs.sha256 }}
+        run: |
+          set -eu
+          sh update_version.sh --portable
+          git diff --exit-code -- portable/versions.json
+          (cd portable && ziran fetch --locked)
+          make -j1 node-photos-test
+          echo "$EXPECTED_SHA256  build/node-apps/photos.zx" | sha256sum --check --strict
+      - name: Publish the tested module
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          version=$(python3 -c 'import json; print(json.load(open("portable/versions.json"))["node_apps"]["photos"]["version"])')
+          tag="node-photos-$version"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            mkdir -p build/prior-node-release
+            gh release download "$tag" --pattern photos.zx --dir build/prior-node-release
+            cmp build/prior-node-release/photos.zx build/node-apps/photos.zx
+          else
+            gh release create "$tag" build/node-apps/photos.zx \
+              --target "$GITHUB_SHA" --title "Photos $version" \
+              --notes 'Download Photos on the current Inner Breeze, with gallery and compression tools.'
+          fi

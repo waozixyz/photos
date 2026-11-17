@@ -1,0 +1,235 @@
+// Synthetic library only. Exercise the delivered ZX through the native host.
+#import "std/bundle_host"
+#import "std/byte_text_linux"
+#import "apps/node_types"
+#import "apps/node_codec"
+#import "kryon/hosted_values"
+#import "kryon/widget_host"
+#import "kryon/session"
+#import "kryon/geometry"
+#import "kryon/tree"
+#import "kryon/tree_draw"
+#import "kryon/tree_input"
+#import "kryon/input_protocol"
+Raster :: #import "component_raster_host";
+
+message: AppMessage;
+response: AppMessage;
+frame: AppUiFrame;
+media_status: MediaStatus;
+message_codec: WidgetAppMessageCodec;
+response_codec: WidgetAppMessageCodec;
+frame_codec: WidgetAppUiFrameCodec;
+item_codec: WidgetMediaEntryCodec;
+status_codec: WidgetMediaStatusCodec;
+written: bool;
+host_failed: bool;
+query_trash: bool;
+query_count: s32;
+preview_count: s32;
+original_count: s32;
+pick_count: s32;
+update_count: s32;
+photo_trashed: bool;
+compression_supported: bool;
+compression_opens: s32;
+
+AllowedAsset :: (path: string) -> bool { return path == "" }
+
+Item :: () -> MediaEntry {
+    return MediaEntry.{.hash = "synthetic-photo", .name = "Synthetic photo",
+        .day = "2026-11-10", .taken = "2026-11-10T10:00:00Z",
+        .format = "png", .size = 128, .trashed = photo_trashed}
+}
+
+Host :: (context: *void, module: *u8, function: *u8,
+    arguments: *HostValue, count: s32, result: *HostValue) -> s32 {
+    name := TextFromCString(function)
+    if WidgetHostSupports(TextFromCString(module), name) {
+        called := WidgetHostCall(context, module, function, arguments, count, result)
+        if called == 0 { print("widget host rejected %:% with % arguments\n", TextFromCString(module), name, count) }
+        return called
+    }
+    if name == "ReadAppHost" && count == 0 {
+        result.* = WidgetEncodeAppMessage(message, *message_codec); return 1
+    }
+    if name == "WriteAppHost" && count == 1 && WidgetValidAppMessage(arguments[0]) {
+        response = WidgetDecodeAppMessage(arguments[0], *response_codec)
+        written = true; return 1
+    }
+    if name == "ReadAppUiHost" && count == 0 {
+        result.* = WidgetEncodeAppUiFrame(frame, *frame_codec); return 1
+    }
+    if name == "AppLocaleHost" && count == 1 {
+        result.* = arguments[0]; return 1
+    }
+    if name == "AppSupportsHost" && count == 1 {
+        if HostValueText(arguments[0]) != "media.compression.open" { host_failed = true; return 0 }
+        result.* = HostScalar("bool", ifx compression_supported then 1 else 0)
+        return 1
+    }
+    if name == "AppServiceHost" && count == 2 {
+        if !compression_supported || HostValueText(arguments[0]) != "media.compression.open" ||
+        HostValueText(arguments[1]) != "" { host_failed = true; return 0 }
+        compression_opens += 1
+        result.* = HostValue.{.kind = cast(s32)HostValueKind.HostString,
+            .type_name = HostTextData("string"), .data = HostTextData(""), .length = 0}
+        return 1
+    }
+    if name == "MediaQueryHost" && count == 2 {
+        query_count += 1
+        query_trash = arguments[1].integer != 0
+        result.* = HostScalar("s32", ifx query_trash == photo_trashed then 1 else 0)
+        return 1
+    }
+    if name == "MediaItemHost" && count == 1 && arguments[0].integer == 0 {
+        result.* = WidgetEncodeMediaEntry(Item(), *item_codec); return 1
+    }
+    if name == "MediaStatusHost" && count == 0 {
+        result.* = WidgetEncodeMediaStatus(media_status, *status_codec); return 1
+    }
+    if name == "MediaAssetHost" && count == 2 {
+        if HostValueText(arguments[0]) != "synthetic-photo" { host_failed = true; return 0 }
+        if arguments[1].integer != 0 { original_count += 1 } else { preview_count += 1 }
+        result.* = HostValue.{.kind = cast(s32)HostValueKind.HostString,
+            .type_name = HostTextData("string"), .data = HostTextData(""), .length = 0}
+        return 1
+    }
+    if name == "MediaPickHost" && count == 0 {
+        pick_count += 1; result.* = HostScalar("bool", 1); return 1
+    }
+    if name == "MediaUpdateHost" && count == 3 {
+        if HostValueText(arguments[0]) != "synthetic-photo" ||
+        HostValueText(arguments[1]) != "trashed" { host_failed = true; return 0 }
+        update_count += 1
+        photo_trashed = HostValueText(arguments[2]) == "1"
+        media_status.revision += 1
+        result.* = HostScalar("bool", 1); return 1
+    }
+    print("unsupported host call: %:%\n", TextFromCString(module), name)
+    host_failed = true
+    return 0
+}
+
+Run :: (instance: *void, action: s32, expected: s64) -> bool {
+    message.action = action
+    written = false
+    result: s64;
+    has_result: s32;
+    code := RunBundleInstance(instance, *result, *has_result)
+    if code != 1 || has_result == 0 || result != expected || host_failed {
+        print("run action %: code %, result %, present %\n", action, code, result, has_result)
+        return false
+    }
+    if action != MODULE_IDENTIFY && message.abi == MODULE_ABI {
+        if !written || response.account != message.account || response.locale != message.locale ||
+        response.name != message.name || response.signed_in != message.signed_in ||
+        response.shared_revision != message.shared_revision { return false }
+    }
+    return true
+}
+
+Render :: (instance: *void, pointer: PointerFrame = PointerFrame.{}) -> bool {
+    unused TreePointerUpdate(frame.session, pointer)
+    unused BeginFrame(frame.session, cast(u64)8, Rectangle.{0.0, 0.0, 640.0, 480.0})
+    WidgetHostBegin(frame.session, AllowedAsset)
+    ok := Run(instance, APP_FRAME, 0)
+    WidgetHostEnd()
+    unused EndFrame(frame.session)
+    frame.now += 0.1
+    return ok && response.succeeded && TreeCount(frame.session) > 0
+}
+
+NodeBounds :: (key: u64) -> Rectangle {
+    for index: 0..TreeCount(frame.session)-1 {
+        node := TreeNodeAt(frame.session, index)
+        if node.key == key { return node.bounds }
+    }
+    return Rectangle.{}
+}
+
+Click :: (instance: *void, key: u64) -> bool {
+    bounds := NodeBounds(key)
+    if bounds.width <= 0.0 || bounds.height <= 0.0 {
+        print("missing control %\n", key); return false
+    }
+    x := bounds.x + bounds.width / 2.0
+    y := bounds.y + bounds.height / 2.0
+    return Render(instance, PointerFrame.{x, y, true, true, false}) &&
+    Render(instance, PointerFrame.{x, y, false, false, true}) && Render(instance)
+}
+
+HasAsset :: (bundle: *void, path: string) -> bool {
+    count := BundleAssets(bundle)
+    if count == 0 { return false }
+    for index: 0..cast(s32)count-1 {
+        if TextFromCString(BundleAssetPath(bundle, cast(u64)index)) == path {
+            return BundleAssetLength(bundle, cast(u64)index) > 0
+        }
+    }
+    return false
+}
+
+main :: () -> s32 {
+    if !Raster.ComponentRasterBegin() { return 19 }
+    defer { Raster.ComponentRasterClose() }
+    bundle := OpenBundle(HostTextData("build/node-apps/photos.zx"))
+    if bundle == null { print("cannot open Photos ZX\n"); return 1 }
+    defer { CloseBundle(bundle) }
+    if !HasAsset(bundle, "assets/photos/achievements.json") ||
+    !HasAsset(bundle, "assets/photos/achievement-locales/en.json") ||
+    !HasAsset(bundle, "assets/photos/icons/photos.originals.1.shape") { return 23 }
+    count := BundleCapabilities(bundle)
+    if count == 0 || count > 128 { return 2 }
+    bindings: [128]HostBinding;
+    for index: 0..cast(s32)count-1 {
+        bindings[index] = HostBinding.{BundleCapabilityModuleName(bundle, cast(u64)index),
+            BundleCapabilityFunctionName(bundle, cast(u64)index), Host, null}
+    }
+    instance := InstantiateBundle(bundle, *bindings[0], count)
+    if instance == null { print("cannot instantiate Photos ZX\n"); return 3 }
+    defer { CloseBundleInstance(instance) }
+    MatchBundleFieldsByName(instance, true)
+    message = AppMessage.{.abi = MODULE_ABI, .name = "Photos", .locale = "en",
+        .account = "synthetic-account", .signed_in = true, .shared_revision = 17}
+    if !Run(instance, MODULE_IDENTIFY, MODULE_NODE_APP) || written { return 4 }
+    message.abi = MODULE_ABI + 1
+    if !Run(instance, APP_ROUTE, -1) || written { return 5 }
+    message.abi = MODULE_ABI
+    if !Run(instance, APP_ROUTE, 0) || !response.succeeded { return 6 }
+    if !Run(instance, 999, 0) || response.succeeded { return 7 }
+    session := SessionOpen()
+    if !SessionValid(session) { return 8 }
+    defer { unused SessionClose(session) }
+    frame = AppUiFrame.{.session = session, .width = 640, .height = 480,
+        .scale = 1.0, .font = 16, .now = 1.0}
+    media_status = MediaStatus.{.revision = 1, .today = "2026-11-10"}
+    if !Render(instance) || query_count == 0 || preview_count == 0 { return 9 }
+    if NodeBounds(cast(u64)7004).width > 0.0 || compression_opens != 0 { return 24 }
+    compression_supported = true
+    if !Render(instance) || !Click(instance, cast(u64)7004) || compression_opens != 1 { return 25 }
+    tools := NodeBounds(cast(u64)7004)
+    add := NodeBounds(cast(u64)7003)
+    if tools.x + tools.width != 628.0 || add.x + add.width >= tools.x { return 26 }
+    compression_supported = false
+    if !Render(instance) || NodeBounds(cast(u64)7004).width > 0.0 || compression_opens != 1 { return 27 }
+    if !Click(instance, cast(u64)500000) || original_count == 0 { return 10 }
+    if !Run(instance, APP_BACK, 0) || !response.succeeded || !Render(instance) { return 11 }
+    if !Run(instance, APP_BACK, 0) || response.succeeded { return 12 }
+    if !Click(instance, cast(u64)7003) || pick_count != 1 { return 13 }
+    if !Click(instance, cast(u64)7002) || !query_trash { return 14 }
+    if !Click(instance, cast(u64)7001) || query_trash { return 15 }
+    if !Click(instance, cast(u64)500000) || !Click(instance, cast(u64)7112) ||
+    !photo_trashed || update_count != 1 { return 20 }
+    if !Click(instance, cast(u64)7002) || !Click(instance, cast(u64)500000) ||
+    !Click(instance, cast(u64)7112) || photo_trashed || update_count != 2 { return 21 }
+    if !Click(instance, cast(u64)7001) { return 22 }
+    // A new host library revision invalidates the cached day layout.
+    photo_trashed = true
+    media_status.revision += 1
+    if !Render(instance) || NodeBounds(cast(u64)500000).width > 0.0 { return 16 }
+    if !Click(instance, cast(u64)7002) || NodeBounds(cast(u64)500000).width <= 0.0 { return 17 }
+    if host_failed || update_count != 2 || Raster.ComponentRasterCalls() == 0 { return 18 }
+    print("Photos native ZX: identity, ABI rejection, account preservation, gallery, viewer, back, picker, trash, revision refresh and guarded compression service passed\n")
+    return 0
+}

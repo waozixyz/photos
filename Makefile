@@ -1,4 +1,10 @@
 .DEFAULT_GOAL := build
+.PHONY: node-photos node-photos-test
+node-photos:
+	env ZIRAN='$(ZIRAN)' sh scripts/build-node-photos.sh
+node-photos-test: node-photos
+	env ZIRAN='$(ZIRAN)' sh scripts/test-node-photos.sh
+test: node-photos-test
 .PHONY: refresh-window-test refresh-portable-test
 refresh-window-test: build
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER YUE_DESKTOP_RECOVERY=0 xvfb-run -a -s '-screen 0 1400x1000x24' env PHOTOS_PRIVATE_XVFB=1 $(PYTHON) tests/refresh_window.py
@@ -387,7 +393,7 @@ historic-portable-test: bundle
 
 .PHONY: gallery-text-test
 gallery-text-test:
-	ZIRAN=$(ZIRAN) sh tests/gallery_text_test.sh
+	ZIRAN='$(ZIRAN)' PACKAGE_FLAGS='$(PACKAGE_FLAGS)' sh tests/gallery_text_test.sh
 test: gallery-text-test
 
 .PHONY: heartbeat-window-test heartbeat-portable-test
