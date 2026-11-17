@@ -59,7 +59,7 @@ def stop(process):
 
 
 def restore_staged_originals(device, database, identity, seeds, expected_count, multi_chunk):
-    """Check every granted original using the released bytes and Daochi adapter."""
+    """Check every granted original using the released bytes and Mesh adapter."""
     from photos.library import packed
     from photos.sync_crypto import decrypt
 
@@ -110,16 +110,16 @@ def restore_staged_originals(device, database, identity, seeds, expected_count, 
 
 
 def start_node(folder, seed, binary):
-    """A disposable Daochi node with the fixture's synthetic node identity."""
+    """A disposable Mesh node with the fixture's synthetic node identity."""
     folder.mkdir(mode=0o700)
     node_port = port()
     origin = f"http://127.0.0.1:{node_port}"
-    env = {k: v for k, v in os.environ.items() if not k.startswith("DAOCHI_") and k not in
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("MESH_", "DAOCHI_")) and k not in
            {"DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "SESSION_MANAGER"}}
-    env.update(DAOCHI_ADDR=f"127.0.0.1:{node_port}", DAOCHI_BASE_URL=origin, DAOCHI_DB=str(folder / "node.sqlite"),
-               DAOCHI_ADMIN_TOKEN="fixture-admin", DAOCHI_KNOWN_NODES="", DAOCHI_LAN_DISCOVERY="0",
-               DAOCHI_NODE_SYNC_INTERVAL_SECONDS="0", DAOCHI_TOKEN_SECRET_HEX="42" * 32,
-               DAOCHI_NODE_IDENTITY_PRIVATE_KEY_HEX=seed.hex())
+    env.update(MESH_ADDR=f"127.0.0.1:{node_port}", MESH_BASE_URL=origin, MESH_DB=str(folder / "node.sqlite"),
+               MESH_ADMIN_TOKEN="fixture-admin", MESH_KNOWN_NODES="", MESH_LAN_DISCOVERY="0",
+               MESH_NODE_SYNC_INTERVAL_SECONDS="0", MESH_TOKEN_SECRET_HEX="42" * 32,
+               MESH_NODE_IDENTITY_PRIVATE_KEY_HEX=seed.hex())
     log = (folder / "node.log").open("w")
     process = subprocess.Popen([str(Path(binary).resolve())], env=env, stdout=log, stderr=log)
     log.close()
@@ -131,11 +131,11 @@ def start_node(folder, seed, binary):
             break
         except Exception:
             if process.poll() is not None:
-                raise RuntimeError("Disposable Daochi node stopped")
+                raise RuntimeError("Disposable Mesh node stopped")
             time.sleep(.05)
     else:
         stop(process)
-        raise RuntimeError("Disposable Daochi node did not start")
+        raise RuntimeError("Disposable Mesh node did not start")
     registration = json.dumps(dict(app_id="photos", display_name="Photos", status="active",
                                    collections=[dict(collection_prefix="private.photos.v1.records.*", visibility="private")]))
     opener.open(urllib.request.Request(origin + "/api/v1/apps", method="POST", data=registration.encode(),
@@ -432,9 +432,9 @@ def main():
                 if not lock_only:
                     # Forward only this guest's loopback port to a disposable
                     # node pinned by the recovered identity; nothing else.
-                    binary = os.environ.get("PHOTOS_DAOCHI") or shutil.which("daochi")
+                    binary = os.environ.get("PHOTOS_MESH") or shutil.which("mesh")
                     if not binary or not Path(binary).is_file():
-                        raise RuntimeError("Set PHOTOS_DAOCHI for the pinned upload check")
+                        raise RuntimeError("Set PHOTOS_MESH for the pinned upload check")
                     node_process, origin, node_port, node = start_node(root / "node",
                         (ROOT / "build/android/node-seed.bin").read_bytes(), binary)
                     try:

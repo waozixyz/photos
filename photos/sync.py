@@ -1,9 +1,9 @@
-"""Encrypted Daochi v6 sync, exclusively to pinned private nodes on loopback.
+"""Encrypted Mesh v6 sync, exclusively to pinned private nodes on loopback.
 
-Photos and albums are the account's shared entity data (Daochi
+Photos and albums are the account's shared entity data (Mesh
 docs/entity-data.md): one record and one set of encrypted chunks per photo,
 which Diary and every other app of the account show too. The account is the
-owner's one Daochi account, the one Inbe signed in with. Photos keeps only
+owner's one Mesh account, the one Inbe signed in with. Photos keeps only
 what it derives itself (file metadata, album bookkeeping, search and face
 indexes) in its own private annotations, sealed with the account's photo
 record key and bound to Photos' collection, so every Photos install of the
@@ -53,7 +53,7 @@ LOCAL_EDITS = ('auto_albums', 'removed_albums', 'live_separated')
 PERSON = ('name', 'trashed', 'favorite', 'hidden', 'archived', 'caption', 'tags', 'edits')
 CHUNK = entity_crypto.CHUNK
 RECORD_PAGE = 200
-# Daochi takes at most this many records in one signed sync request.
+# Mesh takes at most this many records in one signed sync request.
 UPLOAD_RECORDS = 200
 HASH = re.compile(r'^[0-9a-f]{64}$')
 ALBUM_ID = re.compile(r'^[0-9a-f]{32}$')
@@ -141,7 +141,7 @@ class Client:
         self.node, self.node_id = pinned(config, 'node', 'node_id')
         self.legacy_node, self.legacy_node_id = (pinned(config, 'legacy_node', 'legacy_node_id')
                                                  if config.get('legacy_node') else (self.node, self.node_id))
-        # Photos never owns an account: the owner's one Daochi account holds
+        # Photos never owns an account: the owner's one Mesh account holds
         # the shared photos. The content key opens copies made before that.
         self.owner = account or owner_account.load(config.get('account_database'))
         self.account = self.owner.account
@@ -740,7 +740,7 @@ class Client:
             changes = result.get('changes') if isinstance(result, dict) else None
             incoming = changes.get('encrypted_records') if isinstance(changes, dict) else None
             if isinstance(changes, dict) and incoming is None:
-                incoming = []  # Daochi represents an empty record list as null.
+                incoming = []  # Mesh represents an empty record list as null.
             if not isinstance(incoming, list) or len(incoming) > RECORD_PAGE:
                 raise ValueError('Node returned an invalid metadata page')
             decoded = [self.open_record(record) for record in incoming]

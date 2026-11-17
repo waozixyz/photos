@@ -1,7 +1,7 @@
 // Synthetic backup fixtures. Production owns every crypto/staging operation.
 Stage :: #import "backup_staging";
 Wire :: #import "sync_crypto";
-Native :: #import "daochi_client/crypto_native";
+Native :: #import "mesh_client/crypto_native";
 Files :: #import "std/file";
 Tree :: #import "std/file_tree_linux";
 JSON :: #import "std/json_document";

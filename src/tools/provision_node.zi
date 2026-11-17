@@ -1,4 +1,4 @@
-// Register Photos on an existing local-only Daochi node. Operator credentials
+// Register Photos on an existing local-only Mesh node. Operator credentials
 // are read only after a missing registration; no shell or remote transport.
 #scope_module
 Transport :: #import "sync_http";
@@ -93,26 +93,41 @@ Credentials :: (environment: string,port: u16,out: *Vec(u8)) -> string {
     file: Vec(u8); parsed: Vec(u8)
     defer { Wire.ClearOutput(*file); Wire.ClearOutput(*parsed) }
     if environment=="" || !ReadPrivate(environment,*file,65536) { return "Local node operator authorization is unavailable" }
-    text:=View(*file); at: s64
-    while at<text.count {
-        end:=at; while end<text.count && text[end]!=10 { end+=1 }
-        line:=Trim(text[at:end]); at=end+1
-        separator: s64=-1
-        for index: 0..line.count-1 { if line[index]==61 { separator=index; break } }
-        if separator<0 { continue }
-        name:=Trim(line[:separator])
-        if name!="DAOCHI_ADMIN_TOKEN" && name!="DAOCHI_BASE_URL" && name!="DAOCHI_ADDR" { continue }
-        if !Word(line[separator+1:],*parsed) { return "Malformed local node operator authorization" }
-        if name=="DAOCHI_ADMIN_TOKEN" {
-            if !Wire.PrepareOutput(out,parsed.count) { return "Could not read local node operator authorization" }
-            target:=Wire.OutputBytes(out); source:=Wire.OutputBytes(*parsed)
-            for index: 0..source.count-1 { target[index]=source[index] }
-        } else if parsed.count>0 {
-            declared: Vec(u8)
-            if name=="DAOCHI_ADDR" { BuilderPrint(*declared,"http://%",View(*parsed)) }
-            else { BuilderPrint(*declared,"%",View(*parsed)) }
-            declaredPort,error:=LoopbackPort(View(*declared))
-            if error!="" || declaredPort!=port { return "Node environment does not match the selected loopback origin" }
+    text:=View(*file)
+    // Existing local environment files retain their names and legacy keys.
+    // A present Mesh key wins for that setting, including an empty value.
+    meshToken: bool; meshBase: bool; meshAddress: bool
+    for pass: 0..1 {
+        at: s64
+        while at<text.count {
+            end:=at; while end<text.count && text[end]!=10 { end+=1 }
+            line:=Trim(text[at:end]); at=end+1
+            separator: s64=-1
+            for index: 0..line.count-1 { if line[index]==61 { separator=index; break } }
+            if separator<0 { continue }
+            name:=Trim(line[:separator])
+            if pass==0 {
+                if name=="MESH_ADMIN_TOKEN" { meshToken=true }
+                if name=="MESH_BASE_URL" { meshBase=true }
+                if name=="MESH_ADDR" { meshAddress=true }
+                continue
+            }
+            if name=="DAOCHI_ADMIN_TOKEN" { if meshToken { continue }; name="MESH_ADMIN_TOKEN" }
+            if name=="DAOCHI_BASE_URL" { if meshBase { continue }; name="MESH_BASE_URL" }
+            if name=="DAOCHI_ADDR" { if meshAddress { continue }; name="MESH_ADDR" }
+            if name!="MESH_ADMIN_TOKEN" && name!="MESH_BASE_URL" && name!="MESH_ADDR" { continue }
+            if !Word(line[separator+1:],*parsed) { return "Malformed local node operator authorization" }
+            if name=="MESH_ADMIN_TOKEN" {
+                if !Wire.PrepareOutput(out,parsed.count) { return "Could not read local node operator authorization" }
+                target:=Wire.OutputBytes(out); source:=Wire.OutputBytes(*parsed)
+                for index: 0..source.count-1 { target[index]=source[index] }
+            } else if parsed.count>0 {
+                declared: Vec(u8)
+                if name=="MESH_ADDR" { BuilderPrint(*declared,"http://%",View(*parsed)) }
+                else { BuilderPrint(*declared,"%",View(*parsed)) }
+                declaredPort,error:=LoopbackPort(View(*declared))
+                if error!="" || declaredPort!=port { return "Node environment does not match the selected loopback origin" }
+            }
         }
     }
     if out.count==0 {
@@ -257,7 +272,7 @@ main :: (argc: s32,argv: **u8) -> s32 {
     options: Options
     parsed,error:=ParseArgs(argc,argv,View(*environment),*options)
     if parsed && options.help {
-        print("Register Photos on an existing local-only Daochi node.\nUsage: provision_node [--origin http://127.0.0.1:18080] [--env PATH]\nDefaults: numeric loopback port 18080; ~/daochi-local/daochi.env.\n")
+        print("Register Photos on an existing local-only Mesh node.\nUsage: provision_node [--origin http://127.0.0.1:18080] [--env PATH]\nDefaults: numeric loopback port 18080; ~/daochi-local/daochi.env.\n")
         return 0
     }
     if !parsed {

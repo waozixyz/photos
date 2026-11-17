@@ -1,6 +1,8 @@
-// Photo magnification uses the public ImageProps source rectangle. The asset
+// Photo magnification uses the public Image.Props source rectangle. The asset
 // decoder supplies oriented dimensions; no original or pixel buffer is changed.
-using UI :: #import "kryon/Widgets";
+Image :: #import "kryon/image";
+#import "kryon/session"
+#import "kryon/geometry"
 Input :: #import "kryon/tree_input";
 zoom: float32 = 1.0;
 center_x: float32 = 0.5;
@@ -23,27 +25,27 @@ ClampCenter :: (width: float32, height: float32, visible_width: float32, visible
     if center_y < half_y { center_y = half_y }; if center_y > 1.0 - half_y { center_y = 1.0 - half_y }
 }
 PixelSize :: (path: string, bounds: Rectangle) {
-    image: ImageProps; image.asset_path = path; dimensions := ImageTextureFor(image)
+    image: Image.Props; image.asset_path = path; dimensions := Image.ImageTextureFor(image)
     if dimensions.width <= 0 || dimensions.height <= 0 || bounds.width <= 0.0 || bounds.height <= 0.0 { return }
     scale := bounds.width / cast(float32)dimensions.width
     if bounds.height / cast(float32)dimensions.height < scale { scale = bounds.height / cast(float32)dimensions.height }
     zoom = 1.0 / scale; dragging = false
 }
 OriginalResolution :: (path: string, width: s32, height: s32) -> bool {
-    image: ImageProps; image.asset_path = path; dimensions := ImageTextureFor(image)
+    image: Image.Props; image.asset_path = path; dimensions := Image.ImageTextureFor(image)
     return width <= 0 || height <= 0 || cast(s64)dimensions.width * cast(s64)dimensions.height == cast(s64)width * cast(s64)height
 }
 Draw :: (session: Session, key: u64, path: string, alt: string, bounds: Rectangle) {
     if path == "" || bounds.width <= 0.0 || bounds.height <= 0.0 { return }
-    image: ImageProps; image.key = key; image.asset_path = path; image.alt_text = alt; image.bounds = bounds
-    dimensions := ImageTextureFor(image)
-    if dimensions.width <= 0 || dimensions.height <= 0 { Image(session, image); return }
+    image: Image.Props; image.key = key; image.asset_path = path; image.alt_text = alt; image.bounds = bounds
+    dimensions := Image.ImageTextureFor(image)
+    if dimensions.width <= 0 || dimensions.height <= 0 { Image.Draw(session, image); return }
     width := cast(float32)dimensions.width; height := cast(float32)dimensions.height
     fit_scale := bounds.width / width
     if bounds.height / height < fit_scale { fit_scale = bounds.height / height }
     scale := fit_scale * zoom
     pointer := Input.PointerSample(session)
-    wheel := PointerWheelTake(session, bounds)
+    wheel := Input.PointerWheelTake(session, bounds)
     if wheel != 0.0 {
         // Keep the point under the pointer fixed while magnifying.
         dx := pointer.x - bounds.x - bounds.width / 2.0; dy := pointer.y - bounds.y - bounds.height / 2.0
@@ -62,7 +64,7 @@ Draw :: (session: Session, key: u64, path: string, alt: string, bounds: Rectangl
         drag_x = pointer.x; drag_y = pointer.y; ClampCenter(width, height, visible_width, visible_height)
     }
     if pointer.released || !pointer.down { dragging = false }
-    image.bounds = shown; image.fit = ImageFit.ImageFitStretch
+    image.bounds = shown; image.fit = Image.ImageFit.ImageFitStretch
     image.source = .{center_x * width - visible_width / 2.0, center_y * height - visible_height / 2.0, visible_width, visible_height}
-    Image(session, image)
+    Image.Draw(session, image)
 }

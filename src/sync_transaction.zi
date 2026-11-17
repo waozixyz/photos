@@ -1,8 +1,8 @@
-// Private pipe adapter for Daochi's canonical v6 transaction builder/signers.
+// Private pipe adapter for Mesh's canonical v6 transaction builder/signers.
 // Existing account and device keys are supplied, never generated or stored.
 Wire :: #import "sync_crypto";
 Sign :: #import "sync_sign";
-Native :: #import "daochi_client/crypto_native";
+Native :: #import "mesh_client/crypto_native";
 AccountRequest :: #import "sync_account";
 #import "std/byte_text_linux"
 #import "std/text_buffer"

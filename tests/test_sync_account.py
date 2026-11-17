@@ -1,4 +1,4 @@
-"""Canonical Daochi request preparation preserves existing Photos identities."""
+"""Canonical Mesh request preparation preserves existing Photos identities."""
 import hashlib
 import json
 import struct
@@ -74,7 +74,7 @@ class SyncAccountTest(unittest.TestCase):
                 sync_account.login(self.public, self.private, self.client, b'{}')
         for value in (b'', b'\0' * 8, struct.pack('!II', 1, 4840) + b'{'):
             with patch.object(sync_transaction, 'run', return_value=value):
-                with self.assertRaisesRegex(ValueError, 'Invalid Daochi account response'):
+                with self.assertRaisesRegex(ValueError, 'Invalid Mesh account response'):
                     sync_account.login(self.public, self.private, self.client, b'{}')
 
     def test_failed_device_registration_does_not_publish_a_login_token(self):

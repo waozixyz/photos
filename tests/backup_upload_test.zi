@@ -2,7 +2,7 @@ Upload :: #import "backup_upload";
 Identity :: #import "backup_identity";
 Crypto :: #import "backup_crypto";
 Wire :: #import "sync_crypto";
-Native :: #import "daochi_client/crypto_native";
+Native :: #import "mesh_client/crypto_native";
 Fixture :: #import "backup_fixture";
 Server :: #import "sync_client_test";
 Transport :: #import "sync_http";

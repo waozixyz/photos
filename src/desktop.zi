@@ -1,5 +1,5 @@
 // Inspect and publish only the native window Kryon created for this app.
-Desktop :: #import "kryon/Desktop";
+Desktop :: #import "kryon/desktop_runtime";
 Model :: #import "model";
 Viewer :: #import "viewer";
 Map :: #import "map";

@@ -1,4 +1,4 @@
-"""The native entity helper derives DaochiClient's published keys and chunks."""
+"""The native entity helper derives MeshClient's published keys and chunks."""
 import hashlib
 import hmac
 import sys
@@ -12,7 +12,7 @@ from photos import entity_crypto
 class EntityCryptoTest(unittest.TestCase):
     private = bytes(i % 256 for i in range(2560))
 
-    def test_record_keys_match_daochi_client(self):
+    def test_record_keys_match_mesh_client(self):
         self.assertEqual(entity_crypto.record_key(self.private, 'photos').hex(),
                          'd3d54fa5cc5ead0b135a9a1506a3838c86b53b30b99a925cb52e1b18405cadd1')
         self.assertEqual(entity_crypto.record_key(self.private, 'levels').hex(),
@@ -23,7 +23,7 @@ class EntityCryptoTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 entity_crypto.record_key(self.private, kind)
 
-    def test_two_chunk_photo_seals_to_daochi_client_addresses(self):
+    def test_two_chunk_photo_seals_to_mesh_client_addresses(self):
         data = bytes((i * 7 + 3) % 256 for i in range(entity_crypto.CHUNK + 5))
         digest, sealed = entity_crypto.seal(self.private, 'photos', data)
         self.assertEqual(digest, '102a8ba0d321f0ac40bf067b1399397dc926919c4d2645a2617e568d3e37cd36')

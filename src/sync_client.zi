@@ -1,4 +1,4 @@
-// Photos orchestration over the accepted native Daochi primitives. Persistent
+// Photos orchestration over the accepted native Mesh primitives. Persistent
 // identities remain in their released JSON format; opening never logs in.
 #scope_module
 BlobDescriptor :: struct { data: *Blob; length: s64 }
@@ -7,9 +7,9 @@ Types :: #import "service_types";
 Owner :: #import "owner_account";
 Wire :: #import "sync_crypto";
 Entity :: #import "entity_crypto";
-EntityProtocol :: #import "daochi_client/entity";
-Native :: #import "daochi_client/crypto_native";
-Record :: #import "daochi_client/record";
+EntityProtocol :: #import "mesh_client/entity";
+Native :: #import "mesh_client/crypto_native";
+Record :: #import "mesh_client/record";
 JSON :: #import "std/json_document";
 Account :: #import "sync_account";
 Transaction :: #import "sync_transaction";

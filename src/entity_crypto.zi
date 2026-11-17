@@ -1,9 +1,9 @@
 // Binary stdin/stdout protocol for the account's shared entity data. The
 // account key, record keys and plaintext never enter arguments, diagnostics or
-// files; DaochiClient derives every key and authenticates before plaintext is
+// files; MeshClient derives every key and authenticates before plaintext is
 // emitted.
-Native :: #import "daochi_client/crypto_native";
-Entity :: #import "daochi_client/entity";
+Native :: #import "mesh_client/crypto_native";
+Entity :: #import "mesh_client/entity";
 Wire :: #import "sync_crypto";
 #import "std/byte_text_linux"
 using Vectors :: #import "std/vec";

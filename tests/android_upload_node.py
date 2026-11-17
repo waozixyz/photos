@@ -1,4 +1,4 @@
-"""Android camera uploads round-trip through an isolated Daochi node.
+"""Android camera uploads round-trip through an isolated Mesh node.
 
 The phone's native request builder, staged chunks and signatures are driven
 here exactly as the Android worker sends them. A fresh desktop library must
@@ -123,9 +123,9 @@ class Phone:
 
 
 def main():
-    node_binary = os.environ.get("PHOTOS_DAOCHI") or shutil.which("daochi")
+    node_binary = os.environ.get("PHOTOS_MESH") or shutil.which("mesh")
     if not node_binary or not Path(node_binary).is_file():
-        raise SystemExit("Set PHOTOS_DAOCHI to the Daochi server executable for this isolated test")
+        raise SystemExit("Set PHOTOS_MESH to the Mesh server executable for this isolated test")
     for program in (UPLOAD, STAGING):
         if not program.is_file():
             raise SystemExit(f"Build {program} first (make android-upload-test)")
@@ -135,11 +135,11 @@ def main():
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
         origin = f"http://127.0.0.1:{port}"
-        env = {k: v for k, v in os.environ.items() if not k.startswith("DAOCHI_") and k not in
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("MESH_", "DAOCHI_")) and k not in
                {"DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "SESSION_MANAGER"}}
-        env.update(DAOCHI_ADDR=f"127.0.0.1:{port}", DAOCHI_BASE_URL=origin, DAOCHI_DB=str(folder / "node.sqlite"),
-                   DAOCHI_ADMIN_TOKEN="fixture-admin", DAOCHI_KNOWN_NODES="", DAOCHI_LAN_DISCOVERY="0",
-                   DAOCHI_NODE_SYNC_INTERVAL_SECONDS="0", DAOCHI_TOKEN_SECRET_HEX="42" * 32)
+        env.update(MESH_ADDR=f"127.0.0.1:{port}", MESH_BASE_URL=origin, MESH_DB=str(folder / "node.sqlite"),
+                   MESH_ADMIN_TOKEN="fixture-admin", MESH_KNOWN_NODES="", MESH_LAN_DISCOVERY="0",
+                   MESH_NODE_SYNC_INTERVAL_SECONDS="0", MESH_TOKEN_SECRET_HEX="42" * 32)
         log = (folder / "node.log").open("w")
         process = subprocess.Popen([str(Path(node_binary).resolve())], env=env, stdout=log, stderr=log)
         try:

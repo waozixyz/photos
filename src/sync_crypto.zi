@@ -1,12 +1,12 @@
 // Binary stdin/stdout protocol; content keys and plaintext never enter arguments,
-// text diagnostics or files. DaochiClient verifies before plaintext is emitted.
-Native :: #import "daochi_client/crypto_native";
+// text diagnostics or files. MeshClient verifies before plaintext is emitted.
+Native :: #import "mesh_client/crypto_native";
 Backup :: #import "backup_crypto";
 #import "std/byte_text_linux"
 using Vectors :: #import "std/vec";
 
 // VecSlice borrows only a local Vec binding. At this native boundary the
-// caller retains the vector while DaochiClient writes its initialized bytes.
+// caller retains the vector while MeshClient writes its initialized bytes.
 OutputBytes :: (out: *Vec(u8)) -> []u8 {
     empty: []u8
     if out == null || out.count == 0 { return empty }

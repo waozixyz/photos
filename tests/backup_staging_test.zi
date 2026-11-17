@@ -1,6 +1,6 @@
 Fixture :: #import "backup_fixture";
 Crypto :: #import "backup_crypto";
-Native :: #import "daochi_client/crypto_native";
+Native :: #import "mesh_client/crypto_native";
 Wire :: #import "sync_crypto";
 JSON :: #import "std/json_document";
 Files :: #import "std/file";

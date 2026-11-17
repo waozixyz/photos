@@ -6,7 +6,7 @@ using Files :: #import "std/file_linux";
 #import "std/c_string"
 #import "std/text_buffer"
 Crypto :: #import "backup_crypto";
-Native :: #import "daochi_client/crypto_native";
+Native :: #import "mesh_client/crypto_native";
 #scope_export
 Current :: #type (*void) -> bool #c_call;
 #scope_module

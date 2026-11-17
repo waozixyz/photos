@@ -1,14 +1,14 @@
-// Canonical Daochi account and device request signing over caller-held keys.
+// Canonical Mesh account and device request signing over caller-held keys.
 // Desktop pipe helpers and the Android upload adapter share these functions;
 // account/device keys and their persistent storage remain with the caller.
 #scope_module
-Auth :: #import "daochi_client/auth";
-Client :: #import "daochi_client/client";
-Protocol :: #import "daochi_client/sync";
-Transaction :: #import "daochi_client/transaction";
-Keys :: #import "daochi_client/keys";
-Crypto :: #import "daochi_client/crypto";
-Native :: #import "daochi_client/crypto_native";
+Auth :: #import "mesh_client/auth";
+Client :: #import "mesh_client/client";
+Protocol :: #import "mesh_client/sync";
+Transaction :: #import "mesh_client/transaction";
+Keys :: #import "mesh_client/keys";
+Crypto :: #import "mesh_client/crypto";
+Native :: #import "mesh_client/crypto_native";
 #import "std/byte_text_linux"
 #import "std/text_buffer"
 
@@ -40,7 +40,7 @@ SignDevice :: (context: *void, message: string, output: []u8) -> bool {
 }
 
 #scope_module
-// Validated hex account material for Daochi's ML-DSA signer.
+// Validated hex account material for Mesh's ML-DSA signer.
 Account :: (public_key: []u8, private_key: []u8, account: *Keys.AccountKeys) -> bool {
     if public_key.count != PublicBytes || private_key.count != PrivateBytes { return false }
     account_id: [32]u8

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Use Mesh for private node sync; preserve account keys, library paths and encrypted backups, including legacy operator environment files.
+
 - Your photos and albums are now kept once for your whole account, so Diary and your other apps show the same photos instead of keeping copies of their own. Favorites, hidden, archive, trash, captions, tags and edits travel with each photo to every app.
 - Photos syncs to your desktop Harmony node, which has room for your library. Your earlier copies on the ThinkPad stay untouched, so older Photos versions keep working.
 - Your library moves to the new storage one photo at a time; a photo counts as moved only after the node confirmed its new copy.

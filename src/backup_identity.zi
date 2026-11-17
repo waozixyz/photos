@@ -1,8 +1,8 @@
 // Read the existing desktop recovery file on mobile without changing account
 // identity, content keys or node pin. The platform stores only a verified result.
 #scope_module
-Keys :: #import "daochi_client/keys";
-Native :: #import "daochi_client/crypto_native";
+Keys :: #import "mesh_client/keys";
+Native :: #import "mesh_client/crypto_native";
 Crypto :: #import "backup_crypto";
 Policy :: #import "node_policy";
 UTF8 :: #import "std/utf8";

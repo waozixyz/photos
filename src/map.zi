@@ -1,6 +1,8 @@
 // Offline equirectangular browsing. Land is a bundled asset; markers come
 // from the local Ziran query engine. No tile or geocoding service is used.
-using UI :: #import "kryon/Widgets";
+#import "kryon/session"
+#import "kryon/geometry"
+Image :: #import "kryon/image";
 Input :: #import "kryon/tree_input";
 #import "std/json_scan"
 #import "std/text"
@@ -76,7 +78,7 @@ Draw :: (session: Session, picture: Rectangle, enabled: bool) -> bool {
     changed: bool
     pointer := Input.PointerSample(session)
     if enabled {
-        wheel := PointerWheelTake(session, picture)
+        wheel := Input.PointerWheelTake(session, picture)
         if wheel != 0.0 {
             dx := cast(float64)((pointer.x - picture.x) / picture.width - 0.5)
             dy := cast(float64)(0.5 - (pointer.y - picture.y) / picture.height)
@@ -97,10 +99,10 @@ Draw :: (session: Session, picture: Rectangle, enabled: bool) -> bool {
         if dragging && pointer.released && dragged { changed = true }
     }
     if pointer.released || !pointer.down || !enabled { dragging = false }
-    image: ImageProps; image.key = 6200000; image.asset_path = TextUntilNul(image_path[:]); image.alt_text = "Offline world map of photo locations"; image.bounds = picture; image.fit = ImageFit.ImageFitStretch
+    image: Image.Props; image.key = 6200000; image.asset_path = TextUntilNul(image_path[:]); image.alt_text = "Offline world map of photo locations"; image.bounds = picture; image.fit = Image.ImageFit.ImageFitStretch
     image.source = .{cast(float32)(bounds[0] + 180000000) / 360000000.0 * 4096.0,
                      cast(float32)(90000000 - bounds[3]) / 180000000.0 * 2048.0,
                      cast(float32)(bounds[2] - bounds[0]) / 360000000.0 * 4096.0,
                      cast(float32)(bounds[3] - bounds[1]) / 180000000.0 * 2048.0}
-    Image(session, image); return changed
+    Image.Draw(session, image); return changed
 }

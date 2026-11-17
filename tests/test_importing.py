@@ -13,9 +13,14 @@ from PIL import Image
 from photos.library import Library, LibraryError, digest_file, packed
 
 
+# Keep expected import paths canonical even when TMPDIR has symlink ancestors.
+TEST_ROOT = Path(__file__).resolve().parents[1] / "build" / "tests"
+TEST_ROOT.mkdir(parents=True, exist_ok=True)
+
+
 class OriginalImportTest(unittest.TestCase):
     def setUp(self):
-        temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
+        temporary=tempfile.TemporaryDirectory(dir=TEST_ROOT);self.addCleanup(temporary.cleanup)
         self.root=Path(temporary.name);self.source=self.root/'source';self.destination=self.root/'stored'
         self.data=bytes(range(256))*10001;self.source.write_bytes(self.data)
         self.identity=hashlib.sha256(self.data).hexdigest()
@@ -74,7 +79,7 @@ class OriginalImportTest(unittest.TestCase):
 
 class FolderImportTest(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
+        temporary = tempfile.TemporaryDirectory(dir=TEST_ROOT); self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name); self.source = self.root/'Source'; self.source.mkdir()
 
     def test_sorted_recursive_unicode_paths_exclude_metadata_and_folder_links(self):
@@ -130,7 +135,7 @@ class FolderImportTest(unittest.TestCase):
 
 class MetadataImportTest(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
+        temporary = tempfile.TemporaryDirectory(dir=TEST_ROOT); self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name); self.source = self.root/'Camera'; self.source.mkdir()
         self.path = self.source/'旅行.png'; Image.new('RGB', (12, 9), 'green').save(self.path)
         self.library = Library(self.root/'library'); self.addCleanup(self.library.db.close)
@@ -301,7 +306,7 @@ class MetadataImportTest(unittest.TestCase):
 
 class AlbumImportTest(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
+        temporary = tempfile.TemporaryDirectory(dir=TEST_ROOT); self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name); self.source = self.root/'Source'; self.source.mkdir()
         self.path = self.source/'Photo.png'; Image.new('RGB', (12, 9), 'green').save(self.path)
         self.original = self.path.read_bytes()

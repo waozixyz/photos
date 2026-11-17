@@ -124,7 +124,7 @@ test: backup-staging-memory-test
 backup-upload-test: build/liboqs/lib/liboqs.a
 	LDLIBS='$(abspath build/liboqs/lib/liboqs.a) -l:libsodium.so.23 -lm' $(ZIRAN) build --project $(PACKAGE_FLAGS) --root tests --target=c --entry backup_upload_probe:main --exe -o build/backup-upload-test tests/backup_upload_probe.zi
 test: backup-upload-test
-# Real signed Android uploads against an isolated Daochi node (set PHOTOS_DAOCHI).
+# Real signed Android uploads against an isolated Mesh node (set PHOTOS_MESH).
 android-upload-test: backup-upload-test backup-staging-test sync-http sync-transaction sync-page sync-crypto account-sign
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS -u SESSION_MANAGER $(PYTHON) tests/android_upload_node.py
 .PHONY: swipe-window-test swipe-portable-test swipe-hosted-test

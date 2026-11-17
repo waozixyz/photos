@@ -1,5 +1,10 @@
+#import "kryon/drawing_props"
+#import "kryon/system_clipboard"
 // Only the active viewer owns QR payloads. They are never inspection properties.
-using UI :: #import "kryon/Widgets";
+#import "kryon/session"
+#import "kryon/geometry"
+Image :: #import "kryon/image";
+Box :: #import "kryon/box";
 Input :: #import "kryon/tree_input";
 #import "std/json_scan"
 #import "std/text"
@@ -43,15 +48,15 @@ Draw :: (session: Session, image: string, canvas: Rectangle, enabled: bool) {
     if canvas.height/cast(float32)height < scale { scale = canvas.height/cast(float32)height }
     shown := Rectangle.{canvas.x+(canvas.width-cast(float32)width*scale)/2.0,
         canvas.y+(canvas.height-cast(float32)height*scale)/2.0,cast(float32)width*scale,cast(float32)height*scale}
-    props: ImageProps; props.key = 5500000; props.asset_path = image; props.alt_text = "Select a detected QR code in photo"; props.bounds = shown
-    props.fit = ImageFit.ImageFitContain; Image(session,props)
+    props: Image.Props; props.key = 5500000; props.asset_path = image; props.alt_text = "Select a detected QR code in photo"; props.bounds = shown
+    props.fit = Image.ImageFit.ImageFitContain; Image.Draw(session,props)
     pointer := Input.PointerSample(session)
     for i: 0..count-1 {
         code := *codes[i]
         bounds := Rectangle.{shown.x+shown.width*cast(float32)code.x/10000.0,shown.y+shown.height*cast(float32)code.y/10000.0,
             shown.width*cast(float32)code.width/10000.0,shown.height*cast(float32)code.height/10000.0}
         if enabled && pointer.pressed && Input.PointInBounds(pointer.x,pointer.y,bounds) { chosen = cast(s32)i }
-        box: BoxProps; box.key = cast(u64)(5500100+i); box.bounds = bounds; box.border = Color.{70,150,240,220}
-        box.fill = ifx chosen == i then Color.{70,150,240,90} else Color.{0,0,0,0}; Box(session,box)
+        box: Box.Props; box.key = cast(u64)(5500100+i); box.bounds = bounds; box.border = Color.{70,150,240,220}
+        box.fill = ifx chosen == i then Color.{70,150,240,90} else Color.{0,0,0,0}; Box.Draw(session,box)
     }
 }

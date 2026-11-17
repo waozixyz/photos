@@ -1,4 +1,4 @@
-"""Photos' private pipe adapter must preserve Daochi v6 signed requests."""
+"""Photos' private pipe adapter must preserve Mesh v6 signed requests."""
 import hashlib
 import json
 import struct
@@ -71,7 +71,7 @@ class SyncTransactionTest(unittest.TestCase):
                 self.assertEqual(result.stderr, b"")
 
     def test_missing_or_interrupted_signer_cannot_fall_back(self):
-        for error in (OSError(), subprocess.TimeoutExpired("Daochi signing", 30)):
+        for error in (OSError(), subprocess.TimeoutExpired("Mesh signing", 30)):
             with patch.object(sync_transaction.subprocess, "run", side_effect=error):
                 with self.assertRaisesRegex(ValueError, "preserved"):
                     sync_transaction.header(self.public, self.private, self.seed,

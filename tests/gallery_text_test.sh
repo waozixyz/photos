@@ -12,10 +12,10 @@ for form in source saved; do
     input=tests/gallery_text_probe.zi
     root=tests
     if test "$form" = saved; then input=$work/ir/gallery_text_probe.zir; root=$work/ir; fi
-    "$ziran" bundle --project $flags --root "$root" --entry gallery_text_probe:main \
+    "$ziran" bundle --project $flags --root "$root" --bind-host gallery_text_probe --entry gallery_text_probe:main \
         -o "$work/$form.zx" "$input"
     test "$("$ziran" run "$work/$form.zx")" = 0
-    "$ziran" build --project $flags --root "$root" --target=c --entry gallery_text_probe:main \
+    "$ziran" build --project $flags --root "$root" --bind-host gallery_text_probe --target=c --entry gallery_text_probe:main \
         --exe -o "$work/$form" "$input"
     "$work/$form/gallery_text_probe"
 done

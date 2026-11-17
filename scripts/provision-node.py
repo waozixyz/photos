@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Register Photos only on an existing local-only Daochi node.
+"""Register Photos only on an existing local-only Mesh node.
 
 By default this is the ThinkPad's node, run on the ThinkPad. The desktop
 Harmony node, which keeps the account's shared photos, is registered with
@@ -33,10 +33,10 @@ except urllib.error.HTTPError as error:
     values={}
     for line in args.env.read_text().splitlines():
         key,separator,value=line.partition('=')
-        if separator and key.strip()=='DAOCHI_ADMIN_TOKEN':
+        if separator and key.strip() in ('MESH_ADMIN_TOKEN','DAOCHI_ADMIN_TOKEN'):
             parts=shlex.split(value)
             values[key.strip()]=parts[0] if parts else ''
-    token=values.get('DAOCHI_ADMIN_TOKEN')
+    token=values.get('MESH_ADMIN_TOKEN',values.get('DAOCHI_ADMIN_TOKEN'))
     token_path = Path.home()/'daochi-local/admin-token'
     if not token and token_path.is_file():
         token = token_path.read_text().strip()

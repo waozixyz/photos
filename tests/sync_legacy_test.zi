@@ -8,8 +8,8 @@ Test :: #import "sync_crypto_test";
 Tx :: #import "sync_transaction_test";
 Wire :: #import "sync_crypto";
 Entity :: #import "entity_crypto";
-Keys :: #import "daochi_client/keys";
-Native :: #import "daochi_client/crypto_native";
+Keys :: #import "mesh_client/keys";
+Native :: #import "mesh_client/crypto_native";
 SQL :: #import "sqlite/SQLite";
 Files :: #import "std/file";
 #import "std/byte_text_linux"

@@ -55,9 +55,9 @@ git = "https://github.com/jedisct1/libsodium.git"
 ref = "stable"
 source = true
 
-[dependencies.daochi_client]
-git = "https://github.com/ziranlang/daochi-client.git"
-ref = "master"
+[dependencies.mesh_client]
+git = "https://github.com/ziranlang/mesh-client.git"
+ref = "c1ac6095d01bcfdd4c5ae49c4636aaf9a0303449"
 
 [dependencies.mingcute]
 git = "https://github.com/kryonlabs/mingcute.git"

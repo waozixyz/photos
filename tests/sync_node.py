@@ -1,4 +1,4 @@
-"""Round-trip real signed requests against an isolated Daochi node."""
+"""Round-trip real signed requests against an isolated Mesh node."""
 import json
 import os
 from pathlib import Path
@@ -21,9 +21,9 @@ import photos.sync
 photos.sync.RECORD_PAGE = 5
 
 repo = Path(__file__).resolve().parents[1]
-node_binary = os.environ.get('PHOTOS_DAOCHI') or shutil.which('daochi')
+node_binary = os.environ.get('PHOTOS_MESH') or shutil.which('mesh')
 if not node_binary or not Path(node_binary).is_file():
-    raise SystemExit('Set PHOTOS_DAOCHI to the Daochi server executable for this isolated test')
+    raise SystemExit('Set PHOTOS_MESH to the Mesh server executable for this isolated test')
 with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as folder:
     folder = Path(folder)
     with socket.socket() as probe:
@@ -32,11 +32,11 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
     origin = f'http://127.0.0.1:{port}'
     env = os.environ.copy()
     for key in list(env):
-        if key.startswith('DAOCHI_') or key in {'DISPLAY','WAYLAND_DISPLAY','XAUTHORITY','DBUS_SESSION_BUS_ADDRESS'}:
+        if key.startswith(('MESH_','DAOCHI_')) or key in {'DISPLAY','WAYLAND_DISPLAY','XAUTHORITY','DBUS_SESSION_BUS_ADDRESS'}:
             del env[key]
-    env.update(DAOCHI_ADDR=f'127.0.0.1:{port}', DAOCHI_BASE_URL=origin, DAOCHI_DB=str(folder/'node.sqlite'),
-               DAOCHI_ADMIN_TOKEN='fixture-admin', DAOCHI_KNOWN_NODES='', DAOCHI_LAN_DISCOVERY='0',
-               DAOCHI_NODE_SYNC_INTERVAL_SECONDS='0', DAOCHI_TOKEN_SECRET_HEX='42'*32)
+    env.update(MESH_ADDR=f'127.0.0.1:{port}', MESH_BASE_URL=origin, MESH_DB=str(folder/'node.sqlite'),
+               MESH_ADMIN_TOKEN='fixture-admin', MESH_KNOWN_NODES='', MESH_LAN_DISCOVERY='0',
+               MESH_NODE_SYNC_INTERVAL_SECONDS='0', MESH_TOKEN_SECRET_HEX='42'*32)
     log = (folder / 'node.log').open('w')
     process = subprocess.Popen([str(Path(node_binary).resolve())], env=env, stdout=log, stderr=log)
     try:
@@ -451,7 +451,7 @@ with tempfile.TemporaryDirectory(dir=repo / 'build', prefix='sync-test-') as fol
         # Older releases still show the photo from its old record and preview.
         assert client.fetch_blob(old_preview, thumb_id, 'preview') == thumb
         assert Path(client.materialize(old_id)).read_bytes() == plain
-        print('Isolated Daochi v6: signed sync, face/semantic indexes, unchanged originals, editing, places, Live Photo privacy, embedded JPEG/HEIC/AVIF motion and separation round trip passed')
+        print('Isolated Mesh v6: signed sync, face/semantic indexes, unchanged originals, editing, places, Live Photo privacy, embedded JPEG/HEIC/AVIF motion and separation round trip passed')
     finally:
         process.terminate()
         process.wait(timeout=10)

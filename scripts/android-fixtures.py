@@ -15,7 +15,7 @@ from photos.library import packed
 output = ROOT / "build/android/fixtures"
 output.mkdir(parents=True, exist_ok=True)
 public, private = account_sign.generate_keypair()
-# A synthetic Daochi node identity: the emulator upload check starts its own
+# A synthetic Mesh node identity: the emulator upload check starts its own
 # disposable node from this seed, so the recovered pin must match it exactly.
 node_seed = secrets.token_bytes(32)
 (output.parent / "node-seed.bin").write_bytes(node_seed)

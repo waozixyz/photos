@@ -1,5 +1,5 @@
 // Typed JNI calls for Android camera uploads. Java owns loopback HTTP, staged
-// files and scheduling; Ziran and DaochiClient own keys, signatures, record
+// files and scheduling; Ziran and MeshClient own keys, signatures, record
 // sealing, node pinning and acknowledgment policy. No call logs or persists keys.
 #import "kryon/AndroidJni"
 #import "std/c_string"
@@ -9,7 +9,7 @@ Identity :: #import "backup_identity";
 Crypto :: #import "backup_crypto";
 Upload :: #import "backup_upload";
 Sign :: #import "sync_sign";
-Native :: #import "daochi_client/crypto_native";
+Native :: #import "mesh_client/crypto_native";
 c :: #system_library "c";
 Allocate :: (bytes: usize) -> *void #foreign c "malloc";
 Release :: (bytes: *void) #foreign c "free";

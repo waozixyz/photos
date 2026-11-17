@@ -48,8 +48,8 @@ The owner's merged desktop library is `/mnt/storage/Photos`, imported from
 `/mnt/storage/adel` and `/mnt/storage/Album`. Private data never belongs in this
 repository. Your full-quality originals remain available offline on the desktop.
 
-Sync connects only to the owner's pinned local Daochi nodes. Photos and albums
-are the account's shared entity data (Daochi `docs/entity-data.md`), kept once
+Sync connects only to the owner's pinned local [Mesh](https://mesh.ziran-lang.org) nodes. Photos and albums
+are the account's shared entity data (Mesh `docs/entity-data.md`), kept once
 for the owner's one account, the one Inbe signed in with, so Diary and other
 apps show the same photos. They live on the desktop Harmony node, reached through
 a loopback proxy (`photos-node.socket`). Photos refuses public URLs, redirects,
@@ -61,12 +61,12 @@ you say about a photo (favorite, hidden, archived, trash, caption, tags, edits)
 is in that shared record; what Photos derives (file metadata, album bookkeeping,
 search and face indexes) is in Photos' own private annotations. Albums are shared
 records too; each photo's record names the albums it is in, so an album of any
-size fits Daochi's record limit. Requests use Daochi v6 account and device
+size fits Mesh's record limit. Requests use Mesh v6 account and device
 signatures; downloaded originals must match their SHA-256 and size. When sync
 completes, the desktop node holds a complete encrypted copy. Photos retrieves
 previews and materializes originals when needed; its installed index is private
 local data. Large libraries exchange metadata in signed pages with private local
-checkpoints. The desktop node needs Daochi 17bfd12 or later, which returns entity
+checkpoints. The desktop node needs Mesh 17bfd12 or later, which returns entity
 records in paged syncs.
 
 A library synced before entity data keeps its earlier copies on the ThinkPad,
@@ -416,7 +416,7 @@ Photos and its separate password. Native Ziran verifies the original account,
 signing keys and pinned node before Android seals the same content and signing
 keys with its keystore. Reopening retains those keys. Wrong passwords and
 altered files grant nothing, and an existing account is preserved. On its
-first upload the phone creates its own Daochi device key, also sealed by the
+first upload the phone creates its own Mesh device key, also sealed by the
 keystore, and registers it under that account.
 
 Open a device folder in Albums and choose Queue this folder for backup. Folder
@@ -443,17 +443,17 @@ remote backup or delete device originals.
 While Photos is closed, the periodic discovery job also prepares new photos in
 selected folders and uploads them. Upload to ThinkPad also runs after
 preparation and from Settings. It sends chunks only to `127.0.0.1:18080` on the phone.
-The ThinkPad forwards that port over USB to its Daochi node, for example with
+The ThinkPad forwards that port over USB to its Mesh node, for example with
 `adb reverse tcp:18080 tcp:18080`; there is no Wi-Fi, public node or cloud
 route. Native Ziran checks the node identity pinned in the recovery file and
-refuses outward Photos replication before login. DaochiClient signs the login,
+refuses outward Photos replication before login. Mesh Client signs the login,
 device registration and every request, and seals each photo record in the
 desktop's format with a gallery preview. A phone record never replaces library
 metadata the desktop already holds for the same original. An item counts as
 backed up only after the node acknowledges its record and holds every chunk;
 the local encrypted copy is then released. Interrupted uploads retry without
 duplicates. `make android-upload-test` drives these exact requests against an
-isolated Daochi node and restores the originals on a separate desktop library.
+isolated Mesh node and restores the originals on a separate desktop library.
 
 This is a development client, not a phone replacement yet. Mobile
 search/indexing, memories, editing, pinch gestures and device space recovery
@@ -472,15 +472,15 @@ and stalled replies expire after 60 seconds. Its socket is private to this user;
 opening another instance preserves the active endpoint and unrelated files.
 Photo/chunk and album/metadata encryption, authenticated decryption, metadata
 nonce generation and resumable chunk nonce derivation now run in a headless
-Ziran helper over a private binary channel, using DaochiClient's shared native
+Ziran helper over a private binary channel, using Mesh Client's shared native
 crypto provider. Android recovery and camera staging use those same primitives
-and Daochi's account validation. It retains the existing
+and Mesh's account validation. It retains the existing
 XChaCha20-Poly1305 backup format and content keys. An altered tag, account,
 address, key or nonce returns no plaintext. A missing or interrupted helper
 pauses that operation and preserves originals and keys. Ed25519 device seed
 generation, public keys and transaction signatures also run in Ziran and retain
 existing device identities. Signed request messages and headers use
-DaochiClient's v6 protocol builders. Account signing and loopback HTTP transport also
+Mesh Client's v6 protocol builders. Account signing and loopback HTTP transport also
 run in native helpers. The native transport checks the pinned node and its
 replication policy. A native SQLite writer merges each photo/album/index page
 and its resume checkpoint atomically; stale requests retain local edits and
@@ -718,7 +718,7 @@ make playback-window-test playback-portable-test
 make face-models people-window-test people-portable-test
 make slideshow-window-test slideshow-portable-test
 make qr-window-test qr-portable-test
-PHOTOS_DAOCHI=/path/to/daochi make sync-test
+PHOTOS_MESH=/path/to/mesh make sync-test
 ```
 
 `scripts/install.py` installs the standalone app, desktop entry, local library

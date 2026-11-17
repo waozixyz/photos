@@ -1,5 +1,9 @@
+#import "kryon/drawing_props"
 // Private collage preview; source rectangles use the same math as the compositor.
-using UI :: #import "kryon/Widgets";
+#import "kryon/session"
+#import "kryon/geometry"
+Image :: #import "kryon/image";
+Box :: #import "kryon/box";
 Input :: #import "kryon/tree_input";
 Layout :: #import "collage_layout";
 #import "std/json_scan"
@@ -53,7 +57,7 @@ Draw :: (session: Session, canvas: Rectangle, enabled: bool) {
     width: float32 = ifx shape == 2 then 1536.0 else 2048.0; height: float32 = ifx shape == 1 then 1536.0 else 2048.0
     scale := canvas.width/width; if canvas.height/height < scale { scale = canvas.height/height }
     shown := Rectangle.{canvas.x+(canvas.width-width*scale)/2.0,canvas.y+(canvas.height-height*scale)/2.0,width*scale,height*scale}
-    background: BoxProps; background.key = 5600000; background.bounds = shown; background.fill = Color.{255,255,255,255}; Box(session,background)
+    background: Box.Props; background.key = 5600000; background.bounds = shown; background.fill = Color.{255,255,255,255}; Box.Draw(session,background)
     pointer := Input.PointerSample(session)
     for i: 0..count-1 {
         slot := Layout.Bounds(count,layout,cast(s32)i); item := *items[i]
@@ -67,12 +71,12 @@ Draw :: (session: Session, canvas: Rectangle, enabled: bool) {
                 else { swap_from = cast(s32)i }
             } else { dragging = true; drag_x = pointer.x; drag_y = pointer.y }
         }
-        image: ImageProps; image.key = cast(u64)(5600100+i); image.asset_path = TextUntilNul(item.path[:]); image.alt_text = "Collage photo tile"; image.bounds = bounds; image.fit = ImageFit.ImageFitStretch
-        dimensions := ImageTextureFor(image)
+        image: Image.Props; image.key = cast(u64)(5600100+i); image.asset_path = TextUntilNul(item.path[:]); image.alt_text = "Collage photo tile"; image.bounds = bounds; image.fit = Image.ImageFit.ImageFitStretch
+        dimensions := Image.ImageTextureFor(image)
         if dimensions.width <= 0 || dimensions.height <= 0 { continue }
         source := Layout.Framing(dimensions.width,dimensions.height,cast(float64)bounds.width,cast(float64)bounds.height,item.cx,item.cy,item.zoom)
         if enabled && !swapping && chosen == i {
-            wheel := PointerWheelTake(session,bounds)
+            wheel := Input.PointerWheelTake(session,bounds)
             if wheel != 0.0 { Zoom(ifx wheel > 0.0 then 25 else -25) }
             if dragging && (pointer.down || pointer.released) {
                 item.cx -= cast(s32)(cast(float64)(pointer.x-drag_x)/cast(float64)bounds.width*source.width/cast(float64)dimensions.width*10000.0)
@@ -83,9 +87,9 @@ Draw :: (session: Session, canvas: Rectangle, enabled: bool) {
             }
         }
         source = Layout.Framing(dimensions.width,dimensions.height,cast(float64)bounds.width,cast(float64)bounds.height,item.cx,item.cy,item.zoom)
-        image.source = .{cast(float32)source.x,cast(float32)source.y,cast(float32)source.width,cast(float32)source.height}; Image(session,image)
+        image.source = .{cast(float32)source.x,cast(float32)source.y,cast(float32)source.width,cast(float32)source.height}; Image.Draw(session,image)
         if chosen == i || swap_from == i {
-            box: BoxProps; box.key = cast(u64)(5600200+i); box.bounds = bounds; box.fill = Color.{0,0,0,0}; box.border = Color.{70,150,240,255}; Box(session,box)
+            box: Box.Props; box.key = cast(u64)(5600200+i); box.bounds = bounds; box.fill = Color.{0,0,0,0}; box.border = Color.{70,150,240,255}; Box.Draw(session,box)
         }
     }
     if pointer.released || !pointer.down || !enabled { dragging = false }

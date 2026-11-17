@@ -42,13 +42,13 @@ list(APPEND APP_ZIRAN_DEFINES --define ${APP_ZIRAN_ARCH})
 set(APP_ZIRAN_IR_DIR "${CMAKE_BINARY_DIR}/ziran/ir")
 set(APP_ZIRAN_GEN_DIR "${CMAKE_BINARY_DIR}/ziran/generated")
 set(APP_ZIRAN_MANIFEST "${CMAKE_BINARY_DIR}/ziran/generated-sources.cmake")
-execute_process(COMMAND "${ZIRAN_BIN}" pkg path daochi_client
-    WORKING_DIRECTORY "${REPO_ROOT}" OUTPUT_VARIABLE DAOCHI_CLIENT_DIR
+execute_process(COMMAND "${ZIRAN_BIN}" pkg path mesh_client
+    WORKING_DIRECTORY "${REPO_ROOT}" OUTPUT_VARIABLE MESH_CLIENT_DIR
     OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
 file(GLOB_RECURSE APP_ZIRAN_SOURCES CONFIGURE_DEPENDS "${REPO_ROOT}/src/*.zi")
 file(GLOB_RECURSE APP_LIBRARY_ZIRAN_SOURCES CONFIGURE_DEPENDS
     "${KRYON_DIR}/src/ui/*.zi" "${KRYON_DIR}/src/backend/*.zi"
-    "${ZIRAN_DIR}/std/*.zi" "${DAOCHI_CLIENT_DIR}/*.zi")
+    "${ZIRAN_DIR}/std/*.zi" "${MESH_CLIENT_DIR}/*.zi")
 execute_process(COMMAND "${HOST_PYTHON}"
     "${KRYON_DIR}/scripts/generate_android_sources.py"
     --ziran "${ZIRAN_BIN}" --zi2c "${ZI2C_BIN}"

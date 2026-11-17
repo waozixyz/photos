@@ -1,6 +1,6 @@
 Requests :: #import "sync_account";
 Wire :: #import "sync_crypto";
-Native :: #import "daochi_client/crypto_native";
+Native :: #import "mesh_client/crypto_native";
 Account :: #import "account_sign";
 Test :: #import "sync_crypto_test";
 Tx :: #import "sync_transaction_test";
@@ -9,11 +9,9 @@ JSON :: #import "std/json_document";
 #import "std/text_buffer"
 using Vectors :: #import "std/vec";
 
-main :: () -> s32 {
-    public: Vec(u8); private: Vec(u8); seed: Vec(u8); body: Vec(u8); signature: Vec(u8); retry: Vec(u8)
-    defer { Wire.ClearOutput(*private); Wire.ClearOutput(*seed); Wire.ClearOutput(*body); Wire.ClearOutput(*signature); Wire.ClearOutput(*retry) }
-    if !Test.Expect(Test.Fixture("account-public.bin",*public) && Test.Fixture("account-secret.bin",*private) && Test.Fixture("key.bin",*seed),"synthetic account request keys") { return 1 }
-    pk:=VecSlice(public,0,public.count); sk:=VecSlice(private,0,private.count); device:=VecSlice(seed,0,seed.count)
+CheckAccountRequests :: (pk: []u8, sk: []u8, device: []u8) -> s32 {
+    body: Vec(u8); signature: Vec(u8); retry: Vec(u8)
+    defer { Wire.ClearOutput(*body); Wire.ClearOutput(*signature); Wire.ClearOutput(*retry) }
     nonce:="abababababababababababababababababababababababababababababababab"
     challenge: Vec(u8); BuilderPrint(*challenge,"{\"nonce\":\"%\"}",nonce); value:=BuilderFinish(challenge)
     if !Test.Expect(Requests.LoginRequest(pk,sk,"photos-existing-device",value,*body,*signature),"in-process login") { return 1 }
@@ -29,9 +27,9 @@ main :: () -> s32 {
     for mode: 0..3 {
         challengeText:=ifx mode==0 then "{}" else ifx mode==1 then "{\"nonce\":\"wrong\"}" else value
         client:=ifx mode==2 then "bad\nclient" else "photos-existing-device"
-        if mode==3 { private[0]^=1 }
+        if mode==3 { sk[0]^=1 }
         failed:=!Requests.LoginRequest(pk,sk,client,challengeText,*body,*signature)
-        if mode==3 { private[0]^=1 }
+        if mode==3 { sk[0]^=1 }
         if !Test.Expect(failed && Test.Wiped(*body) && Test.Wiped(*signature),"invalid challenge/client/mismatched keys clear both results") { return 1 }
     }
     if !Test.Expect(!Requests.LoginRequest(pk,sk,"photos",value,*body,*body) && Test.Wiped(*body),"aliased destinations rejected") { return 1 }
@@ -48,5 +46,18 @@ main :: () -> s32 {
     if !Test.Expect(!Requests.RegistrationRequest(pk,sk,device[: 31],"photos",1,*body) && Test.Wiped(*body) &&
         !Requests.RegistrationRequest(pk,sk,device,"photos",0,*body) && Test.Wiped(*body) &&
         !Requests.RegistrationRequest(pk,sk,device,"photos",9007199254740692,*body) && Test.Wiped(*body),"registration seed/time bounds") { return 1 }
-    print("sync_account: local tests passed\n"); return 0
+    return 0
+}
+
+main :: () -> s32 {
+    public: Vec(u8); private: Vec(u8); seed: Vec(u8)
+    defer { Wire.ClearOutput(*private); Wire.ClearOutput(*seed) }
+    if !Test.Expect(Test.Fixture("account-public.bin",*public) && Test.Fixture("account-secret.bin",*private) && Test.Fixture("key.bin",*seed),"synthetic account request keys") { return 1 }
+    result: s32
+    {
+        pk:=VecSlice(public,0,public.count); sk:=VecSlice(private,0,private.count); device:=VecSlice(seed,0,seed.count)
+        result = CheckAccountRequests(pk, sk, device)
+    }
+    if result == 0 { print("sync_account: local tests passed\n") }
+    return result
 }

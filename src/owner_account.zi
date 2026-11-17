@@ -1,15 +1,15 @@
 // The desktop Inbe account is shared with Photos. This module only reads it.
 SQL :: #import "sqlite/SQLite";
-Keys :: #import "daochi_client/keys";
-Crypto :: #import "daochi_client/crypto";
+Keys :: #import "mesh_client/keys";
+Crypto :: #import "mesh_client/crypto";
 #import "std/byte_text_linux"
 #import "std/text_buffer"
 using Vectors :: #import "std/vec";
 
 #scope_export
-Unavailable :: "Inbe's Daochi account is unavailable; sign in to Inbe on this computer first";
-Incomplete :: "Inbe's Daochi account is incomplete; sign in to Inbe on this computer first";
-Mismatch :: "Inbe's Daochi account keys do not match; Photos keys were preserved";
+Unavailable :: "Inbe's Mesh account is unavailable; sign in to Inbe on this computer first";
+Incomplete :: "Inbe's Mesh account is incomplete; sign in to Inbe on this computer first";
+Mismatch :: "Inbe's Mesh account keys do not match; Photos keys were preserved";
 OwnerAccount :: struct {
     public_key: [1312]u8
     private_key: [2560]u8

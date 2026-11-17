@@ -15,9 +15,14 @@ from unittest.mock import patch
 from photos import service
 
 
+# Keep scratch paths canonical: production sockets reject symlink ancestors.
+TEST_ROOT = Path(__file__).resolve().parents[1] / "build" / "tests"
+TEST_ROOT.mkdir(parents=True, exist_ok=True)
+
+
 class ServiceTest(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
+        self.temporary = tempfile.TemporaryDirectory(dir=TEST_ROOT)
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.path = self.root/'kryon/services/photos.sock'
@@ -178,7 +183,7 @@ class ServiceTest(unittest.TestCase):
 
 class ActivatedServiceTest(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix='photos-activation-')
+        self.temporary = tempfile.TemporaryDirectory(prefix='photos-activation-', dir=TEST_ROOT)
         self.addCleanup(self.temporary.cleanup)
         self.path = Path(self.temporary.name) / 'photos.sock'
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

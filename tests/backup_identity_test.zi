@@ -1,6 +1,6 @@
 Identity :: #import "backup_identity";
 Recovery :: #import "recovery_crypto";
-Native :: #import "daochi_client/crypto_native";
+Native :: #import "mesh_client/crypto_native";
 Oqs :: #import "oqs/Oqs";
 Wire :: #import "sync_crypto";
 Fixture :: #import "backup_fixture";

@@ -2,6 +2,13 @@ Model :: #import "model";
 #import "std/text"
 #import "std/text_buffer"
 
+// Metadata fixtures have no renderer. Bind the transitive image lookup to
+// the ordinary unavailable-asset result without dispatching a graphical host.
+#program_export
+ImageWidth :: (path: string) -> s32 { unused path; return 0 }
+#program_export
+ImageHeight :: (path: string) -> s32 { unused path; return 0 }
+
 Check :: (photo: *Model.Photo) -> bool {
     return TextView(photo.id[:photo.id_size]) == TextUntilNul(photo.id[:]) &&
         TextView(photo.name[:photo.name_size]) == TextUntilNul(photo.name[:]) &&

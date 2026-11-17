@@ -1,8 +1,8 @@
-// Photos byte framing for existing Daochi encrypted backups. Encryption,
-// digests, randomness and buffer clearing belong to DaochiClient.
+// Photos byte framing for existing Mesh encrypted backups. Encryption,
+// digests, randomness and buffer clearing belong to MeshClient.
 #scope_module
 #import "std/byte_text_linux"
-Native :: #import "daochi_client/crypto_native";
+Native :: #import "mesh_client/crypto_native";
 c :: #system_library "c";
 Allocate :: (bytes: usize) -> *void #foreign c "malloc";
 Release :: (bytes: *void) #foreign c "free";

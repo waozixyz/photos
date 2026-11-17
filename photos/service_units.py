@@ -105,7 +105,7 @@ NoNewPrivileges=true
     if tunnel:
         host, port = tunnel
         result['photos-tunnel.service'] = f'''[Unit]
-Description=Photos private SSH tunnel to ThinkPad Daochi
+Description=Photos private SSH tunnel to ThinkPad Mesh
 BindsTo=photos-sync.service
 After=network-online.target photos.service
 

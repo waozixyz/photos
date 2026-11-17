@@ -1,4 +1,4 @@
-"""A fixture Daochi account, so tests never read the owner's Inbe keys."""
+"""A fixture Mesh account, so tests never read the owner's Inbe keys."""
 import sqlite3
 from pathlib import Path
 import sys

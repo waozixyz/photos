@@ -1,5 +1,10 @@
+#import "kryon/drawing_props"
+#import "kryon/system_clipboard"
 // Recognition results and selection remain caller-owned in this viewer only.
-using UI :: #import "kryon/Widgets";
+#import "kryon/session"
+#import "kryon/geometry"
+Image :: #import "kryon/image";
+Box :: #import "kryon/box";
 Input :: #import "kryon/tree_input";
 #import "std/json_scan"
 #import "std/text_buffer"
@@ -87,8 +92,8 @@ Draw :: (session: Session, image: string, canvas: Rectangle, enabled: bool) {
     shown := Rectangle.{canvas.x + (canvas.width - cast(float32)width * scale) / 2.0,
         canvas.y + (canvas.height - cast(float32)height * scale) / 2.0,
         cast(float32)width * scale, cast(float32)height * scale}
-    props: ImageProps; props.key = 5400000; props.asset_path = image; props.alt_text = "Select detected text in photo"; props.bounds = shown
-    props.fit = ImageFit.ImageFitContain; Image(session, props)
+    props: Image.Props; props.key = 5400000; props.asset_path = image; props.alt_text = "Select detected text in photo"; props.bounds = shown
+    props.fit = Image.ImageFit.ImageFitContain; Image.Draw(session, props)
     pointer := Input.PointerSample(session)
     if enabled && pointer.pressed && Input.PointInBounds(pointer.x, pointer.y, shown) {
         dragging = true; anchor_x = pointer.x; anchor_y = pointer.y
@@ -107,8 +112,8 @@ Draw :: (session: Session, image: string, canvas: Rectangle, enabled: bool) {
             word.picked = bounds.x <= right && bounds.x + bounds.width >= left && bounds.y <= bottom && bounds.y + bounds.height >= top
             changed = true
         }
-        box: BoxProps; box.key = cast(u64)(5400100 + i); box.bounds = bounds
-        box.border = Color.{70, 150, 240, 220}; box.fill = ifx word.picked then Color.{70, 150, 240, 110} else Color.{0, 0, 0, 0}; Box(session, box)
+        box: Box.Props; box.key = cast(u64)(5400100 + i); box.bounds = bounds
+        box.border = Color.{70, 150, 240, 220}; box.fill = ifx word.picked then Color.{70, 150, 240, 110} else Color.{0, 0, 0, 0}; Box.Draw(session, box)
     }
     if enabled && pointer.pressed {
         if clicked >= 0 && clicked == click_word && frame - click_frame <= 20 {

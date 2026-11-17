@@ -5,7 +5,7 @@ UTF8 :: #import "std/utf8";
 #import "std/byte_text_linux"
 using Vectors :: #import "std/vec";
 c :: #system_library "c";
-Native :: #import "daochi_client/crypto_native";
+Native :: #import "mesh_client/crypto_native";
 
 // The recovery file layer owns PHOTOS-RECOVERY\x01 and identity JSON. This is
 // exactly its existing salt[16] + nonce[24] + ciphertext/tag payload.

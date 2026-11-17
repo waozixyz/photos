@@ -7,7 +7,7 @@ App :: #import "app_lock";
 Access :: #import "access_registry";
 Wire :: #import "sync_crypto";
 Auth :: #import "vault_auth";
-Native :: #import "daochi_client/crypto_native";
+Native :: #import "mesh_client/crypto_native";
 Kit :: #import "kit";
 Files :: #import "std/file";
 Tree :: #import "std/file_tree_linux";

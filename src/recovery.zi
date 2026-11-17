@@ -10,7 +10,7 @@ Vault :: #import "vault";
 App :: #import "app_lock";
 Guest :: #import "guest";
 Access :: #import "access_registry";
-Native :: #import "daochi_client/crypto_native";
+Native :: #import "mesh_client/crypto_native";
 Files :: #import "std/file";
 Tree :: #import "std/file_tree_linux";
 SQL :: #import "sqlite/SQLite";

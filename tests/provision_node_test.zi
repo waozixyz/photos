@@ -70,14 +70,21 @@ Run :: (root: string) -> s32 {
         if !Kit.Expect(!success && error!="" && finished,"malformed identity/policy or outward replication refuses registration") { return 5 }
     }
     environment:=Kit.Join(root,"node.env")
-    if !Files.WriteEntireFile(environment,"# synthetic\nDAOCHI_ADMIN_TOKEN='operator synthetic' # retained comment\n") { return 6 }
+    if !Files.WriteEntireFile(environment,"# synthetic\nMESH_ADMIN_TOKEN='operator synthetic' # retained comment\n") { return 6 }
     Base(*plan,404,"missing"); plan.count=3
     plan.items[2]=Fixture.StepFor("POST","/api/v1/apps",201,Active)
     plan.items[2].admin="operator synthetic"; plan.items[2].body_hash=Fixture.Hash(Tx.Bytes(Provision.Registration))
     success,error,finished=Call(*plan,environment,*result)
     if !Kit.Expect(success && error=="" && finished,"missing registration creates exact native payload with parsed operator header") { return 7 }
+    // Old operator files still work, while new keys override old values.
+    for mode: 0..1 {
+        operator:=ifx mode==0 then "DAOCHI_ADMIN_TOKEN='operator synthetic'\n" else "DAOCHI_ADMIN_TOKEN='old token'\nDAOCHI_BASE_URL=http://127.0.0.1:1\nMESH_ADMIN_TOKEN='operator synthetic'\nMESH_BASE_URL=\n"
+        if !Files.WriteEntireFile(environment,operator) { return 21 }
+        success,error,finished=Call(*plan,environment,*result)
+        if !Kit.Expect(success && error=="" && finished,"legacy operator keys and Mesh precedence") { return 22 }
+    }
     // An empty token may use only this environment's sibling fallback.
-    if !Files.WriteEntireFile(environment,"DAOCHI_ADMIN_TOKEN=\n") || !Files.WriteEntireFile(Kit.Join(root,"admin-token"),"  sibling-token\n") { return 8 }
+    if !Files.WriteEntireFile(environment,"DAOCHI_ADMIN_TOKEN=old-token\nMESH_ADMIN_TOKEN=\n") || !Files.WriteEntireFile(Kit.Join(root,"admin-token"),"  sibling-token\n") { return 8 }
     plan.items[2].admin="sibling-token"
     success,error,finished=Call(*plan,environment,*result)
     if !Kit.Expect(success && error=="" && finished,"matching sibling admin-token fallback") { return 9 }
@@ -86,13 +93,13 @@ Run :: (root: string) -> s32 {
     if !Kit.Expect(!success && error=="Local node operator authorization is unavailable" && finished,"missing named environment does not borrow another credential file") { return 10 }
     for mode: 0..5 {
         sentinel:=Kit.Join(root,"injection-must-not-run")
-        injection: Vec(u8); BuilderPrint(*injection,"DAOCHI_ADMIN_TOKEN=$(touch %)\n",sentinel)
-        value:=ifx mode==0 then "DAOCHI_ADMIN_TOKEN='unterminated\n" else ifx mode==1 then "DAOCHI_ADMIN_TOKEN=one two\n" else ifx mode==2 then TextFromBytes(Wire.OutputBytes(*injection)) else ifx mode==3 then "DAOCHI_ADMIN_TOKEN=\"bad\rheader\"\n" else ifx mode==4 then "DAOCHI_ADMIN_TOKEN=token\nDAOCHI_BASE_URL=http://127.0.0.1:1\n" else "DAOCHI_ADMIN_TOKEN=token\nDAOCHI_ADDR=example.invalid:18080\n"
+        injection: Vec(u8); BuilderPrint(*injection,"MESH_ADMIN_TOKEN=$(touch %)\n",sentinel)
+        value:=ifx mode==0 then "MESH_ADMIN_TOKEN='unterminated\n" else ifx mode==1 then "MESH_ADMIN_TOKEN=one two\n" else ifx mode==2 then TextFromBytes(Wire.OutputBytes(*injection)) else ifx mode==3 then "MESH_ADMIN_TOKEN=\"bad\rheader\"\n" else ifx mode==4 then "MESH_ADMIN_TOKEN=token\nMESH_BASE_URL=http://127.0.0.1:1\n" else "MESH_ADMIN_TOKEN=token\nMESH_ADDR=example.invalid:18080\n"
         if !Files.WriteEntireFile(environment,value) { return 11 }
         success,error,finished=Call(*plan,environment,*result)
         if !Kit.Expect(!success && error!="" && finished && !Files.PathExists(sentinel),"malformed/injection/mismatched credentials are data, never executed or posted") { return 12 }
     }
-    if !Files.WriteEntireFile(environment,"DAOCHI_ADMIN_TOKEN='literal$(id)'\n") { return 13 }
+    if !Files.WriteEntireFile(environment,"MESH_ADMIN_TOKEN='literal$(id)'\n") { return 13 }
     plan.count=3; plan.items[2]=Fixture.StepFor("POST","/api/v1/apps",201,Active); plan.items[2].admin="literal$(id)"
     success,error,finished=Call(*plan,environment,*result)
     if !Kit.Expect(success && error=="" && finished,"quoted shell syntax is retained literally, without expansion") { return 14 }
@@ -102,7 +109,7 @@ Run :: (root: string) -> s32 {
         if !VecResize(token,length) { return 17 }
         for index: 0..length-1 { token[index]=107 }
         tokenText:=TextFromBytes(Wire.OutputBytes(*token))
-        BuilderPrint(*content,"DAOCHI_ADMIN_TOKEN='%'\n",tokenText)
+        BuilderPrint(*content,"MESH_ADMIN_TOKEN='%'\n",tokenText)
         if !Files.WriteEntireFile(environment,TextFromBytes(Wire.OutputBytes(*content))) { return 18 }
         Base(*plan,404,"missing")
         if length<8192 {
@@ -112,7 +119,7 @@ Run :: (root: string) -> s32 {
         if !finished || (length<8192 && !success) { print("Credential boundary failed: % bytes, %\n",length,error) }
         if !Kit.Expect(finished && (ifx length<8192 then success && error=="" else !success && error=="Malformed local node operator authorization"),"long token and exact 8191-byte header bound") { return 19 }
     }
-    if !Files.WriteEntireFile(environment,"DAOCHI_ADMIN_TOKEN='literal$(id)'\n") { return 20 }
+    if !Files.WriteEntireFile(environment,"MESH_ADMIN_TOKEN='literal$(id)'\n") { return 20 }
     // Report HTTP errors without returning response bodies or credentials.
     for mode: 0..2 {
         Base(*plan,ifx mode==0 then 500 else 404,"PRIVATE_RESPONSE_BODY")

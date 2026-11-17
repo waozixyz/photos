@@ -1,14 +1,14 @@
 // Camera originals reach only the owner's pinned ThinkPad node. This module
-// builds the exact Daochi v6 request bytes from the validated identity; the
+// builds the exact Mesh v6 request bytes from the validated identity; the
 // platform adapter owns HTTP, staged files and scheduling. Keys and plaintext
-// never enter its results except as Daochi-sealed ciphertext.
+// never enter its results except as Mesh-sealed ciphertext.
 #scope_module
 Identity :: #import "backup_identity";
 Crypto :: #import "backup_crypto";
 Policy :: #import "node_policy";
-Record :: #import "daochi_client/record";
-Native :: #import "daochi_client/crypto_native";
-#import "daochi_client/wire"
+Record :: #import "mesh_client/record";
+Native :: #import "mesh_client/crypto_native";
+#import "mesh_client/wire"
 UTF8 :: #import "std/utf8";
 #import "std/json_scan"
 #import "std/byte_text_linux"

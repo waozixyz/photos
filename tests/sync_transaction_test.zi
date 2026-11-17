@@ -1,6 +1,6 @@
 Transaction :: #import "sync_transaction";
 Wire :: #import "sync_crypto";
-Native :: #import "daochi_client/crypto_native";
+Native :: #import "mesh_client/crypto_native";
 Account :: #import "account_sign";
 Test :: #import "sync_crypto_test";
 JSON :: #import "std/json_document";
@@ -31,11 +31,9 @@ Unhex :: (text: string,out: []u8) -> bool {
 Field :: (json: *JSON.JsonDocument,name: string) -> string {
     return JSON.JsonString(json,JSON.JsonMember(json,json.root,name))
 }
-main :: () -> s32 {
-    public: Vec(u8); private: Vec(u8); seed: Vec(u8); out: Vec(u8); retry: Vec(u8)
-    defer { Wire.ClearOutput(*private); Wire.ClearOutput(*seed); Wire.ClearOutput(*out); Wire.ClearOutput(*retry) }
-    if !Test.Expect(Test.Fixture("account-public.bin",*public) && Test.Fixture("account-secret.bin",*private) && Test.Fixture("key.bin",*seed),"synthetic transaction keys") { return 1 }
-    pk:=VecSlice(public,0,public.count); sk:=VecSlice(private,0,private.count); device:=VecSlice(seed,0,seed.count)
+CheckTransaction :: (pk: []u8, sk: []u8, device: []u8) -> s32 {
+    out: Vec(u8); retry: Vec(u8)
+    defer { Wire.ClearOutput(*out); Wire.ClearOutput(*retry) }
     digest: [32]u8; account: [32]u8; devicePublic: [32]u8; deviceID: [32]u8
     if !Native.Digest(Bytes("synthetic request body"),digest[: ]) || !Native.Digest(pk,account[: ]) ||
         !Native.DevicePublic(device,devicePublic[: ]) || !Native.Digest(devicePublic[: ],deviceID[: ]) { return 1 }
@@ -65,5 +63,18 @@ main :: () -> s32 {
         !Transaction.BuildTransaction(pk,sk,device,6,"/api/v1/sync",digest[: ],1,*out) && Test.Wiped(*out) &&
         !Transaction.BuildTransaction(pk,sk,device,2,"/api/v1/sync",digest[: 31],1,*out) && Test.Wiped(*out) &&
         !Transaction.BuildTransaction(pk,sk,device,2,"/api/v1/sync",digest[: ],0,*out) && Test.Wiped(*out), "transaction key/digest/method/expiration bounds") { return 1 }
-    print("sync_transaction: local tests passed\n"); return 0
+    return 0
+}
+
+main :: () -> s32 {
+    public: Vec(u8); private: Vec(u8); seed: Vec(u8)
+    defer { Wire.ClearOutput(*private); Wire.ClearOutput(*seed) }
+    if !Test.Expect(Test.Fixture("account-public.bin",*public) && Test.Fixture("account-secret.bin",*private) && Test.Fixture("key.bin",*seed),"synthetic transaction keys") { return 1 }
+    result: s32
+    {
+        pk:=VecSlice(public,0,public.count); sk:=VecSlice(private,0,private.count); device:=VecSlice(seed,0,seed.count)
+        result = CheckTransaction(pk, sk, device)
+    }
+    if result == 0 { print("sync_transaction: local tests passed\n") }
+    return result
 }
