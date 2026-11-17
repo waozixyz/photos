@@ -4,15 +4,15 @@ module_roots = ["."]
 
 [toolchain]
 git = "https://github.com/ziranlang/ziran.git"
-ref = "d17c7aa1e093066ef03f307a45f6966dd9b29d4b"
+ref = "e0367fa9c5731dcf9bb84ed7f3d294570d8c0bda"
 
 [dependencies.kryon]
 git = "https://github.com/kryonlabs/kryon.git"
-ref = "1b290f19aa1a4069c908a4687f04458c58a2b658"
+ref = "3f72441949d4e16094834fa9220e5d7fa77a0ac0"
 
 [dependencies.apps]
 git = "https://github.com/waozixyz/apps.git"
-ref = "67ed956f4401b50c6140cde12c47789d39c0f90a"
+ref = "40f598a1719bc99bbef7b61649aa168e923ef1f5"
 
 [dependencies.mingcute]
 git = "https://github.com/kryonlabs/mingcute.git"
